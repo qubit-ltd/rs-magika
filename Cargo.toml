@@ -1,0 +1,50 @@
+[package]
+name = "qubit-magika"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Haixing Hu <starfish.hu@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/qubit-ltd/rs-magika"
+description = "Magika-backed MIME detector integration for qubit-mime"
+homepage = "https://github.com/qubit-ltd/rs-magika"
+documentation = "https://docs.rs/qubit-magika"
+readme = "README.md"
+keywords = ["mime", "magika", "detection", "file", "qubit"]
+categories = ["filesystem", "parser-implementations"]
+exclude = [
+    "coverage.sh",
+    "COVERAGE.md",
+    "COVERAGE.zh_CN.md",
+    ".circleci/*",
+    "ci-check.sh",
+    ".llvm-cov.toml",
+    ".cargo-audit.toml.example",
+]
+
+[lib]
+name = "qubit_magika"
+doctest = true
+
+[features]
+default = ["bundled-onnxruntime"]
+bundled-onnxruntime = ["ort/download-binaries", "ort/tls-native"]
+
+[dependencies]
+magika = "1.1"
+thiserror = "2.0"
+
+qubit-mime = { path = "../rs-mime", version = "0.2" }
+qubit-io = "0.1"
+
+[dependencies.ort]
+version = "=2.0.0-rc.12"
+default-features = false
+optional = true
+
+[dev-dependencies]
+qubit-config = "0.12"
+tempfile = "3.23"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
