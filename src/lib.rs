@@ -26,5 +26,6 @@ pub use magika_mime_detector::{
 };
 pub use magika_mime_detector_provider::{
     MagikaMimeDetectorProvider,
+    register_default_mime_detector,
     register_mime_detector,
 };

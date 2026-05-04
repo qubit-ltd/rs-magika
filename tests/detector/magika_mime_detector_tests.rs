@@ -22,9 +22,11 @@ use std::path::Path;
 use qubit_magika::{
     MagikaMimeDetector,
     MagikaMimeDetectorProvider,
+    register_default_mime_detector,
     register_mime_detector,
 };
 use qubit_mime::{
+    BoxMimeDetector,
     CONFIG_MIME_DETECTOR_DEFAULT,
     MimeConfig,
     MimeDetectionPolicy,
@@ -45,7 +47,7 @@ use qubit_magika::{
 
 #[test]
 fn test_provider_registers_magika_aliases_with_mime_registry() {
-    let mut registry = MimeDetectorRegistry::with_builtin();
+    let mut registry = MimeDetectorRegistry::builtin();
     register_mime_detector(&mut registry).expect("magika provider should register");
 
     assert!(registry.find_provider("magika").is_some());
@@ -55,7 +57,7 @@ fn test_provider_registers_magika_aliases_with_mime_registry() {
 
 #[test]
 fn test_provider_creates_magika_detector_when_runtime_is_available() {
-    let mut registry = MimeDetectorRegistry::with_builtin();
+    let mut registry = MimeDetectorRegistry::builtin();
     register_mime_detector(&mut registry).expect("magika provider should register");
     let config = detector_config("magika");
 
@@ -66,6 +68,21 @@ fn test_provider_creates_magika_detector_when_runtime_is_available() {
     assert_eq!(
         Some("text/x-python".to_owned()),
         detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n"),
+    );
+}
+
+#[test]
+fn test_register_default_mime_detector_makes_wrappers_create_magika() {
+    register_default_mime_detector().expect("magika provider should register globally");
+    let config = detector_config("magika");
+
+    let Ok(detector) = BoxMimeDetector::from_config(&config) else {
+        return;
+    };
+
+    assert_eq!(
+        Some("text/x-python".to_owned()),
+        detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n")
     );
 }
 

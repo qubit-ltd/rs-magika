@@ -29,23 +29,22 @@ qubit-magika = "0.1"
 ## 快速开始
 
 ```rust
-use qubit_magika::register_mime_detector;
+use qubit_magika::register_default_mime_detector;
 use qubit_mime::{
+    BoxMimeDetector,
     CONFIG_MIME_DETECTOR_DEFAULT,
     MimeConfig,
-    MimeDetectorRegistry,
     MimeError,
 };
 
 fn main() -> Result<(), MimeError> {
-    let mut registry = MimeDetectorRegistry::with_builtin();
-    register_mime_detector(&mut registry)?;
+    register_default_mime_detector()?;
 
     let mut raw_config = qubit_config::Config::new();
     raw_config.set(CONFIG_MIME_DETECTOR_DEFAULT, "magika")?;
     let config = MimeConfig::from_config(&raw_config)?;
 
-    let detector = registry.create_default(&config)?;
+    let detector = BoxMimeDetector::from_config(&config)?;
     let mime_type = detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n");
 
     assert_eq!(Some("text/x-python".to_owned()), mime_type);

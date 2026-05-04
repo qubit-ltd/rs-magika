@@ -57,3 +57,18 @@ impl MimeDetectorProvider for MagikaMimeDetectorProvider {
 pub fn register_mime_detector(registry: &mut MimeDetectorRegistry) -> MimeResult<()> {
     registry.register(MagikaMimeDetectorProvider)
 }
+
+/// Registers the Magika MIME detector provider in the global default registry.
+///
+/// Detectors created through default `qubit-mime` wrapper constructors, such as
+/// [`BoxMimeDetector::from_config`](qubit_mime::BoxMimeDetector::from_config),
+/// can use Magika after this function succeeds.
+///
+/// # Errors
+/// Returns [`MimeError::DuplicateDetectorName`](qubit_mime::MimeError::DuplicateDetectorName)
+/// when a Magika id or alias is already registered in the default registry.
+/// Returns [`MimeError::DetectorBackend`](qubit_mime::MimeError::DetectorBackend)
+/// when the global default registry lock is poisoned.
+pub fn register_default_mime_detector() -> MimeResult<()> {
+    MimeDetectorRegistry::register_default(MagikaMimeDetectorProvider)
+}
