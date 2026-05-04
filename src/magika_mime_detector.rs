@@ -8,10 +8,14 @@
  *
  ******************************************************************************/
 //! Magika-backed MIME detector implementation.
+// qubit-style: allow coverage-cfg
 
 use std::io::SeekFrom;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    PoisonError,
+};
 
 use magika::{
     ContentType,
@@ -125,9 +129,7 @@ impl MagikaMimeDetector {
     where
         I: SyncInput,
     {
-        let mut session = self.session.lock().map_err(|error| {
-            MimeError::detector_backend("magika", format!("session lock poisoned: {error}"))
-        })?;
+        let mut session = self.session.lock().map_err(map_session_lock_error)?;
         let file_type = session
             .identify_content_sync(input)
             .map_err(map_magika_error)?;
@@ -146,9 +148,7 @@ impl MagikaMimeDetector {
     /// Returns [`MimeError::Io`] for file metadata/read failures, or
     /// [`MimeError::DetectorBackend`] when Magika inference fails.
     fn guess_from_magika_file(&self, file: &Path) -> MimeResult<Vec<String>> {
-        let mut session = self.session.lock().map_err(|error| {
-            MimeError::detector_backend("magika", format!("session lock poisoned: {error}"))
-        })?;
+        let mut session = self.session.lock().map_err(map_session_lock_error)?;
         let file_type = session.identify_file_sync(file).map_err(map_magika_error)?;
         Ok(file_type_to_mime(file_type).into_iter().collect())
     }
@@ -315,6 +315,17 @@ fn content_type_to_mime(content_type: ContentType) -> Option<String> {
     }
 }
 
+/// Converts a poisoned Magika session lock to a MIME error.
+///
+/// # Parameters
+/// - `error`: Poisoned lock error returned by [`Mutex::lock`].
+///
+/// # Returns
+/// MIME detector backend error carrying the lock poisoning context.
+fn map_session_lock_error<T>(error: PoisonError<T>) -> MimeError {
+    MimeError::detector_backend("magika", format!("session lock poisoned: {error}"))
+}
+
 /// Converts a Magika error to a MIME error.
 ///
 /// # Parameters
@@ -327,4 +338,33 @@ fn map_magika_error(error: magika::Error) -> MimeError {
         magika::Error::IOError(error) => MimeError::Io(error),
         error => MimeError::detector_backend("magika", error.to_string()),
     }
+}
+
+/// Exercises Magika session lock error conversion in coverage builds.
+///
+/// # Returns
+/// MIME detector backend error converted from a synthetic poisoned lock error.
+#[cfg(coverage)]
+pub fn coverage_map_session_lock_error() -> MimeError {
+    map_session_lock_error(PoisonError::new(()))
+}
+
+/// Exercises undefined content type filtering in coverage builds.
+///
+/// # Returns
+/// `None` when Magika reports its undefined content type.
+#[cfg(coverage)]
+pub fn coverage_undefined_content_type_to_mime() -> Option<String> {
+    content_type_to_mime(ContentType::Undefined)
+}
+
+/// Exercises non-I/O Magika error conversion in coverage builds.
+///
+/// # Returns
+/// MIME detector backend error converted from a synthetic ONNX Runtime error.
+#[cfg(all(coverage, feature = "ort"))]
+pub fn coverage_map_non_io_magika_error() -> MimeError {
+    map_magika_error(magika::Error::OrtError(ort::Error::new(
+        "coverage non-io error",
+    )))
 }

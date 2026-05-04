@@ -41,9 +41,8 @@ impl MimeDetectorProvider for MagikaMimeDetectorProvider {
 
     /// Creates a Magika-backed detector.
     fn create(&self, config: &MimeConfig) -> MimeResult<Box<dyn MimeDetector>> {
-        Ok(Box::new(MagikaMimeDetector::from_mime_config(
-            config.clone(),
-        )?))
+        let detector = MagikaMimeDetector::from_mime_config(config.clone())?;
+        Ok(Box::new(detector))
     }
 }
 

@@ -1,0 +1,2 @@
+coverage-cfg | src/lib.rs | Re-export coverage helpers only when cargo-llvm-cov builds with cfg(coverage).
+coverage-cfg | src/magika_mime_detector.rs | Exercise defensive error conversion branches that cannot be triggered reliably through public behavior.
