@@ -1,6 +1,8 @@
 # Qubit Magika
 
 [![CircleCI](https://circleci.com/gh/qubit-ltd/rs-magika.svg?style=shield)](https://circleci.com/gh/qubit-ltd/rs-magika)
+[![Coverage Status](https://coveralls.io/repos/github/qubit-ltd/rs-magika/badge.svg?branch=main)](https://coveralls.io/github/qubit-ltd/rs-magika?branch=main)
+[![Crates.io](https://img.shields.io/crates/v/qubit-magika.svg?color=blue)](https://crates.io/crates/qubit-magika)
 [![Rust](https://img.shields.io/badge/rust-1.94+-blue.svg?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![中文文档](https://img.shields.io/badge/文档-中文版-blue.svg)](README.zh_CN.md)
