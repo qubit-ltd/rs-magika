@@ -8,6 +8,7 @@
  *
  ******************************************************************************/
 
+use std::fs::File;
 use std::io::{
     Cursor,
     Error,
@@ -17,7 +18,10 @@ use std::io::{
     SeekFrom,
     Write,
 };
-use std::path::Path;
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 use qubit_magika::{
     MagikaMimeDetector,
@@ -44,6 +48,35 @@ use qubit_magika::{
     coverage_map_session_lock_error,
     coverage_undefined_content_type_to_mime,
 };
+
+/// Real fixture files used to exercise filesystem-backed Magika detection.
+const REAL_FILE_CASES: &[RealFileCase] = &[
+    RealFileCase {
+        relative_path: "tests/fixtures/real_files/script.py",
+        expected_mime: "text/x-python",
+    },
+    RealFileCase {
+        relative_path: "tests/fixtures/real_files/script.sh",
+        expected_mime: "text/x-shellscript",
+    },
+    RealFileCase {
+        relative_path: "tests/fixtures/real_files/page.html",
+        expected_mime: "text/html",
+    },
+    RealFileCase {
+        relative_path: "tests/fixtures/real_files/data.json",
+        expected_mime: "application/json",
+    },
+];
+
+/// Expected MIME result for a real fixture file.
+#[derive(Debug)]
+struct RealFileCase {
+    /// Path relative to the crate root.
+    relative_path: &'static str,
+    /// Expected MIME type name.
+    expected_mime: &'static str,
+}
 
 #[test]
 fn test_provider_registers_magika_aliases_with_mime_registry() {
@@ -270,6 +303,64 @@ fn test_magika_detector_detect_file_reports_missing_file_io_error() {
 }
 
 #[test]
+fn test_magika_detector_detect_file_recognizes_real_fixture_files() {
+    let Ok(detector) = MagikaMimeDetector::new() else {
+        return;
+    };
+
+    for case in REAL_FILE_CASES {
+        let path = fixture_path(case.relative_path);
+        let detected = detector
+            .detect_file(&path, MimeDetectionPolicy::VerifyContent)
+            .expect("real fixture file detection should succeed");
+
+        assert_eq!(
+            Some(case.expected_mime.to_owned()),
+            detected,
+            "fixture {} should be detected correctly",
+            case.relative_path,
+        );
+    }
+}
+
+#[test]
+fn test_magika_detector_detect_reader_recognizes_real_fixture_files_without_consuming_position() {
+    let Ok(detector) = MagikaMimeDetector::new() else {
+        return;
+    };
+
+    for case in REAL_FILE_CASES {
+        let path = fixture_path(case.relative_path);
+        let mut file = File::open(&path).expect("real fixture file should be readable");
+        file.seek(SeekFrom::Start(1))
+            .expect("real fixture file should be seekable");
+
+        let filename = path.to_string_lossy();
+        let detected = detector
+            .detect_reader(
+                &mut file,
+                Some(&filename),
+                MimeDetectionPolicy::VerifyContent,
+            )
+            .expect("real fixture reader detection should succeed");
+
+        assert_eq!(
+            Some(case.expected_mime.to_owned()),
+            detected,
+            "fixture {} should be detected correctly from a reader",
+            case.relative_path,
+        );
+        assert_eq!(
+            1,
+            file.stream_position()
+                .expect("real fixture reader position should be readable"),
+            "fixture {} reader position should be restored",
+            case.relative_path,
+        );
+    }
+}
+
+#[test]
 fn test_magika_detector_empty_content_returns_empty_file_mime_type() {
     let Ok(detector) = MagikaMimeDetector::new() else {
         return;
@@ -382,4 +473,9 @@ fn detector_config(default: &str) -> MimeConfig {
         .set(CONFIG_MIME_DETECTOR_DEFAULT, default)
         .expect("detector default should be configurable");
     MimeConfig::from_config(&config).expect("detector config should parse")
+}
+
+/// Builds an absolute path to a crate fixture file.
+fn fixture_path(relative_path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path)
 }

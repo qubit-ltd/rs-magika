@@ -1,0 +1,10 @@
+{
+  "name": "magika-fixture",
+  "enabled": true,
+  "items": [
+    "python",
+    "shell",
+    "html",
+    "json"
+  ]
+}
