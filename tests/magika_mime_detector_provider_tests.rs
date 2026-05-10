@@ -7,30 +7,32 @@
  *    Licensed under the Apache License, Version 2.0.
  *
  ******************************************************************************/
-use qubit_magika::{
-    MagikaMimeDetectorProvider,
-    register_mime_detector,
-};
+use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{
     MimeConfig,
-    MimeDetectorProvider,
     MimeDetectorRegistry,
+    ServiceProvider,
 };
 
 /// Test provider metadata and registry alias registration.
 #[test]
 fn test_magika_mime_detector_provider_metadata_and_registration() {
     let provider = MagikaMimeDetectorProvider;
+    let descriptor = provider
+        .descriptor()
+        .expect("magika provider descriptor should be valid");
 
-    assert_eq!(provider.id(), "magika");
+    assert_eq!(descriptor.id().as_str(), "magika");
     assert_eq!(
-        provider.aliases(),
-        &["magika-mime-detector", "MagikaMimeDetector"],
+        descriptor.aliases_as_str(),
+        vec!["magika-mime-detector", "magikamimedetector"],
     );
-    assert_eq!(provider.priority(), 20);
+    assert_eq!(descriptor.priority(), 20);
 
     let mut registry = MimeDetectorRegistry::builtin();
-    register_mime_detector(&mut registry).expect("magika provider should register");
+    registry
+        .register(MagikaMimeDetectorProvider)
+        .expect("magika provider should register");
 
     assert!(registry.find_provider("magika").is_some());
     assert!(registry.find_provider("magika-mime-detector").is_some());
@@ -43,7 +45,7 @@ fn test_magika_mime_detector_provider_create_uses_mime_config() {
     let provider = MagikaMimeDetectorProvider;
     let config = MimeConfig::default();
 
-    let Ok(detector) = provider.create(&config) else {
+    let Ok(detector) = provider.create_box(&config) else {
         return;
     };
 

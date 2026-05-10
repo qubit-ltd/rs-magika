@@ -8,13 +8,18 @@
  *
  ******************************************************************************/
 //! Provider for registering the Magika MIME detector with `qubit-mime`.
+// qubit-style: allow coverage-cfg
 
+#[cfg(coverage)]
+use qubit_mime::MimeError;
 use qubit_mime::{
     MimeConfig,
     MimeDetector,
-    MimeDetectorProvider,
-    MimeDetectorRegistry,
-    MimeResult,
+    MimeDetectorSpec,
+    ProviderCreateError,
+    ProviderDescriptor,
+    ProviderRegistryError,
+    ServiceProvider,
 };
 
 use crate::MagikaMimeDetector;
@@ -23,52 +28,36 @@ use crate::MagikaMimeDetector;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MagikaMimeDetectorProvider;
 
-impl MimeDetectorProvider for MagikaMimeDetectorProvider {
-    /// Gets the canonical provider identifier.
-    fn id(&self) -> &'static str {
-        "magika"
-    }
-
-    /// Gets Magika detector aliases.
-    fn aliases(&self) -> &'static [&'static str] {
-        &["magika-mime-detector", "MagikaMimeDetector"]
-    }
-
-    /// Gives Magika higher auto priority than built-in detectors.
-    fn priority(&self) -> i32 {
-        20
+impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
+    /// Gets Magika detector metadata.
+    #[inline]
+    fn descriptor(&self) -> Result<ProviderDescriptor, ProviderRegistryError> {
+        let descriptor = ProviderDescriptor::new("magika")
+            .expect("Magika detector provider id should be valid")
+            .with_aliases(&["magika-mime-detector", "MagikaMimeDetector"])
+            .expect("Magika detector provider aliases should be valid")
+            .with_priority(20);
+        Ok(descriptor)
     }
 
     /// Creates a Magika-backed detector.
-    fn create(&self, config: &MimeConfig) -> MimeResult<Box<dyn MimeDetector>> {
-        let detector = MagikaMimeDetector::from_mime_config(config.clone())?;
-        Ok(Box::new(detector))
+    #[inline]
+    fn create_box(
+        &self,
+        config: &MimeConfig,
+    ) -> Result<Box<dyn MimeDetector>, ProviderCreateError> {
+        MagikaMimeDetector::from_mime_config(config.clone())
+            .map(|detector| Box::new(detector) as Box<dyn MimeDetector>)
+            .map_err(|error| ProviderCreateError::failed(&error.to_string()))
     }
 }
 
-/// Registers the Magika MIME detector provider.
+/// Exercises provider creation error conversion in coverage builds.
 ///
-/// # Parameters
-/// - `registry`: Registry to extend.
-///
-/// # Errors
-/// Returns [`MimeError::DuplicateDetectorName`](qubit_mime::MimeError::DuplicateDetectorName)
-/// when a Magika id or alias is already registered.
-pub fn register_mime_detector(registry: &mut MimeDetectorRegistry) -> MimeResult<()> {
-    registry.register(MagikaMimeDetectorProvider)
-}
-
-/// Registers the Magika MIME detector provider in the global default registry.
-///
-/// Detectors created through default `qubit-mime` wrapper constructors, such as
-/// [`BoxMimeDetector::from_config`](qubit_mime::BoxMimeDetector::from_config),
-/// can use Magika after this function succeeds.
-///
-/// # Errors
-/// Returns [`MimeError::DuplicateDetectorName`](qubit_mime::MimeError::DuplicateDetectorName)
-/// when a Magika id or alias is already registered in the default registry.
-/// Returns [`MimeError::DetectorBackend`](qubit_mime::MimeError::DetectorBackend)
-/// when the global default registry lock is poisoned.
-pub fn register_default_mime_detector() -> MimeResult<()> {
-    MimeDetectorRegistry::register_default(MagikaMimeDetectorProvider)
+/// # Returns
+/// Provider creation error converted from a synthetic Magika detector error.
+#[cfg(coverage)]
+pub fn coverage_map_provider_create_error() -> ProviderCreateError {
+    let error = MimeError::detector_backend("magika", "coverage provider failure");
+    ProviderCreateError::failed(&error.to_string())
 }

@@ -26,18 +26,15 @@ use std::path::{
 use qubit_magika::{
     MagikaMimeDetector,
     MagikaMimeDetectorProvider,
-    register_default_mime_detector,
-    register_mime_detector,
 };
 use qubit_mime::{
-    BoxMimeDetector,
     CONFIG_MIME_DETECTOR_DEFAULT,
     MimeConfig,
     MimeDetectionPolicy,
     MimeDetector,
-    MimeDetectorProvider,
     MimeDetectorRegistry,
     MimeError,
+    ServiceProvider,
 };
 use tempfile::NamedTempFile;
 
@@ -45,6 +42,7 @@ use tempfile::NamedTempFile;
 use qubit_magika::coverage_map_non_io_magika_error;
 #[cfg(coverage)]
 use qubit_magika::{
+    coverage_map_provider_create_error,
     coverage_map_session_lock_error,
     coverage_undefined_content_type_to_mime,
 };
@@ -81,7 +79,9 @@ struct RealFileCase {
 #[test]
 fn test_provider_registers_magika_aliases_with_mime_registry() {
     let mut registry = MimeDetectorRegistry::builtin();
-    register_mime_detector(&mut registry).expect("magika provider should register");
+    registry
+        .register(MagikaMimeDetectorProvider)
+        .expect("magika provider should register");
 
     assert!(registry.find_provider("magika").is_some());
     assert!(registry.find_provider("magika-mime-detector").is_some());
@@ -91,10 +91,12 @@ fn test_provider_registers_magika_aliases_with_mime_registry() {
 #[test]
 fn test_provider_creates_magika_detector_when_runtime_is_available() {
     let mut registry = MimeDetectorRegistry::builtin();
-    register_mime_detector(&mut registry).expect("magika provider should register");
+    registry
+        .register(MagikaMimeDetectorProvider)
+        .expect("magika provider should register");
     let config = detector_config("magika");
 
-    let Ok(detector) = registry.create_default(&config) else {
+    let Ok(detector) = registry.create_default_box(&config) else {
         return;
     };
 
@@ -105,11 +107,15 @@ fn test_provider_creates_magika_detector_when_runtime_is_available() {
 }
 
 #[test]
-fn test_register_default_mime_detector_makes_wrappers_create_magika() {
-    register_default_mime_detector().expect("magika provider should register globally");
+fn test_register_default_provider_makes_default_registry_create_magika() {
+    MimeDetectorRegistry::register_default(MagikaMimeDetectorProvider)
+        .expect("magika provider should register globally");
     let config = detector_config("magika");
 
-    let Ok(detector) = BoxMimeDetector::from_config(&config) else {
+    let Ok(registry) = MimeDetectorRegistry::default_registry() else {
+        return;
+    };
+    let Ok(detector) = registry.create_default_box(&config) else {
         return;
     };
 
@@ -375,10 +381,17 @@ fn test_magika_detector_empty_content_returns_empty_file_mime_type() {
 #[test]
 fn test_provider_metadata_is_stable() {
     let provider = MagikaMimeDetectorProvider;
+    let descriptor = provider
+        .descriptor()
+        .expect("magika provider descriptor should be valid");
 
-    assert_eq!("magika", provider.id());
-    assert!(provider.aliases().contains(&"magika-mime-detector"));
-    assert!(provider.priority() > 0);
+    assert_eq!("magika", descriptor.id().as_str());
+    assert!(
+        descriptor
+            .aliases_as_str()
+            .contains(&"magika-mime-detector")
+    );
+    assert!(descriptor.priority() > 0);
 }
 
 #[test]
@@ -386,7 +399,7 @@ fn test_provider_creates_detector_directly() {
     let provider = MagikaMimeDetectorProvider;
     let config = MimeConfig::default();
 
-    let Ok(detector) = provider.create(&config) else {
+    let Ok(detector) = provider.create_box(&config) else {
         return;
     };
 
@@ -404,6 +417,11 @@ fn test_coverage_only_error_conversion_helpers_return_errors() {
         MimeError::DetectorBackend { .. },
     ));
     assert_eq!(None, coverage_undefined_content_type_to_mime());
+    assert!(
+        coverage_map_provider_create_error()
+            .reason()
+            .contains("coverage provider failure"),
+    );
 
     #[cfg(feature = "ort")]
     assert!(matches!(
