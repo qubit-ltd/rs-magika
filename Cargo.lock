@@ -780,9 +780,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-command"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f5d4975d029d9f55bde4afe1973f34faa6faeb08f8561dfe85d2ee94174158"
+checksum = "a53ef62ca8d75b195868686d5620137154a1c1aa34e9cd5414542058b9667d62"
 dependencies = [
  "log",
  "process-wrap",
@@ -791,9 +791,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-config"
-version = "0.12.2"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c5430c0abdfab166684f9592ab9f4c258864a6d3e716cbdd52a3261ebeba44c"
+checksum = "0aed6d63f0f04ddc5f59692557518b74854f21bf8443b69a546dae403d6ec70d"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -813,9 +813,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f5aa4c50ea71d2c565d3192ac23efd30d9ba9471f6a1c90c0c5f703ea18c581"
+checksum = "eee27a248b4d18e4b72f9cd7c306d33d2f406194f3448da34c1478b9dfb7942c"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -834,7 +834,7 @@ checksum = "0b246962577f68a58719a4fa44fae893b457b4518d9e6a0e4c3ddbf7ba97511b"
 
 [[package]]
 name = "qubit-magika"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "magika",
  "ort",
@@ -848,9 +848,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ad893f4c93b390cdd24ac85c921b677708845cd865d5eece9550df4693fee1d"
+checksum = "2ad5a8e9fb57a5bafe3b55eee87d15107814d68f084a51cd4a9844fa1b82837d"
 dependencies = [
  "qubit-codec",
  "qubit-command",
@@ -864,9 +864,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-serde"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4649d4fa2123159641fdd8a8ad1992b1010e7848c50f92acf54d13496b13d03"
+checksum = "3bb1366c9e6473a401c1c6f629066a648aa09dcf9ccf53c5be4b357d48b2ee64"
 dependencies = [
  "qubit-datatype",
  "serde",
@@ -885,9 +885,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-value"
-version = "0.7.4"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5174e72ce6be843100475eeef17d597e66ae4a80225e98c402ea0262335ead3e"
+checksum = "f573113950028a2a95dc7ddfd73d69c305c59aa3bae993ce88c569f821718a56"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -1227,9 +1227,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.2+spec-1.1.0"
+version = "0.9.12+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
+checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -1237,14 +1237,14 @@ dependencies = [
  "toml_datetime",
  "toml_parser",
  "toml_writer",
- "winnow",
+ "winnow 0.7.15",
 ]
 
 [[package]]
 name = "toml_datetime"
-version = "1.1.1+spec-1.1.0"
+version = "0.7.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
+checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
 dependencies = [
  "serde_core",
 ]
@@ -1255,7 +1255,7 @@ version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
- "winnow",
+ "winnow 1.0.2",
 ]
 
 [[package]]
@@ -1608,6 +1608,12 @@ checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link",
 ]
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 
 [[package]]
 name = "winnow"
