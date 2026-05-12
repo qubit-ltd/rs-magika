@@ -1,6 +1,6 @@
 [package]
 name = "qubit-magika"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -13,11 +13,12 @@ readme = "README.md"
 keywords = ["mime", "magika", "detection", "file", "qubit"]
 categories = ["filesystem", "parser-implementations"]
 exclude = [
-    "coverage.sh",
-    "COVERAGE.md",
-    "COVERAGE.zh_CN.md",
-    ".circleci/*",
+    "align-ci.sh",
     "ci-check.sh",
+    "coverage.sh",
+    "style-check.sh",
+    "update-submodule.sh",
+    ".github/*",
     ".llvm-cov.toml",
     ".cargo-audit.toml.example",
 ]
@@ -45,7 +46,7 @@ optional = true
 
 [dev-dependencies]
 qubit-config = "0.12"
-tempfile = "3.23"
+tempfile = "3.27"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
