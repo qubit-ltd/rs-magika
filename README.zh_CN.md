@@ -1,7 +1,7 @@
 # Qubit Magika
 
 [![Rust CI](https://github.com/qubit-ltd/rs-magika/actions/workflows/ci.yml/badge.svg)](https://github.com/qubit-ltd/rs-magika/actions/workflows/ci.yml)
-[![Coverage Status](https://coveralls.io/repos/github/qubit-ltd/rs-magika/badge.svg?branch=main)](https://coveralls.io/github/qubit-ltd/rs-magika?branch=main)
+[![Coverage](https://img.shields.io/endpoint?url=https://qubit-ltd.github.io/rs-magika/coverage-badge.json)](https://qubit-ltd.github.io/rs-magika/coverage/)
 [![Crates.io](https://img.shields.io/crates/v/qubit-magika.svg?color=blue)](https://crates.io/crates/qubit-magika)
 [![Rust](https://img.shields.io/badge/rust-1.94+-blue.svg?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -25,7 +25,7 @@ Magika 和 ONNX Runtime 依赖隔离在 `qubit-magika` 中，而不是直接放�
 [dependencies]
 qubit-config = "0.12"
 qubit-mime = "0.3"
-qubit-magika = "0.2"
+qubit-magika = "0.4.1"
 ```
 
 ## 快速开始
