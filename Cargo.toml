@@ -36,7 +36,7 @@ magika = "1.1"
 thiserror = "2.0"
 
 qubit-io = "0.1"
-qubit-spi = "0.2"
+qubit-spi = "0.3"
 qubit-mime = "0.5"
 
 [dependencies.ort]
