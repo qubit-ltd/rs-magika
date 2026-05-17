@@ -770,9 +770,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-codec"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5985b27c90209dd1664786e0e8a5b31f6d73f73f8585035ed9335dc8d216727"
+checksum = "0bd5db68ad6f22bd7e0868135eafd9e48d657fd0d814e2f06807567b817f4504"
 dependencies = [
  "base64",
  "thiserror 2.0.18",
@@ -780,20 +780,21 @@ dependencies = [
 
 [[package]]
 name = "qubit-command"
-version = "0.3.4"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a2151645cbb27059735cff4b812c7198f11865ce98e34bb64975bbfc0fd294f"
+checksum = "cc7b8086fcddf4ac66af75de68246a61f3f879bc46f0465b79b8ec57580cd8c3"
 dependencies = [
  "log",
  "process-wrap",
+ "qubit-sanitize",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "qubit-config"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be37766cec0a61bc3f6a6d405cb86f716f4dcc3cd73a2d77d67f961f32d52158"
+checksum = "56293a4a6eef842254ce0d78cbe3abde53fb1258fffb52c74b30b9cf0bbeaab7"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -813,9 +814,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58cb7e31a3ae3a651310ecf235b0dc42dd7f1d19d0dbabd768ba712b5a9ec7d7"
+checksum = "b69b637f6f6bcdf28837ad17bcb3729d59be2c45156cce974042a82b5f5b54bf"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -828,45 +829,56 @@ dependencies = [
 
 [[package]]
 name = "qubit-io"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3e06ce400c9940cc6dab188c571ce9ae0f2c99eef15d7c8bbf775e26b64d6a"
+checksum = "fa2c1ee9ffdd63e79bbd41fefeaba0ceeec50a65d713c96dbd4417b3033f38ff"
 
 [[package]]
 name = "qubit-magika"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "magika",
  "ort",
  "qubit-config",
  "qubit-io",
  "qubit-mime",
- "qubit-spi 0.3.1",
+ "qubit-spi",
  "tempfile",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "qubit-mime"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d24bc08f996a61861fd36f45594961f6883e0dc80528eaa906242e86b2fd4816"
+checksum = "945656fd8b9cdf94fdfa39ec9192f0e71367fec515249e6ec2ee625ffb5be860"
 dependencies = [
  "qubit-codec",
  "qubit-command",
  "qubit-config",
  "qubit-io",
- "qubit-spi 0.2.3",
+ "qubit-spi",
  "regex",
  "roxmltree",
  "thiserror 2.0.18",
 ]
 
 [[package]]
-name = "qubit-serde"
-version = "0.2.4"
+name = "qubit-sanitize"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb47160857ff49d81d0533a40ab99bf8ac1cee0c0d7548738b596891430e6efb"
+checksum = "e5287493ce872f04169e9b07a5a386d97280f1743c9dcfca6200a69e5fa73b1a"
+dependencies = [
+ "http",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "qubit-serde"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49ff773b5b3a47747aeda2d444200d310508b187f94fae59fea6f58f65d17260"
 dependencies = [
  "qubit-datatype",
  "serde",
@@ -875,19 +887,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-spi"
-version = "0.2.3"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecc2a3c7d4d05dc1465543cd2807a7fbcc9bec1623d07d1d2d144e0f20884965"
-dependencies = [
- "log",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "qubit-spi"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fed44c8a295b3b3cec6c8166456359907515a37b236a0e3c3e594882cf39d2be"
+checksum = "6b1299220b8c7abd7074efdd5785be07a75d60bcf3c0af5df81de99ecab77f01"
 dependencies = [
  "log",
  "thiserror 2.0.18",
@@ -895,9 +897,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-value"
-version = "0.7.7"
+version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6191c171f130bce3aa17a967c5a0a76f20b973d3bcb23cda368e54c23c2b851"
+checksum = "cae77b4808800191c650667b1316db4579201cf224e51a5355da28974be485b7"
 dependencies = [
  "bigdecimal",
  "chrono",
