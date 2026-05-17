@@ -25,7 +25,7 @@ Magika 和 ONNX Runtime 依赖隔离在 `qubit-magika` 中，而不是直接放�
 [dependencies]
 qubit-config = "0.12"
 qubit-mime = "0.3"
-qubit-magika = "0.5"
+qubit-magika = "0.6"
 ```
 
 ## 快速开始
