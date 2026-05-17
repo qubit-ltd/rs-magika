@@ -622,9 +622,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openssl"
-version = "0.10.79"
+version = "0.10.80"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf0b434746ee2832f4f0baf10137e1cabb18cbe6912c69e2e33263c45250f542"
+checksum = "a45fa2aa886c42762255da344f0a0d313e254066c46aad76f300c3d3da62d967"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -653,9 +653,9 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.115"
+version = "0.9.116"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "158fe5b292746440aa6e7a7e690e55aeb72d41505e2804c23c6973ad0e9c9781"
+checksum = "f28a22dc7140cda5f096e5e7724a6962ca81a7f8bfd2979f9b18c11af56318c4"
 dependencies = [
  "cc",
  "libc",
@@ -770,9 +770,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-codec"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c3636c5e2df67ffafce8618d1cefb9a678739ea165a74f687f0001c0aab7770"
+checksum = "d5985b27c90209dd1664786e0e8a5b31f6d73f73f8585035ed9335dc8d216727"
 dependencies = [
  "base64",
  "thiserror 2.0.18",
@@ -791,9 +791,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-config"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ceadd9d1941776c142595b82e124e00cc526e94c4a7f3426084890f6f7c7278"
+checksum = "be37766cec0a61bc3f6a6d405cb86f716f4dcc3cd73a2d77d67f961f32d52158"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -813,9 +813,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2576201f805d003a3ccb7e0e5f52ef478ae84ead478c48ddc4fa1b91f7c850ac"
+checksum = "58cb7e31a3ae3a651310ecf235b0dc42dd7f1d19d0dbabd768ba712b5a9ec7d7"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -828,20 +828,20 @@ dependencies = [
 
 [[package]]
 name = "qubit-io"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "778821e2bc293e985f57f78885ffc6dc8c7edc7854d28c00e813936e297758ce"
+checksum = "ed3e06ce400c9940cc6dab188c571ce9ae0f2c99eef15d7c8bbf775e26b64d6a"
 
 [[package]]
 name = "qubit-magika"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "magika",
  "ort",
  "qubit-config",
  "qubit-io",
  "qubit-mime",
- "qubit-spi",
+ "qubit-spi 0.3.1",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -856,7 +856,7 @@ dependencies = [
  "qubit-command",
  "qubit-config",
  "qubit-io",
- "qubit-spi",
+ "qubit-spi 0.2.3",
  "regex",
  "roxmltree",
  "thiserror 2.0.18",
@@ -864,9 +864,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-serde"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "642a080c6b1bf3e655c6050711741a7c8db0dcf5a2c70c399cc66053a956877b"
+checksum = "bb47160857ff49d81d0533a40ab99bf8ac1cee0c0d7548738b596891430e6efb"
 dependencies = [
  "qubit-datatype",
  "serde",
@@ -884,10 +884,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "qubit-value"
-version = "0.7.6"
+name = "qubit-spi"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b68405ad54d634c17d1fe002b79c0a7321e97a9fb4b2140bab8b1a2b4909b2fb"
+checksum = "fed44c8a295b3b3cec6c8166456359907515a37b236a0e3c3e594882cf39d2be"
+dependencies = [
+ "log",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "qubit-value"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6191c171f130bce3aa17a967c5a0a76f20b973d3bcb23cda368e54c23c2b851"
 dependencies = [
  "bigdecimal",
  "chrono",

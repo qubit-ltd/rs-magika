@@ -1,6 +1,6 @@
 [package]
 name = "qubit-magika"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -12,15 +12,15 @@ documentation = "https://docs.rs/qubit-magika"
 readme = "README.md"
 keywords = ["mime", "magika", "detection", "file", "qubit"]
 categories = ["filesystem", "parser-implementations"]
-exclude = [
-    "align-ci.sh",
-    "ci-check.sh",
-    "coverage.sh",
-    "style-check.sh",
-    "update-submodule.sh",
-    ".github/*",
-    ".llvm-cov.toml",
-    ".cargo-audit.toml.example",
+include = [
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/README.zh_CN.md",
+    "/doc/**/user_guide*.md",
+    "/examples/**",
+    "/src/**",
+    "/tests/**",
 ]
 
 [lib]
