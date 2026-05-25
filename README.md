@@ -26,7 +26,7 @@ your application provides ONNX Runtime through another linking strategy.
 [dependencies]
 qubit-config = "0.12"
 qubit-mime = "0.3"
-qubit-magika = "0.6"
+qubit-magika = "0.7"
 ```
 
 ## Quick Start

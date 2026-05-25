@@ -1,6 +1,6 @@
 [package]
 name = "qubit-magika"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -38,9 +38,9 @@ bundled-onnxruntime = ["ort/download-binaries", "ort/tls-native"]
 magika = "1.1"
 thiserror = "2.0"
 
-qubit-io = "0.1"
+qubit-io = "0.5"
 qubit-spi = "0.3"
-qubit-mime = "0.6"
+qubit-mime = "0.7"
 
 [dependencies.ort]
 version = "=2.0.0-rc.12"

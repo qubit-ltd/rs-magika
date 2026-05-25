@@ -28,9 +28,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "autocfg"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "base64"
@@ -66,9 +66,9 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "bumpalo"
-version = "3.20.2"
+version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
+checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "byteorder"
@@ -452,9 +452,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "js-sys"
-version = "0.3.98"
+version = "0.3.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67df7112613f8bfd9150013a0314e196f4800d3201ae742489d999db2f979f08"
+checksum = "142bc4740e452c1e57ade0cbc129f139c9093e354346f0872ef985f4f5cf5f11"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -494,15 +494,15 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "log"
-version = "0.4.29"
+version = "0.4.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "lzma-rust2"
-version = "0.15.7"
+version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1670343e58806300d87950e3401e820b519b9384281bbabfb15e3636689ffd69"
+checksum = "e20f57f9918e5bd7bc58c22cdd70a6afc7375d4dd9683af5f2b34bd3d2bba619"
 
 [[package]]
 name = "magika"
@@ -770,9 +770,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-codec"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bd5db68ad6f22bd7e0868135eafd9e48d657fd0d814e2f06807567b817f4504"
+checksum = "72b3825eb288e79a60ce921fc207147fe776bdbb6e77774d637325d469415e25"
 dependencies = [
  "base64",
  "thiserror 2.0.18",
@@ -780,9 +780,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-command"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc7b8086fcddf4ac66af75de68246a61f3f879bc46f0465b79b8ec57580cd8c3"
+checksum = "ef9688a73f838c47c15605cb67b4584ccabeca1df583a648c3e1b51721de26e5"
 dependencies = [
  "log",
  "process-wrap",
@@ -792,9 +792,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-config"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56293a4a6eef842254ce0d78cbe3abde53fb1258fffb52c74b30b9cf0bbeaab7"
+checksum = "47815cd5c5c1e8517c1cbba409b25e3f66d8e50ba227f87d11c87f6a80f34797"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -814,9 +814,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b69b637f6f6bcdf28837ad17bcb3729d59be2c45156cce974042a82b5f5b54bf"
+checksum = "0f9e4a0a8a57c0d8ba7535ae716be6dbcd60644b9394c182c23742ead05b1661"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -829,13 +829,27 @@ dependencies = [
 
 [[package]]
 name = "qubit-io"
-version = "0.1.4"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa2c1ee9ffdd63e79bbd41fefeaba0ceeec50a65d713c96dbd4417b3033f38ff"
+checksum = "79c24b5293ec08d1b21b0e3a0842d2969977bb1d7abff1c5fb865a85299b5c67"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "qubit-local-files"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "323d7686995fae8499eec3480f4e099058c6ffa58b5add9a1672c061bbb3404d"
+dependencies = [
+ "getrandom",
+ "libc",
+ "log",
+]
 
 [[package]]
 name = "qubit-magika"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "magika",
  "ort",
@@ -849,14 +863,15 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "945656fd8b9cdf94fdfa39ec9192f0e71367fec515249e6ec2ee625ffb5be860"
+checksum = "cb192280af03927fcd4fe88041fd763d86774ef8a295c85722d7545184dd7802"
 dependencies = [
  "qubit-codec",
  "qubit-command",
  "qubit-config",
  "qubit-io",
+ "qubit-local-files",
  "qubit-spi",
  "regex",
  "roxmltree",
@@ -865,9 +880,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-sanitize"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5287493ce872f04169e9b07a5a386d97280f1743c9dcfca6200a69e5fa73b1a"
+checksum = "676346cb1641a71f5c97368496b0fea66c4067f34e99169992d9b085da3f4d9b"
 dependencies = [
  "http",
  "serde_json",
@@ -876,9 +891,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-serde"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49ff773b5b3a47747aeda2d444200d310508b187f94fae59fea6f58f65d17260"
+checksum = "834f6fb5f818424eb1d2330d3223eac0f97ced251a8d2eee56b5e7a7007dd779"
 dependencies = [
  "qubit-datatype",
  "serde",
@@ -887,9 +902,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-spi"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b1299220b8c7abd7074efdd5785be07a75d60bcf3c0af5df81de99ecab77f01"
+checksum = "7d956772a7d58edabf94e1fab2fa4453470d78379b44fa09a80a3eb5cdd015d8"
 dependencies = [
  "log",
  "thiserror 2.0.18",
@@ -897,9 +912,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-value"
-version = "0.7.8"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cae77b4808800191c650667b1316db4579201cf224e51a5355da28974be485b7"
+checksum = "1e411647a467c9d467959da16ada3ae84aec2967d74e99e179452c2a53befbf0"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -1074,9 +1089,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "itoa",
  "memchr",
@@ -1394,9 +1409,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.121"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49ace1d07c165b0864824eee619580c4689389afa9dc9ed3a4c75040d82e6790"
+checksum = "3ed04576f974d2b2fba0f38c51dbc5518011e38c36bf1143164be765528fd409"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -1407,9 +1422,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.121"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e68e6f4afd367a562002c05637acb8578ff2dea1943df76afb9e83d177c8578"
+checksum = "916151b09da36bd82f6615cbf3a419e2f0ba23a03c6160e8e92eb6bd4aa1dec6"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -1417,9 +1432,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.121"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d95a9ec35c64b2a7cb35d3fead40c4238d0940c86d107136999567a4703259f2"
+checksum = "299047362ccbfce148b67ab7e73349f77748e00c8296f9542adfad2ad82c5c5e"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -1430,9 +1445,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.121"
+version = "0.2.122"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4e0100b01e9f0d03189a92b96772a1fb998639d981193d7dbab487302513441"
+checksum = "9a929b2c61f11ba3e9bc35b50c1f25cb38e0e892c0c231ae2b8cf78d5dad4437"
 dependencies = [
  "unicode-ident",
 ]
