@@ -134,9 +134,7 @@ impl MagikaMimeDetector {
         I: SyncInput,
     {
         let mut session = self.session.lock().map_err(map_session_lock_error)?;
-        let file_type = session
-            .identify_content_sync(input)
-            .map_err(map_magika_error)?;
+        let file_type = session.identify_content_sync(input).map_err(map_magika_error)?;
         Ok(file_type
             .content_type()
             .and_then(content_type_to_mime)
@@ -183,21 +181,15 @@ impl MimeDetector for MagikaMimeDetector {
     }
 
     /// Detects a MIME type from bytes and optional filename.
-    fn detect(
-        &self,
-        content: &[u8],
-        filename: Option<&str>,
-        policy: MimeDetectionPolicy,
-    ) -> Option<String> {
+    fn detect(&self, content: &[u8], filename: Option<&str>, policy: MimeDetectionPolicy) -> Option<String> {
         let from_filename = filename
             .map(|filename| self.guess_from_filename(filename))
             .unwrap_or_default();
-        let from_content =
-            if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
-                Vec::new()
-            } else {
-                self.guess_from_magika_input(content).unwrap_or_default()
-            };
+        let from_content = if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
+            Vec::new()
+        } else {
+            self.guess_from_magika_input(content).unwrap_or_default()
+        };
         self.core.select_result(
             &from_filename,
             &from_content,
@@ -217,31 +209,25 @@ impl MimeDetector for MagikaMimeDetector {
         let from_filename = filename
             .map(|filename| self.guess_from_filename(filename))
             .unwrap_or_default();
-        let from_content =
-            if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
-                Vec::new()
-            } else {
-                self.guess_from_reader(reader)?
-            };
-        Ok(self.core.select_result(
-            &from_filename,
-            &from_content,
-            filename,
-            policy,
-            DetectionSource::None,
-        ))
+        let from_content = if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
+            Vec::new()
+        } else {
+            self.guess_from_reader(reader)?
+        };
+        Ok(self
+            .core
+            .select_result(&from_filename, &from_content, filename, policy, DetectionSource::None))
     }
 
     /// Detects a MIME type from a local file.
     fn detect_file(&self, file: &Path, policy: MimeDetectionPolicy) -> MimeResult<Option<String>> {
         let filename = file.to_string_lossy();
         let from_filename = self.guess_from_filename(&filename);
-        let from_content =
-            if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
-                Vec::new()
-            } else {
-                self.guess_from_magika_file(file)?
-            };
+        let from_content = if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
+            Vec::new()
+        } else {
+            self.guess_from_magika_file(file)?
+        };
         Ok(self.core.select_result(
             &from_filename,
             &from_content,
@@ -370,7 +356,5 @@ pub fn coverage_undefined_content_type_to_mime() -> Option<String> {
 /// MIME detector backend error converted from a synthetic ONNX Runtime error.
 #[cfg(all(coverage, feature = "ort"))]
 pub fn coverage_map_non_io_magika_error() -> MimeError {
-    map_magika_error(magika::Error::OrtError(ort::Error::new(
-        "coverage non-io error",
-    )))
+    map_magika_error(magika::Error::OrtError(ort::Error::new("coverage non-io error")))
 }

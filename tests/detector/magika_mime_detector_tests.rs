@@ -145,9 +145,7 @@ fn test_magika_detector_exposes_core_and_repository() {
 
     assert_eq!(
         Some("application/pdf".to_owned()),
-        detector
-            .core()
-            .merge_results(&[], &["application/pdf".to_owned()])
+        detector.core().merge_results(&[], &["application/pdf".to_owned()])
     );
     assert!(detector.repository().get("application/pdf").is_some());
 
@@ -163,11 +161,7 @@ fn test_magika_detector_detect_prefers_filename_without_content_detection() {
 
     assert_eq!(
         Some("application/pdf".to_owned()),
-        detector.detect(
-            b"not a pdf",
-            Some("document.pdf"),
-            MimeDetectionPolicy::PreferFilename,
-        )
+        detector.detect(b"not a pdf", Some("document.pdf"), MimeDetectionPolicy::PreferFilename,)
     );
 }
 
@@ -195,11 +189,7 @@ fn test_magika_detector_reader_detection_prefers_filename_without_reading() {
     let mut reader = FailingReadSeek::new(b"not a pdf".to_vec(), true, None);
 
     let detected = detector
-        .detect_reader(
-            &mut reader,
-            Some("document.pdf"),
-            MimeDetectionPolicy::PreferFilename,
-        )
+        .detect_reader(&mut reader, Some("document.pdf"), MimeDetectionPolicy::PreferFilename)
         .expect("filename-preferred reader detection should skip content reads");
 
     assert_eq!(Some("application/pdf".to_owned()), detected);
@@ -214,11 +204,7 @@ fn test_magika_detector_restores_reader_position() {
     reader.set_position(2);
 
     let detected = detector
-        .detect_reader(
-            &mut reader,
-            Some("script.sh"),
-            MimeDetectionPolicy::VerifyContent,
-        )
+        .detect_reader(&mut reader, Some("script.sh"), MimeDetectionPolicy::VerifyContent)
         .expect("reader detection should not fail");
 
     assert_eq!(Some("text/x-shellscript".to_owned()), detected);
@@ -283,10 +269,7 @@ fn test_magika_detector_detect_file_prefers_filename_without_reading() {
     };
 
     let detected = detector
-        .detect_file(
-            Path::new("missing-document.pdf"),
-            MimeDetectionPolicy::PreferFilename,
-        )
+        .detect_file(Path::new("missing-document.pdf"), MimeDetectionPolicy::PreferFilename)
         .expect("filename-preferred file detection should skip content reads");
 
     assert_eq!(Some("application/pdf".to_owned()), detected);
@@ -343,11 +326,7 @@ fn test_magika_detector_detect_reader_recognizes_real_fixture_files_without_cons
 
         let filename = path.to_string_lossy();
         let detected = detector
-            .detect_reader(
-                &mut file,
-                Some(&filename),
-                MimeDetectionPolicy::VerifyContent,
-            )
+            .detect_reader(&mut file, Some(&filename), MimeDetectionPolicy::VerifyContent)
             .expect("real fixture reader detection should succeed");
 
         assert_eq!(
@@ -372,10 +351,7 @@ fn test_magika_detector_empty_content_returns_empty_file_mime_type() {
         return;
     };
 
-    assert_eq!(
-        Some("inode/x-empty".to_owned()),
-        detector.detect_by_content(b"")
-    );
+    assert_eq!(Some("inode/x-empty".to_owned()), detector.detect_by_content(b""));
 }
 
 #[test]
@@ -386,11 +362,7 @@ fn test_provider_metadata_is_stable() {
         .expect("magika provider descriptor should be valid");
 
     assert_eq!("magika", descriptor.id().as_str());
-    assert!(
-        descriptor
-            .aliases_as_str()
-            .contains(&"magika-mime-detector")
-    );
+    assert!(descriptor.aliases_as_str().contains(&"magika-mime-detector"));
     assert!(descriptor.priority() > 0);
 }
 

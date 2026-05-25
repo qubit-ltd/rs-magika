@@ -42,10 +42,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
 
     /// Creates a Magika-backed detector.
     #[inline]
-    fn create_box(
-        &self,
-        config: &MimeConfig,
-    ) -> Result<Box<dyn MimeDetector>, ProviderCreateError> {
+    fn create_box(&self, config: &MimeConfig) -> Result<Box<dyn MimeDetector>, ProviderCreateError> {
         MagikaMimeDetector::from_mime_config(config.clone())
             .map(|detector| Box::new(detector) as Box<dyn MimeDetector>)
             .map_err(|error| ProviderCreateError::failed(&error.to_string()))
