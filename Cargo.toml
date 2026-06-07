@@ -32,7 +32,7 @@ doctest = true
 
 [features]
 default = ["bundled-onnxruntime"]
-bundled-onnxruntime = ["ort/download-binaries", "ort/tls-native"]
+bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
 
 [dependencies]
 magika = "1.1"
