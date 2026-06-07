@@ -1,12 +1,10 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{
     MimeConfig,
@@ -39,7 +37,8 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
     assert!(registry.find_provider("MagikaMimeDetector").is_some());
 }
 
-/// Test provider create returns a detector when the Magika runtime is available.
+/// Test provider create returns a detector when the Magika runtime is
+/// available.
 #[test]
 fn test_magika_mime_detector_provider_create_uses_mime_config() {
     let provider = MagikaMimeDetectorProvider;

@@ -1,12 +1,10 @@
-/*******************************************************************************
- *
- *    Copyright (c) 2026 Haixing Hu.
- *
- *    SPDX-License-Identifier: Apache-2.0
- *
- *    Licensed under the Apache License, Version 2.0.
- *
- ******************************************************************************/
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Provider for registering the Magika MIME detector with `qubit-mime`.
 // qubit-style: allow coverage-cfg
 
@@ -42,7 +40,10 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
 
     /// Creates a Magika-backed detector.
     #[inline]
-    fn create_box(&self, config: &MimeConfig) -> Result<Box<dyn MimeDetector>, ProviderCreateError> {
+    fn create_box(
+        &self,
+        config: &MimeConfig,
+    ) -> Result<Box<dyn MimeDetector>, ProviderCreateError> {
         MagikaMimeDetector::from_mime_config(config.clone())
             .map(|detector| Box::new(detector) as Box<dyn MimeDetector>)
             .map_err(|error| ProviderCreateError::failed(&error.to_string()))
@@ -55,6 +56,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
 /// Provider creation error converted from a synthetic Magika detector error.
 #[cfg(coverage)]
 pub fn coverage_map_provider_create_error() -> ProviderCreateError {
-    let error = MimeError::detector_backend("magika", "coverage provider failure");
+    let error =
+        MimeError::detector_backend("magika", "coverage provider failure");
     ProviderCreateError::failed(&error.to_string())
 }
