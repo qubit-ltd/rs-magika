@@ -8,12 +8,11 @@
 //! Provider for registering the Magika MIME detector with `qubit-mime`.
 // qubit-style: allow coverage-cfg
 
-#[cfg(coverage)]
-use qubit_mime::MimeError;
 use qubit_mime::{
     MimeConfig,
     MimeDetector,
     MimeDetectorSpec,
+    MimeError,
     ProviderCreateError,
     ProviderDescriptor,
     ProviderRegistryError,
@@ -46,8 +45,21 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     ) -> Result<Box<dyn MimeDetector>, ProviderCreateError> {
         MagikaMimeDetector::from_mime_config(config.clone())
             .map(|detector| Box::new(detector) as Box<dyn MimeDetector>)
-            .map_err(|error| ProviderCreateError::failed(&error.to_string()))
+            .map_err(map_provider_create_error)
     }
+}
+
+/// Converts a Magika detector initialization error to a provider creation
+/// error.
+///
+/// # Parameters
+/// - `error`: MIME error returned while creating the detector.
+///
+/// # Returns
+/// Provider creation error carrying the detector initialization context.
+#[inline]
+fn map_provider_create_error(error: MimeError) -> ProviderCreateError {
+    ProviderCreateError::failed(&error.to_string())
 }
 
 /// Exercises provider creation error conversion in coverage builds.
@@ -58,5 +70,5 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
 pub fn coverage_map_provider_create_error() -> ProviderCreateError {
     let error =
         MimeError::detector_backend("magika", "coverage provider failure");
-    ProviderCreateError::failed(&error.to_string())
+    map_provider_create_error(error)
 }
