@@ -18,10 +18,12 @@ pub use magika_mime_detector::MagikaMimeDetector;
 pub use magika_mime_detector::coverage_map_non_io_magika_error;
 #[cfg(coverage)]
 pub use magika_mime_detector::{
-    coverage_map_session_lock_error, coverage_undefined_content_type_to_mime,
+    coverage_map_session_lock_error,
+    coverage_undefined_content_type_to_mime,
 };
 #[cfg(coverage)]
 pub use magika_mime_detector_provider::coverage_map_provider_create_error;
 pub use magika_mime_detector_provider::{
-    MagikaMimeDetectorProvider, magika_mime_detector_descriptor,
+    MagikaMimeDetectorProvider,
+    magika_mime_detector_descriptor,
 };

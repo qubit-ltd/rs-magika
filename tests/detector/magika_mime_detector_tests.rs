@@ -7,24 +7,46 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::io::{
+    Cursor,
+    Error,
+    ErrorKind,
+    Read,
+    Seek,
+    SeekFrom,
+    Write,
+};
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 use qubit_magika::{
-    MagikaMimeDetector, MagikaMimeDetectorProvider, magika_mime_detector_descriptor,
+    MagikaMimeDetector,
+    MagikaMimeDetectorProvider,
+    magika_mime_detector_descriptor,
 };
 use qubit_mime::{
-    CONFIG_MIME_DETECTOR_DEFAULT, MimeConfig, MimeDetectionPolicy, MimeDetector,
-    MimeDetectorRegistry, MimeDetectorSpec, MimeError,
+    CONFIG_MIME_DETECTOR_DEFAULT,
+    MimeConfig,
+    MimeDetectionPolicy,
+    MimeDetector,
+    MimeDetectorRegistry,
+    MimeDetectorSpec,
+    MimeError,
 };
-use qubit_spi::{ProviderRegistry, ServiceProvider};
+use qubit_spi::{
+    ProviderRegistry,
+    ServiceProvider,
+};
 use tempfile::NamedTempFile;
 
 #[cfg(all(coverage, feature = "ort"))]
 use qubit_magika::coverage_map_non_io_magika_error;
 #[cfg(coverage)]
 use qubit_magika::{
-    coverage_map_provider_create_error, coverage_map_session_lock_error,
+    coverage_map_provider_create_error,
+    coverage_map_session_lock_error,
     coverage_undefined_content_type_to_mime,
 };
 
@@ -192,7 +214,9 @@ fn test_magika_detector_reader_detection_prefers_filename_without_reading() {
             Some("document.pdf"),
             MimeDetectionPolicy::PreferFilename,
         )
-        .expect("filename-preferred reader detection should skip content reads");
+        .expect(
+            "filename-preferred reader detection should skip content reads",
+        );
 
     assert_eq!(Some("application/pdf".to_owned()), detected);
 }
@@ -222,7 +246,8 @@ fn test_magika_detector_reader_detection_restores_position_after_read_error() {
     let Ok(detector) = MagikaMimeDetector::new() else {
         return;
     };
-    let mut reader = FailingReadSeek::new(b"#!/bin/sh\necho hello\n".to_vec(), true, None);
+    let mut reader =
+        FailingReadSeek::new(b"#!/bin/sh\necho hello\n".to_vec(), true, None);
     reader
         .seek(SeekFrom::Start(2))
         .expect("test reader should seek to original position");
@@ -240,7 +265,11 @@ fn test_magika_detector_reader_detection_reports_restore_error() {
     let Ok(detector) = MagikaMimeDetector::new() else {
         return;
     };
-    let mut reader = FailingReadSeek::new(b"#!/bin/sh\necho hello\n".to_vec(), false, Some(2));
+    let mut reader = FailingReadSeek::new(
+        b"#!/bin/sh\necho hello\n".to_vec(),
+        false,
+        Some(2),
+    );
     reader
         .seek(SeekFrom::Start(2))
         .expect("test reader should seek to original position");
@@ -257,7 +286,8 @@ fn test_magika_detector_detect_file_reads_content_when_policy_requires() {
     let Ok(detector) = MagikaMimeDetector::new() else {
         return;
     };
-    let mut file = NamedTempFile::with_suffix(".txt").expect("temp file should be created");
+    let mut file = NamedTempFile::with_suffix(".txt")
+        .expect("temp file should be created");
     file.write_all(b"#!/usr/bin/env python3\nprint('hello')\n")
         .expect("temp file should be writable");
 
@@ -322,14 +352,15 @@ fn test_magika_detector_detect_file_recognizes_real_fixture_files() {
 }
 
 #[test]
-fn test_magika_detector_detect_reader_recognizes_real_fixture_files_without_consuming_position() {
+fn test_magika_reader_detects_real_fixtures_without_consuming_position() {
     let Ok(detector) = MagikaMimeDetector::new() else {
         return;
     };
 
     for case in REAL_FILE_CASES {
         let path = fixture_path(case.relative_path);
-        let mut file = File::open(&path).expect("real fixture file should be readable");
+        let mut file =
+            File::open(&path).expect("real fixture file should be readable");
         file.seek(SeekFrom::Start(1))
             .expect("real fixture file should be seekable");
 
@@ -412,7 +443,10 @@ fn test_coverage_only_error_conversion_helpers_return_errors() {
             .reason()
             .contains("coverage provider failure"),
     );
-    assert!(std::error::Error::source(&coverage_map_provider_create_error()).is_some(),);
+    assert!(
+        std::error::Error::source(&coverage_map_provider_create_error())
+            .is_some(),
+    );
 
     #[cfg(feature = "ort")]
     assert!(matches!(
@@ -436,7 +470,11 @@ struct FailingReadSeek {
 
 impl FailingReadSeek {
     /// Creates a seekable reader with configurable failure behavior.
-    fn new(content: Vec<u8>, fail_reads: bool, fail_restore_to: Option<u64>) -> Self {
+    fn new(
+        content: Vec<u8>,
+        fail_reads: bool,
+        fail_restore_to: Option<u64>,
+    ) -> Self {
         Self {
             inner: Cursor::new(content),
             fail_reads,

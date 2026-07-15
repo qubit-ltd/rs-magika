@@ -9,8 +9,18 @@
 
 use std::sync::Arc;
 
-use qubit_mime::{MimeConfig, MimeDetector, MimeDetectorSpec, MimeError};
-use qubit_spi::{ProviderDescriptor, ProviderError, ProviderId, ServiceProvider};
+use qubit_mime::{
+    MimeConfig,
+    MimeDetector,
+    MimeDetectorSpec,
+    MimeError,
+};
+use qubit_spi::{
+    ProviderDescriptor,
+    ProviderError,
+    ProviderId,
+    ServiceProvider,
+};
 
 use crate::MagikaMimeDetector;
 
@@ -20,7 +30,10 @@ pub struct MagikaMimeDetectorProvider;
 
 impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// Creates a Magika-backed detector.
-    fn create(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderError> {
+    fn create(
+        &self,
+        config: &MimeConfig,
+    ) -> Result<Arc<dyn MimeDetector>, ProviderError> {
         MagikaMimeDetector::from_mime_config(config.clone())
             .map(|detector| Arc::new(detector) as Arc<dyn MimeDetector>)
             .map_err(map_provider_create_error)
@@ -29,7 +42,8 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
 
 /// Converts a detector initialization error while preserving its source.
 fn map_provider_create_error(error: MimeError) -> ProviderError {
-    let reason = format!("failed to initialize the Magika MIME detector: {error}");
+    let reason =
+        format!("failed to initialize the Magika MIME detector: {error}");
     ProviderError::initialization_failed_with_source(reason, error)
 }
 
@@ -45,10 +59,12 @@ pub fn coverage_map_provider_create_error() -> ProviderError {
 /// Gets immutable registration metadata for the Magika detector provider.
 #[must_use]
 pub fn magika_mime_detector_descriptor() -> ProviderDescriptor {
-    ProviderDescriptor::new(ProviderId::new("magika").expect("Magika provider ID should be valid"))
-        .with_aliases(["magika-mime-detector", "MagikaMimeDetector"])
-        .expect("Magika provider aliases should be valid")
-        .with_priority(20)
+    ProviderDescriptor::new(
+        ProviderId::new("magika").expect("Magika provider ID should be valid"),
+    )
+    .with_aliases(["magika-mime-detector", "MagikaMimeDetector"])
+    .expect("Magika provider aliases should be valid")
+    .with_priority(20)
 }
 
 #[cfg(test)]

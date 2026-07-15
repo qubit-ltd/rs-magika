@@ -5,8 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_magika::{MagikaMimeDetectorProvider, magika_mime_detector_descriptor};
-use qubit_mime::{MimeConfig, MimeDetectorRegistry};
+use qubit_magika::{
+    MagikaMimeDetectorProvider,
+    magika_mime_detector_descriptor,
+};
+use qubit_mime::{
+    MimeConfig,
+    MimeDetectorRegistry,
+};
 use qubit_spi::ServiceProvider;
 
 /// Test provider metadata and registry alias registration.
