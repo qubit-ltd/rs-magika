@@ -24,30 +24,44 @@ your application provides ONNX Runtime through another linking strategy.
 
 ```toml
 [dependencies]
-qubit-config = "0.12"
-qubit-mime = "0.3"
-qubit-magika = "0.7"
+qubit-config = "0.14"
+qubit-mime = "0.9"
+qubit-magika = "0.8"
 ```
 
 ## Quick Start
 
 ```rust
-use qubit_magika::MagikaMimeDetectorProvider;
+use qubit_magika::{
+    MagikaMimeDetectorProvider,
+    magika_mime_detector_descriptor,
+};
 use qubit_mime::{
     CONFIG_MIME_DETECTOR_DEFAULT,
     MimeConfig,
     MimeDetectorRegistry,
     MimeError,
+    RepositoryMimeDetectorProvider,
+    repository_mime_detector_descriptor,
 };
 
 fn main() -> Result<(), MimeError> {
-    MimeDetectorRegistry::register_default(MagikaMimeDetectorProvider)?;
+    let mut builder = MimeDetectorRegistry::builder();
+    builder.register(
+        repository_mime_detector_descriptor(),
+        RepositoryMimeDetectorProvider,
+    )?;
+    builder.register(
+        magika_mime_detector_descriptor(),
+        MagikaMimeDetectorProvider,
+    )?;
+    let registry = builder.build();
 
     let mut raw_config = qubit_config::Config::new();
     raw_config.set(CONFIG_MIME_DETECTOR_DEFAULT, "magika")?;
     let config = MimeConfig::from_config(&raw_config)?;
 
-    let detector = MimeDetectorRegistry::default_registry()?.create_default_box(&config)?;
+    let detector = registry.create_default(&config)?;
     let mime_type = detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n");
 
     assert_eq!(Some("text/x-python".to_owned()), mime_type);
