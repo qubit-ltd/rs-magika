@@ -6,18 +6,11 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Provider for registering the Magika MIME detector with `qubit-mime`.
-// qubit-style: allow coverage-cfg
 
-use qubit_mime::{
-    MimeConfig,
-    MimeDetector,
-    MimeDetectorSpec,
-    MimeError,
-    ProviderCreateError,
-    ProviderDescriptor,
-    ProviderRegistryError,
-    ServiceProvider,
-};
+use std::sync::Arc;
+
+use qubit_mime::{MimeConfig, MimeDetector, MimeDetectorSpec, MimeError};
+use qubit_spi::{ProviderDescriptor, ProviderError, ProviderId, ServiceProvider};
 
 use crate::MagikaMimeDetector;
 
@@ -26,49 +19,53 @@ use crate::MagikaMimeDetector;
 pub struct MagikaMimeDetectorProvider;
 
 impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
-    /// Gets Magika detector metadata.
-    #[inline]
-    fn descriptor(&self) -> Result<ProviderDescriptor, ProviderRegistryError> {
-        let descriptor = ProviderDescriptor::new("magika")
-            .expect("Magika detector provider id should be valid")
-            .with_aliases(&["magika-mime-detector", "MagikaMimeDetector"])
-            .expect("Magika detector provider aliases should be valid")
-            .with_priority(20);
-        Ok(descriptor)
-    }
-
     /// Creates a Magika-backed detector.
-    #[inline]
-    fn create_box(
-        &self,
-        config: &MimeConfig,
-    ) -> Result<Box<dyn MimeDetector>, ProviderCreateError> {
+    fn create(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderError> {
         MagikaMimeDetector::from_mime_config(config.clone())
-            .map(|detector| Box::new(detector) as Box<dyn MimeDetector>)
+            .map(|detector| Arc::new(detector) as Arc<dyn MimeDetector>)
             .map_err(map_provider_create_error)
     }
 }
 
-/// Converts a Magika detector initialization error to a provider creation
-/// error.
-///
-/// # Parameters
-/// - `error`: MIME error returned while creating the detector.
-///
-/// # Returns
-/// Provider creation error carrying the detector initialization context.
-#[inline]
-fn map_provider_create_error(error: MimeError) -> ProviderCreateError {
-    ProviderCreateError::failed(&error.to_string())
+/// Converts a detector initialization error while preserving its source.
+fn map_provider_create_error(error: MimeError) -> ProviderError {
+    let reason = format!("failed to initialize the Magika MIME detector: {error}");
+    ProviderError::initialization_failed_with_source(reason, error)
 }
 
-/// Exercises provider creation error conversion in coverage builds.
-///
-/// # Returns
-/// Provider creation error converted from a synthetic Magika detector error.
+/// Exercises source-preserving provider error conversion in coverage builds.
 #[cfg(coverage)]
-pub fn coverage_map_provider_create_error() -> ProviderCreateError {
-    let error =
-        MimeError::detector_backend("magika", "coverage provider failure");
-    map_provider_create_error(error)
+pub fn coverage_map_provider_create_error() -> ProviderError {
+    map_provider_create_error(MimeError::detector_backend(
+        "magika",
+        "coverage provider failure",
+    ))
+}
+
+/// Gets immutable registration metadata for the Magika detector provider.
+#[must_use]
+pub fn magika_mime_detector_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor::new(ProviderId::new("magika").expect("Magika provider ID should be valid"))
+        .with_aliases(["magika-mime-detector", "MagikaMimeDetector"])
+        .expect("Magika provider aliases should be valid")
+        .with_priority(20)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use super::map_provider_create_error;
+    use qubit_mime::MimeError;
+
+    #[test]
+    fn provider_initialization_error_preserves_its_mime_error_source() {
+        let error = map_provider_create_error(MimeError::detector_backend(
+            "magika",
+            "synthetic initialization failure",
+        ));
+
+        assert!(error.reason().contains("synthetic initialization failure"));
+        assert!(Error::source(&error).is_some());
+    }
 }
