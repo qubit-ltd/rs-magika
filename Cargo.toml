@@ -1,6 +1,6 @@
 [package]
 name = "qubit-magika"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -39,8 +39,8 @@ magika = "1.1"
 thiserror = "2.0"
 
 qubit-io = "0.7"
-qubit-spi = "0.3"
-qubit-mime = "0.7"
+qubit-spi = { path = "../rs-spi", version = "0.4" }
+qubit-mime = { path = "../rs-mime", version = "0.9" }
 
 [dependencies.ort]
 version = "=2.0.0-rc.12"
@@ -48,7 +48,7 @@ default-features = false
 optional = true
 
 [dev-dependencies]
-qubit-config = "0.13"
+qubit-config = { path = "../rs-config", version = "0.14" }
 tempfile = "3.27"
 
 [lints.rust]
