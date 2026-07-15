@@ -5,36 +5,33 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_magika::MagikaMimeDetectorProvider;
-use qubit_mime::{
-    MimeConfig,
-    MimeDetectorRegistry,
-    ServiceProvider,
-};
+use qubit_magika::{MagikaMimeDetectorProvider, magika_mime_detector_descriptor};
+use qubit_mime::{MimeConfig, MimeDetectorRegistry};
+use qubit_spi::ServiceProvider;
 
 /// Test provider metadata and registry alias registration.
 #[test]
 fn test_magika_mime_detector_provider_metadata_and_registration() {
-    let provider = MagikaMimeDetectorProvider;
-    let descriptor = provider
-        .descriptor()
-        .expect("magika provider descriptor should be valid");
+    let descriptor = magika_mime_detector_descriptor();
 
     assert_eq!(descriptor.id().as_str(), "magika");
     assert_eq!(
-        descriptor.aliases_as_str(),
+        descriptor
+            .aliases()
+            .iter()
+            .map(|alias| alias.as_str())
+            .collect::<Vec<_>>(),
         vec!["magika-mime-detector", "magikamimedetector"],
     );
     assert_eq!(descriptor.priority(), 20);
 
-    let mut registry = MimeDetectorRegistry::builtin();
-    registry
-        .register(MagikaMimeDetectorProvider)
+    let mut builder = MimeDetectorRegistry::builder();
+    builder
+        .register(descriptor, MagikaMimeDetectorProvider)
         .expect("magika provider should register");
+    let registry = builder.build();
 
-    assert!(registry.find_provider("magika").is_some());
-    assert!(registry.find_provider("magika-mime-detector").is_some());
-    assert!(registry.find_provider("MagikaMimeDetector").is_some());
+    assert_eq!(vec!["magika"], registry.provider_ids());
 }
 
 /// Test provider create returns a detector when the Magika runtime is
@@ -44,7 +41,7 @@ fn test_magika_mime_detector_provider_create_uses_mime_config() {
     let provider = MagikaMimeDetectorProvider;
     let config = MimeConfig::default();
 
-    let Ok(detector) = provider.create_box(&config) else {
+    let Ok(detector) = provider.create(&config) else {
         return;
     };
 
