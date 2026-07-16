@@ -39,7 +39,7 @@ magika = "1.1"
 thiserror = "2.0"
 
 qubit-io = "0.7"
-qubit-spi = { path = "../rs-spi", version = "0.5" }
+qubit-spi = { path = "../rs-spi", version = "0.6" }
 qubit-mime = { path = "../rs-mime", version = "0.9" }
 
 [dependencies.ort]
