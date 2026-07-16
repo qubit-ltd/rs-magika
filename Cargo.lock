@@ -495,7 +495,7 @@ version = "0.3.0"
 
 [[package]]
 name = "qubit-spi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
