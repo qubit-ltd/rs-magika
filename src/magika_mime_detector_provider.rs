@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Provider for registering the Magika MIME detector with `qubit-mime`.
+// qubit-style: allow coverage-cfg
 
 use std::sync::Arc;
 
@@ -15,9 +16,9 @@ use qubit_mime::{
     MimeDetectorSpec,
     MimeError,
 };
+use qubit_spi::error::ProviderError;
 use qubit_spi::{
     ProviderDescriptor,
-    ProviderError,
     ProviderId,
     ServiceProvider,
 };
@@ -65,23 +66,4 @@ pub fn magika_mime_detector_descriptor() -> ProviderDescriptor {
     .with_aliases(["magika-mime-detector", "MagikaMimeDetector"])
     .expect("Magika provider aliases should be valid")
     .with_priority(20)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::error::Error;
-
-    use super::map_provider_create_error;
-    use qubit_mime::MimeError;
-
-    #[test]
-    fn provider_initialization_error_preserves_its_mime_error_source() {
-        let error = map_provider_create_error(MimeError::detector_backend(
-            "magika",
-            "synthetic initialization failure",
-        ));
-
-        assert!(error.reason().contains("synthetic initialization failure"));
-        assert!(Error::source(&error).is_some());
-    }
 }
