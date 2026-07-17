@@ -24,47 +24,64 @@ your application provides ONNX Runtime through another linking strategy.
 
 ```toml
 [dependencies]
-qubit-config = "0.14"
 qubit-mime = "0.9"
 qubit-magika = "0.8"
+qubit-spi = "0.8"
 ```
 
 ## Quick Start
 
 ```rust
-use qubit_magika::{
-    MagikaMimeDetectorProvider,
-    magika_mime_detector_descriptor,
-};
+use std::error::Error;
+
+use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{
-    CONFIG_MIME_DETECTOR_DEFAULT,
     MimeConfig,
+    MimeDetector,
     MimeDetectorRegistry,
-    MimeError,
-    RepositoryMimeDetectorProvider,
-    repository_mime_detector_descriptor,
 };
+use qubit_spi::{ProviderSelection, ServiceProvider};
 
-fn main() -> Result<(), MimeError> {
-    let mut builder = MimeDetectorRegistry::builder();
-    builder.register(
-        repository_mime_detector_descriptor(),
-        RepositoryMimeDetectorProvider,
-    )?;
-    builder.register(
-        magika_mime_detector_descriptor(),
-        MagikaMimeDetectorProvider,
-    )?;
-    let registry = builder.build();
+// App startup owns process-wide provider registration and policy.
+fn configure_app() -> Result<(), Box<dyn Error>> {
+    let registry = MimeDetectorRegistry::global();
+    registry.register(MagikaMimeDetectorProvider)?;
+    registry.set_default_selection(ProviderSelection::named("magika")?);
+    Ok(())
+}
 
-    let mut raw_config = qubit_config::Config::new();
-    raw_config.set(CONFIG_MIME_DETECTOR_DEFAULT, "magika")?;
-    let config = MimeConfig::from_config(&raw_config)?;
+// Library X can keep provider selection and detector configuration independent.
+fn library_x_with_explicit_requirements(
+    selection: &ProviderSelection,
+    config: &MimeConfig,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let provider = MimeDetectorRegistry::global().resolve(selection)?;
+    let detector = provider.create(config)?;
+    Ok(detector.detect_by_content(
+        b"#!/usr/bin/env python3\nprint('hello')\n",
+    ))
+}
 
-    let detector = registry.create_default(&config)?;
-    let mime_type = detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n");
+// Library X can also use both process-default selection and default config.
+fn library_x_with_defaults() -> Result<Option<String>, Box<dyn Error>> {
+    let provider = MimeDetectorRegistry::global().resolve_default()?;
+    let detector = provider.create_default()?;
+    Ok(detector.detect_by_filename("document.pdf"))
+}
 
-    assert_eq!(Some("text/x-python".to_owned()), mime_type);
+fn main() -> Result<(), Box<dyn Error>> {
+    configure_app()?;
+
+    let selection = ProviderSelection::named("magika")?;
+    let config = MimeConfig::default();
+    assert_eq!(
+        Some("text/x-python".to_owned()),
+        library_x_with_explicit_requirements(&selection, &config)?,
+    );
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        library_x_with_defaults()?,
+    );
     Ok(())
 }
 ```
@@ -80,3 +97,44 @@ fn main() -> Result<(), MimeError> {
 `MagikaMimeDetector` delegates filename-only detection to
 `qubit_mime::RepositoryMimeDetector`. Content, reader, and file detection use
 Magika inference, then return Magika's MIME type mapping.
+
+Provider selection and detector configuration are separate inputs. A
+`ProviderSelection` decides which registered provider may create the service;
+`MimeConfig` controls the detector instance after that provider is resolved.
+`qubit-magika` does not register itself automatically: the App explicitly
+controls process-wide registration and the default selection during startup.
+
+## Testing
+
+```bash
+# Core API with the default empty feature set
+cargo test --no-default-features
+
+# Core API plus regex validation
+cargo test --all-features
+
+# Project CI checks
+./ci-check.sh
+
+# Check code coverage
+./coverage.sh
+```
+
+## License
+
+Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the
+full license text.
+
+## Contributing
+
+Contributions are welcome. Please follow the Rust API guidelines, keep public
+API documentation and tests current, and run `./align-ci.sh` to format code and
+`./ci-check.sh` to satisfy CI requirements before submitting a pull request.
+
+## Author
+
+**Haixing Hu** - *Qubit Co. Ltd.*
+
+Repository: [https://github.com/qubit-ltd/rs-magika](https://github.com/qubit-ltd/rs-magika)
