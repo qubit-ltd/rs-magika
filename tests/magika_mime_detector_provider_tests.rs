@@ -32,11 +32,10 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
     );
     assert_eq!(descriptor.priority(), 20);
 
-    let mut builder = MimeDetectorRegistry::builder();
-    builder
+    let registry = MimeDetectorRegistry::default();
+    registry
         .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
-    let registry = builder.build();
 
     assert_eq!(
         vec!["magika"],
@@ -51,19 +50,18 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 /// Tests explicit Registry selection before configured detector creation.
 #[test]
 fn test_resolve_explicit_then_create_with_mime_config() {
-    let mut builder = MimeDetectorRegistry::builder();
-    builder
+    let registry = MimeDetectorRegistry::default();
+    registry
         .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
-    let registry = builder.build();
     let selection =
         ProviderSelection::named("magika").expect("selection should be valid");
     let provider = registry
-        .resolve(&selection)
+        .resolve_selected(&selection)
         .expect("magika provider should resolve");
     let config = MimeConfig::default();
 
-    let Ok(detector) = provider.create(&config) else {
+    let Ok(detector) = provider.create_configured(&config) else {
         return;
     };
 
@@ -84,10 +82,11 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
         .expect("Magika selection should be valid");
 
     let explicit_provider = registry
-        .resolve(&selection)
+        .resolve_selected(&selection)
         .expect("library code should explicitly resolve the App provider");
     let config = MimeConfig::default();
-    let Ok(explicit_detector) = explicit_provider.create(&config) else {
+    let Ok(explicit_detector) = explicit_provider.create_configured(&config)
+    else {
         return;
     };
     assert_eq!(
@@ -98,9 +97,9 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
     registry.set_default_selection(selection);
 
     let provider = registry
-        .resolve_default()
+        .resolve()
         .expect("library code should resolve the App-selected provider");
-    let Ok(detector) = provider.create_default() else {
+    let Ok(detector) = provider.create() else {
         return;
     };
 

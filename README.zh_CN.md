@@ -54,8 +54,8 @@ fn library_x_with_explicit_requirements(
     selection: &ProviderSelection,
     config: &MimeConfig,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    let provider = MimeDetectorRegistry::global().resolve(selection)?;
-    let detector = provider.create(config)?;
+    let provider = MimeDetectorRegistry::global().resolve_selected(selection)?;
+    let detector = provider.create_configured(config)?;
     Ok(detector.detect_by_content(
         b"#!/usr/bin/env python3\nprint('hello')\n",
     ))
@@ -63,8 +63,8 @@ fn library_x_with_explicit_requirements(
 
 // 库 X 也可以同时使用进程默认选择和默认配置。
 fn library_x_with_defaults() -> Result<Option<String>, Box<dyn Error>> {
-    let provider = MimeDetectorRegistry::global().resolve_default()?;
-    let detector = provider.create_default()?;
+    let provider = MimeDetectorRegistry::global().resolve()?;
+    let detector = provider.create()?;
     Ok(detector.detect_by_filename("document.pdf"))
 }
 

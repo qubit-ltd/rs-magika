@@ -49,7 +49,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     ///
     /// Returns [`ProviderCreationError`] when Magika or ONNX Runtime cannot
     /// initialize. The error preserves the underlying [`MimeError`] source.
-    fn create(
+    fn create_configured(
         &self,
         config: &MimeConfig,
     ) -> Result<Arc<dyn MimeDetector>, ProviderCreationError> {

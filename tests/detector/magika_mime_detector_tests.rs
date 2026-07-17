@@ -82,17 +82,16 @@ struct RealFileCase {
 
 #[test]
 fn test_provider_registers_magika_aliases_with_mime_registry() {
-    let mut builder = ProviderRegistry::<MimeDetectorSpec>::builder();
-    builder
+    let registry = ProviderRegistry::<MimeDetectorSpec>::default();
+    registry
         .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
-    let registry = builder.build();
 
     for selector in ["magika", "magika-mime-detector", "MagikaMimeDetector"] {
         let selection = ProviderSelection::named(selector)
             .expect("Magika selector should be valid");
         assert!(
-            registry.resolve(&selection).is_ok(),
+            registry.resolve_selected(&selection).is_ok(),
             "selector {selector} should resolve",
         );
     }
@@ -100,17 +99,16 @@ fn test_provider_registers_magika_aliases_with_mime_registry() {
 
 #[test]
 fn test_provider_creates_magika_detector_when_runtime_is_available() {
-    let mut builder = MimeDetectorRegistry::builder();
-    builder
+    let registry = MimeDetectorRegistry::default();
+    registry
         .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
-    let registry = builder.build();
     let config = detector_config("magika");
     let provider = registry
-        .resolve(config.mime_detector_selection())
+        .resolve_selected(config.mime_detector_selection())
         .expect("configured Magika provider should resolve");
 
-    let Ok(detector) = provider.create(&config) else {
+    let Ok(detector) = provider.create_configured(&config) else {
         return;
     };
 
@@ -122,18 +120,17 @@ fn test_provider_creates_magika_detector_when_runtime_is_available() {
 
 #[test]
 fn test_explicit_provider_assembly_creates_magika_without_global_state() {
-    let mut builder = MimeDetectorRegistry::builder();
-    builder
+    let registry = MimeDetectorRegistry::default();
+    registry
         .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
-    let registry = builder.build();
     let selection =
         ProviderSelection::named("magika").expect("selection should be valid");
     let provider = registry
-        .resolve(&selection)
+        .resolve_selected(&selection)
         .expect("Magika provider should resolve");
 
-    let Ok(detector) = provider.create_default() else {
+    let Ok(detector) = provider.create() else {
         return;
     };
 
@@ -424,7 +421,7 @@ fn test_provider_creates_detector_directly() {
     let provider = MagikaMimeDetectorProvider;
     let config = MimeConfig::default();
 
-    let Ok(detector) = provider.create(&config) else {
+    let Ok(detector) = provider.create_configured(&config) else {
         return;
     };
 
