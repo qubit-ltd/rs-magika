@@ -24,7 +24,6 @@ use std::path::{
 use qubit_magika::{
     MagikaMimeDetector,
     MagikaMimeDetectorProvider,
-    magika_mime_detector_descriptor,
 };
 use qubit_mime::{
     CONFIG_MIME_DETECTOR_DEFAULT,
@@ -36,7 +35,9 @@ use qubit_mime::{
     MimeError,
 };
 use qubit_spi::{
+    ProviderDefinition,
     ProviderRegistry,
+    ProviderSelection,
     ServiceProvider,
 };
 use tempfile::NamedTempFile;
@@ -83,31 +84,33 @@ struct RealFileCase {
 fn test_provider_registers_magika_aliases_with_mime_registry() {
     let mut builder = ProviderRegistry::<MimeDetectorSpec>::builder();
     builder
-        .register(
-            magika_mime_detector_descriptor(),
-            MagikaMimeDetectorProvider,
-        )
+        .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
     let registry = builder.build();
 
-    assert!(registry.find("magika").is_some());
-    assert!(registry.find("magika-mime-detector").is_some());
-    assert!(registry.find("MagikaMimeDetector").is_some());
+    for selector in ["magika", "magika-mime-detector", "MagikaMimeDetector"] {
+        let selection = ProviderSelection::named(selector)
+            .expect("Magika selector should be valid");
+        assert!(
+            registry.resolve(&selection).is_ok(),
+            "selector {selector} should resolve",
+        );
+    }
 }
 
 #[test]
 fn test_provider_creates_magika_detector_when_runtime_is_available() {
     let mut builder = MimeDetectorRegistry::builder();
     builder
-        .register(
-            magika_mime_detector_descriptor(),
-            MagikaMimeDetectorProvider,
-        )
+        .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
     let registry = builder.build();
     let config = detector_config("magika");
+    let provider = registry
+        .resolve(config.mime_detector_selection())
+        .expect("configured Magika provider should resolve");
 
-    let Ok(detector) = registry.create_default(&config) else {
+    let Ok(detector) = provider.create(&config) else {
         return;
     };
 
@@ -121,15 +124,16 @@ fn test_provider_creates_magika_detector_when_runtime_is_available() {
 fn test_explicit_provider_assembly_creates_magika_without_global_state() {
     let mut builder = MimeDetectorRegistry::builder();
     builder
-        .register(
-            magika_mime_detector_descriptor(),
-            MagikaMimeDetectorProvider,
-        )
+        .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
     let registry = builder.build();
-    let config = detector_config("magika");
+    let selection =
+        ProviderSelection::named("magika").expect("selection should be valid");
+    let provider = registry
+        .resolve(&selection)
+        .expect("Magika provider should resolve");
 
-    let Ok(detector) = registry.create_default(&config) else {
+    let Ok(detector) = provider.create_default() else {
         return;
     };
 
@@ -403,7 +407,7 @@ fn test_magika_detector_empty_content_returns_empty_file_mime_type() {
 
 #[test]
 fn test_provider_metadata_is_stable() {
-    let descriptor = magika_mime_detector_descriptor();
+    let descriptor = MagikaMimeDetectorProvider.descriptor();
 
     assert_eq!("magika", descriptor.id().as_str());
     assert!(
@@ -438,15 +442,13 @@ fn test_coverage_only_error_conversion_helpers_return_errors() {
         MimeError::DetectorBackend { .. },
     ));
     assert_eq!(None, coverage_undefined_content_type_to_mime());
+    let provider_error = coverage_map_provider_create_error();
     assert!(
-        coverage_map_provider_create_error()
-            .reason()
-            .contains("coverage provider failure"),
+        provider_error
+            .to_string()
+            .contains("coverage provider failure")
     );
-    assert!(
-        std::error::Error::source(&coverage_map_provider_create_error())
-            .is_some(),
-    );
+    assert!(std::error::Error::source(&provider_error).is_some(),);
 
     #[cfg(feature = "ort")]
     assert!(matches!(

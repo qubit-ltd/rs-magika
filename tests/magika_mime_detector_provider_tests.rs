@@ -5,20 +5,21 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use qubit_magika::{
-    MagikaMimeDetectorProvider,
-    magika_mime_detector_descriptor,
-};
+use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{
     MimeConfig,
     MimeDetectorRegistry,
 };
-use qubit_spi::ServiceProvider;
+use qubit_spi::{
+    ProviderDefinition,
+    ProviderSelection,
+    ServiceProvider,
+};
 
-/// Test provider metadata and registry alias registration.
+/// Tests provider self-description and one-argument registration.
 #[test]
 fn test_magika_mime_detector_provider_metadata_and_registration() {
-    let descriptor = magika_mime_detector_descriptor();
+    let descriptor = MagikaMimeDetectorProvider.descriptor();
 
     assert_eq!(descriptor.id().as_str(), "magika");
     assert_eq!(
@@ -33,21 +34,73 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 
     let mut builder = MimeDetectorRegistry::builder();
     builder
-        .register(descriptor, MagikaMimeDetectorProvider)
+        .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
     let registry = builder.build();
 
-    assert_eq!(vec!["magika"], registry.provider_ids());
+    assert_eq!(
+        vec!["magika"],
+        registry
+            .provider_ids()
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+    );
 }
 
-/// Test provider create returns a detector when the Magika runtime is
-/// available.
+/// Tests explicit Registry selection before configured detector creation.
 #[test]
-fn test_magika_mime_detector_provider_create_uses_mime_config() {
-    let provider = MagikaMimeDetectorProvider;
+fn test_resolve_explicit_then_create_with_mime_config() {
+    let mut builder = MimeDetectorRegistry::builder();
+    builder
+        .register(MagikaMimeDetectorProvider)
+        .expect("magika provider should register");
+    let registry = builder.build();
+    let selection =
+        ProviderSelection::named("magika").expect("selection should be valid");
+    let provider = registry
+        .resolve(&selection)
+        .expect("magika provider should resolve");
     let config = MimeConfig::default();
 
     let Ok(detector) = provider.create(&config) else {
+        return;
+    };
+
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        detector.detect_by_filename("document.pdf"),
+    );
+}
+
+/// Tests App startup registration and library-side explicit/default use.
+#[test]
+fn test_global_registry_resolve_explicit_and_default_then_create() {
+    let registry = MimeDetectorRegistry::global();
+    registry
+        .register(MagikaMimeDetectorProvider)
+        .expect("App startup should register the Magika provider");
+    let selection = ProviderSelection::named("magika")
+        .expect("Magika selection should be valid");
+
+    let explicit_provider = registry
+        .resolve(&selection)
+        .expect("library code should explicitly resolve the App provider");
+    let config = MimeConfig::default();
+    let Ok(explicit_detector) = explicit_provider.create(&config) else {
+        return;
+    };
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        explicit_detector.detect_by_filename("document.pdf"),
+    );
+
+    registry.set_default_selection(selection);
+
+    let provider = registry
+        .resolve_default()
+        .expect("library code should resolve the App-selected provider");
+    let Ok(detector) = provider.create_default() else {
         return;
     };
 
