@@ -21,9 +21,6 @@ pub use magika_mime_detector::{
     coverage_map_session_lock_error,
     coverage_undefined_content_type_to_mime,
 };
+pub use magika_mime_detector_provider::MagikaMimeDetectorProvider;
 #[cfg(coverage)]
 pub use magika_mime_detector_provider::coverage_map_provider_create_error;
-pub use magika_mime_detector_provider::{
-    MagikaMimeDetectorProvider,
-    magika_mime_detector_descriptor,
-};
