@@ -444,18 +444,18 @@ dependencies = [
 
 [[package]]
 name = "qubit-codec"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "qubit-codec-misc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "qubit-codec",
- "qubit-io 0.13.0",
+ "qubit-io",
  "thiserror 2.0.18",
 ]
 
@@ -491,18 +491,13 @@ dependencies = [
  "num-bigint",
  "serde",
  "serde_json",
+ "strum",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "qubit-io"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5696903b2de0e23b41036e5019d7899b7cd7988151e26cabdab8905ac5885dab"
-
-[[package]]
-name = "qubit-io"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "qubit-local-files"
@@ -516,12 +511,12 @@ dependencies = [
 
 [[package]]
 name = "qubit-magika"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "magika",
  "ort",
  "qubit-config",
- "qubit-io 0.7.0",
+ "qubit-io",
  "qubit-mime",
  "qubit-spi",
  "tempfile",
@@ -530,12 +525,13 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
  "qubit-config",
- "qubit-io 0.7.0",
+ "qubit-datatype",
+ "qubit-io",
  "qubit-local-files",
  "qubit-spi",
  "regex",
@@ -780,6 +776,27 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
