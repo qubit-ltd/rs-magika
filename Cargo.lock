@@ -435,6 +435,7 @@ name = "qubit-config"
 version = "0.14.0"
 dependencies = [
  "qubit-datatype",
+ "qubit-sanitize",
  "qubit-value",
  "regex",
  "serde",
@@ -464,11 +465,12 @@ version = "0.13.0"
 
 [[package]]
 name = "qubit-local-files"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "getrandom 0.4.2",
  "libc",
  "log",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
