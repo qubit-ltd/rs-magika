@@ -48,7 +48,10 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// # Errors
     ///
     /// Returns [`ProviderCreationError`] when Magika or ONNX Runtime cannot
-    /// initialize. The error preserves the underlying [`MimeError`] source.
+    /// initialize. The error preserves the underlying [`MimeError`] source and
+    /// is classified as initialization failure because Magika's upstream error
+    /// does not reliably distinguish a missing runtime from an invalid model or
+    /// configuration. `OnAbsence` fallback therefore does not suppress it.
     fn create_configured(
         &self,
         config: &MimeConfig,

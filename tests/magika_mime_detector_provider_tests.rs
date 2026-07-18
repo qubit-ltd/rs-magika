@@ -13,7 +13,6 @@ use qubit_mime::{
 use qubit_spi::{
     ProviderDefinition,
     ProviderSelection,
-    ServiceProvider,
 };
 
 /// Tests provider self-description and one-argument registration.
