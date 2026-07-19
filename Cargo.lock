@@ -289,16 +289,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-bigint"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
-dependencies = [
- "num-integer",
- "num-traits",
-]
-
-[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -437,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-clock"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -461,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-command"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "log",
  "process-wrap",
@@ -486,9 +476,8 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
- "num-bigint",
  "serde",
  "serde_json",
  "strum",
