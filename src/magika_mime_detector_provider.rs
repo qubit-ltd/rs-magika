@@ -16,14 +16,11 @@ use qubit_mime::{
     MimeDetectorSpec,
     MimeError,
 };
-use qubit_spi::error::{
-    ProviderCreationError,
-    ProviderError,
-};
+use qubit_spi::error::ProviderError;
 use qubit_spi::{
-    ProviderDefinition,
     ProviderDescriptor,
     ProviderId,
+    ProviderMetadata,
     ServiceProvider,
 };
 
@@ -47,7 +44,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderCreationError`] when Magika or ONNX Runtime cannot
+    /// Returns [`ProviderError`] when Magika or ONNX Runtime cannot
     /// initialize. The error preserves the underlying [`MimeError`] source and
     /// is classified as initialization failure because Magika's upstream error
     /// does not reliably distinguish a missing runtime from an invalid model or
@@ -55,14 +52,14 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     fn create_configured(
         &self,
         config: &MimeConfig,
-    ) -> Result<Arc<dyn MimeDetector>, ProviderCreationError> {
+    ) -> Result<Arc<dyn MimeDetector>, ProviderError> {
         MagikaMimeDetector::from_mime_config(config.clone())
             .map(|detector| Arc::new(detector) as Arc<dyn MimeDetector>)
             .map_err(map_provider_create_error)
     }
 }
 
-impl ProviderDefinition<MimeDetectorSpec> for MagikaMimeDetectorProvider {
+impl ProviderMetadata for MagikaMimeDetectorProvider {
     /// Returns the stable Magika provider identity and selection metadata.
     ///
     /// # Returns
@@ -89,10 +86,10 @@ impl ProviderDefinition<MimeDetectorSpec> for MagikaMimeDetectorProvider {
 /// # Returns
 ///
 /// A direct provider creation error classified as initialization failure.
-fn map_provider_create_error(error: MimeError) -> ProviderCreationError {
+fn map_provider_create_error(error: MimeError) -> ProviderError {
     let reason =
         format!("failed to initialize the Magika MIME detector: {error}");
-    ProviderError::initialization_failed_with_source(reason, error).into()
+    ProviderError::initialization_failed_with_source(reason, error)
 }
 
 /// Exercises source-preserving provider error conversion in coverage builds.
@@ -101,7 +98,7 @@ fn map_provider_create_error(error: MimeError) -> ProviderCreationError {
 ///
 /// A deterministic initialization failure retaining a detector error source.
 #[cfg(coverage)]
-pub fn coverage_map_provider_create_error() -> ProviderCreationError {
+pub fn coverage_map_provider_create_error() -> ProviderError {
     map_provider_create_error(MimeError::detector_backend(
         "magika",
         "coverage provider failure",

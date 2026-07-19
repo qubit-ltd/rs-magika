@@ -11,7 +11,7 @@ use qubit_mime::{
     MimeDetectorRegistry,
 };
 use qubit_spi::{
-    ProviderDefinition,
+    ProviderMetadata,
     ProviderSelection,
 };
 

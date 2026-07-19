@@ -35,7 +35,7 @@ use qubit_mime::{
     MimeError,
 };
 use qubit_spi::{
-    ProviderDefinition,
+    ProviderMetadata,
     ProviderRegistry,
     ProviderSelection,
     ServiceProvider,
