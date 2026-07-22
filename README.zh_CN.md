@@ -25,13 +25,14 @@ Magika 和 ONNX Runtime 依赖隔离在 `qubit-magika` 中，而不是直接放�
 [dependencies]
 qubit-mime = "0.10"
 qubit-magika = "0.9"
-qubit-spi = "0.8"
+qubit-spi = "0.9"
 ```
 
 ## 快速开始
 
 ```rust
 use std::error::Error;
+use std::sync::Arc;
 
 use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{
@@ -39,47 +40,30 @@ use qubit_mime::{
     MimeDetector,
     MimeDetectorRegistry,
 };
-use qubit_spi::{ProviderSelection, ServiceProvider};
+use qubit_spi::ProviderSelection;
 
-// App 启动代码负责全局 Provider 注册和默认选择策略。
-fn configure_app() -> Result<(), Box<dyn Error>> {
+// App 启动时注册 Provider，并且只创建一次昂贵的推理 Session。
+fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
     registry.register(MagikaMimeDetectorProvider)?;
-    registry.set_default_selection(ProviderSelection::named("magika")?);
-    Ok(())
+    let selection = ProviderSelection::named("magika")?;
+    registry.set_default_selection(selection.clone());
+    let provider = registry.resolve_selected(&selection)?;
+    Ok(provider.create_configured(&MimeConfig::default())?)
 }
 
-// 库 X 可以分别接收 Provider 选择和 detector 配置。
-fn library_x_with_explicit_requirements(
-    selection: &ProviderSelection,
-    config: &MimeConfig,
-) -> Result<Option<String>, Box<dyn Error>> {
-    let provider = MimeDetectorRegistry::global().resolve_selected(selection)?;
-    let detector = provider.create_configured(config)?;
-    Ok(detector.detect_by_content(
+// 下游库借用 Detector，不重复构建模型。
+fn library_x(detector: &dyn MimeDetector) -> Option<String> {
+    detector.detect_by_content(
         b"#!/usr/bin/env python3\nprint('hello')\n",
-    ))
-}
-
-// 库 X 也可以同时使用进程默认选择和默认配置。
-fn library_x_with_defaults() -> Result<Option<String>, Box<dyn Error>> {
-    let provider = MimeDetectorRegistry::global().resolve()?;
-    let detector = provider.create()?;
-    Ok(detector.detect_by_filename("document.pdf"))
+    )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    configure_app()?;
-
-    let selection = ProviderSelection::named("magika")?;
-    let config = MimeConfig::default();
+    let detector = create_detector()?;
     assert_eq!(
         Some("text/x-python".to_owned()),
-        library_x_with_explicit_requirements(&selection, &config)?,
-    );
-    assert_eq!(
-        Some("application/pdf".to_owned()),
-        library_x_with_defaults()?,
+        library_x(detector.as_ref()),
     );
     Ok(())
 }
@@ -100,14 +84,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 Provider 选择和 detector 配置是两个独立输入：`ProviderSelection` 决定允许哪个已注册
 Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的 detector 实例。
 `qubit-magika` 不会自动注册自己；App 在启动时显式控制进程级注册和默认选择。
+创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建
+一次并共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
 
 ## 测试
 
 ```bash
-# 使用默认的空 feature 集测试核心 API
-cargo test --no-default-features
+# 使用默认 feature 集运行测试
+cargo test
 
-# 测试核心 API 和正则校验
+# 使用项目声明的全部 feature 运行测试
 cargo test --all-features
 
 # 运行项目 CI 检查

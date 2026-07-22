@@ -26,13 +26,14 @@ your application provides ONNX Runtime through another linking strategy.
 [dependencies]
 qubit-mime = "0.10"
 qubit-magika = "0.9"
-qubit-spi = "0.8"
+qubit-spi = "0.9"
 ```
 
 ## Quick Start
 
 ```rust
 use std::error::Error;
+use std::sync::Arc;
 
 use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{
@@ -40,47 +41,30 @@ use qubit_mime::{
     MimeDetector,
     MimeDetectorRegistry,
 };
-use qubit_spi::{ProviderSelection, ServiceProvider};
+use qubit_spi::ProviderSelection;
 
-// App startup owns process-wide provider registration and policy.
-fn configure_app() -> Result<(), Box<dyn Error>> {
+// App startup registers the provider and creates the expensive session once.
+fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
     registry.register(MagikaMimeDetectorProvider)?;
-    registry.set_default_selection(ProviderSelection::named("magika")?);
-    Ok(())
+    let selection = ProviderSelection::named("magika")?;
+    registry.set_default_selection(selection.clone());
+    let provider = registry.resolve_selected(&selection)?;
+    Ok(provider.create_configured(&MimeConfig::default())?)
 }
 
-// Library X can keep provider selection and detector configuration independent.
-fn library_x_with_explicit_requirements(
-    selection: &ProviderSelection,
-    config: &MimeConfig,
-) -> Result<Option<String>, Box<dyn Error>> {
-    let provider = MimeDetectorRegistry::global().resolve_selected(selection)?;
-    let detector = provider.create_configured(config)?;
-    Ok(detector.detect_by_content(
+// Downstream libraries borrow the detector instead of rebuilding the model.
+fn library_x(detector: &dyn MimeDetector) -> Option<String> {
+    detector.detect_by_content(
         b"#!/usr/bin/env python3\nprint('hello')\n",
-    ))
-}
-
-// Library X can also use both process-default selection and default config.
-fn library_x_with_defaults() -> Result<Option<String>, Box<dyn Error>> {
-    let provider = MimeDetectorRegistry::global().resolve()?;
-    let detector = provider.create()?;
-    Ok(detector.detect_by_filename("document.pdf"))
+    )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    configure_app()?;
-
-    let selection = ProviderSelection::named("magika")?;
-    let config = MimeConfig::default();
+    let detector = create_detector()?;
     assert_eq!(
         Some("text/x-python".to_owned()),
-        library_x_with_explicit_requirements(&selection, &config)?,
-    );
-    assert_eq!(
-        Some("application/pdf".to_owned()),
-        library_x_with_defaults()?,
+        library_x(detector.as_ref()),
     );
     Ok(())
 }
@@ -103,14 +87,17 @@ Provider selection and detector configuration are separate inputs. A
 `MimeConfig` controls the detector instance after that provider is resolved.
 `qubit-magika` does not register itself automatically: the App explicitly
 controls process-wide registration and the default selection during startup.
+Creating a detector initializes the embedded Magika model and ONNX Runtime
+session. Create it once, share it (for example with `Arc`), and expect inference
+calls on a shared detector to be serialized internally.
 
 ## Testing
 
 ```bash
-# Core API with the default empty feature set
-cargo test --no-default-features
+# Run tests with the default feature set
+cargo test
 
-# Core API plus regex validation
+# Run tests with all declared features
 cargo test --all-features
 
 # Project CI checks
