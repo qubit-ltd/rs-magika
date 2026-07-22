@@ -7,4 +7,10 @@
 // =============================================================================
 //! Integration tests for `qubit-magika`.
 
-mod detector;
+#[cfg(feature = "bundled-onnxruntime")]
+mod internal;
+mod magika_mime_detector_provider_tests;
+#[cfg(feature = "bundled-onnxruntime")]
+mod magika_mime_detector_tests;
+#[cfg(feature = "bundled-onnxruntime")]
+mod support;

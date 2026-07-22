@@ -3,6 +3,7 @@ name = "qubit-magika"
 version = "0.9.0"
 edition = "2024"
 rust-version = "1.94"
+autotests = false
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/qubit-ltd/rs-magika"
@@ -36,8 +37,6 @@ bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
 
 [dependencies]
 magika = "1.1"
-thiserror = "2.0"
-
 qubit-io = { path = "../rs-io", version = "0.14" }
 qubit-spi = { path = "../rs-spi", version = "0.9" }
 qubit-mime = { path = "../rs-mime", version = "0.10" }
@@ -51,5 +50,11 @@ optional = true
 qubit-config = { path = "../rs-config", version = "0.14" }
 tempfile = "3.27"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+[[test]]
+name = "tests"
+path = "tests/mod.rs"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+required-features = ["bundled-onnxruntime"]

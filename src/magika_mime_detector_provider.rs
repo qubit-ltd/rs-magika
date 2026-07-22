@@ -6,7 +6,6 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Provider for registering the Magika MIME detector with `qubit-mime`.
-// qubit-style: allow coverage-cfg
 
 use std::sync::Arc;
 
@@ -49,6 +48,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// is classified as initialization failure because Magika's upstream error
     /// does not reliably distinguish a missing runtime from an invalid model or
     /// configuration. `OnAbsence` fallback therefore does not suppress it.
+    #[inline(always)]
     fn create_configured(
         &self,
         config: &MimeConfig,
@@ -66,6 +66,7 @@ impl ProviderMetadata for MagikaMimeDetectorProvider {
     ///
     /// The `magika` descriptor, accepted aliases, and automatic-selection
     /// priority.
+    #[inline]
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor::new(
             ProviderId::new("magika")
@@ -90,17 +91,4 @@ fn map_provider_create_error(error: MimeError) -> ProviderError {
     let reason =
         format!("failed to initialize the Magika MIME detector: {error}");
     ProviderError::initialization_failed_with_source(reason, error)
-}
-
-/// Exercises source-preserving provider error conversion in coverage builds.
-///
-/// # Returns
-///
-/// A deterministic initialization failure retaining a detector error source.
-#[cfg(coverage)]
-pub fn coverage_map_provider_create_error() -> ProviderError {
-    map_provider_create_error(MimeError::detector_backend(
-        "magika",
-        "coverage provider failure",
-    ))
 }

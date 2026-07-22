@@ -6,14 +6,12 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use qubit_magika::MagikaMimeDetectorProvider;
-use qubit_mime::{
-    MimeConfig,
-    MimeDetectorRegistry,
-};
-use qubit_spi::{
-    ProviderMetadata,
-    ProviderSelection,
-};
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_mime::MimeConfig;
+use qubit_mime::MimeDetectorRegistry;
+use qubit_spi::ProviderMetadata;
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_spi::ProviderSelection;
 
 /// Tests provider self-description and one-argument registration.
 #[test]
@@ -47,6 +45,7 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 }
 
 /// Tests explicit Registry selection before configured detector creation.
+#[cfg(feature = "bundled-onnxruntime")]
 #[test]
 fn test_resolve_explicit_then_create_with_mime_config() {
     let registry = MimeDetectorRegistry::default();
@@ -60,9 +59,9 @@ fn test_resolve_explicit_then_create_with_mime_config() {
         .expect("magika provider should resolve");
     let config = MimeConfig::default();
 
-    let Ok(detector) = provider.create_configured(&config) else {
-        return;
-    };
+    let detector = provider
+        .create_configured(&config)
+        .expect("bundled ONNX Runtime should initialize Magika");
 
     assert_eq!(
         Some("application/pdf".to_owned()),
@@ -71,6 +70,7 @@ fn test_resolve_explicit_then_create_with_mime_config() {
 }
 
 /// Tests App startup registration and library-side explicit/default use.
+#[cfg(feature = "bundled-onnxruntime")]
 #[test]
 fn test_global_registry_resolve_explicit_and_default_then_create() {
     let registry = MimeDetectorRegistry::global();
@@ -84,10 +84,9 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
         .resolve_selected(&selection)
         .expect("library code should explicitly resolve the App provider");
     let config = MimeConfig::default();
-    let Ok(explicit_detector) = explicit_provider.create_configured(&config)
-    else {
-        return;
-    };
+    let explicit_detector = explicit_provider
+        .create_configured(&config)
+        .expect("bundled ONNX Runtime should initialize Magika");
     assert_eq!(
         Some("application/pdf".to_owned()),
         explicit_detector.detect_by_filename("document.pdf"),
@@ -98,9 +97,9 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
     let provider = registry
         .resolve()
         .expect("library code should resolve the App-selected provider");
-    let Ok(detector) = provider.create() else {
-        return;
-    };
+    let detector = provider
+        .create()
+        .expect("bundled ONNX Runtime should initialize Magika");
 
     assert_eq!(
         Some("application/pdf".to_owned()),

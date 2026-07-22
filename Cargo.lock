@@ -445,7 +445,6 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "qubit-codec",
- "qubit-io",
  "thiserror 2.0.18",
 ]
 
@@ -456,7 +455,7 @@ dependencies = [
  "log",
  "process-wrap",
  "qubit-clock",
- "qubit-sanitize",
+ "qubit-redact",
  "same-file",
  "thiserror 2.0.18",
 ]
@@ -466,7 +465,7 @@ name = "qubit-config"
 version = "0.14.0"
 dependencies = [
  "qubit-datatype",
- "qubit-sanitize",
+ "qubit-redact",
  "qubit-value",
  "regex",
  "serde",
@@ -509,7 +508,6 @@ dependencies = [
  "qubit-mime",
  "qubit-spi",
  "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -529,7 +527,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qubit-sanitize"
+name = "qubit-redact"
 version = "0.3.0"
 
 [[package]]
