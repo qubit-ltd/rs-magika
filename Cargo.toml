@@ -38,7 +38,7 @@ bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
 [dependencies]
 magika = "1.1"
 qubit-io = { path = "../rs-io", version = "0.14" }
-qubit-spi = { path = "../rs-spi", version = "0.10" }
+qubit-spi = { version = "0.10" }
 qubit-mime = { path = "../rs-mime", version = "0.10" }
 
 [dependencies.ort]
