@@ -427,8 +427,11 @@ dependencies = [
 
 [[package]]
 name = "qubit-clock"
-version = "0.10.0"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38fc24f18d694b74188032e77ac925a87efb0fe365fea68d85eb7d54c18774d8"
 dependencies = [
+ "qubit-collections",
  "thiserror 2.0.18",
 ]
 
@@ -446,6 +449,15 @@ dependencies = [
  "base64",
  "qubit-codec",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "qubit-collections"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcb596d37e055a48800f0381926881152612b9171cad3be8e91dee97daee6f5b"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -475,14 +487,20 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7db892a422445a3e7a34c5d5c285d998f32cfb2b0f2ecdea55d40e575a93a8e"
+checksum = "b9dd16b80a75460ac639b745af90ef486a7544574c63d0949994678afe05dd83"
 dependencies = [
  "serde",
  "serde_json",
- "strum",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "qubit-fs"
+version = "0.2.0"
+dependencies = [
+ "qubit-io",
 ]
 
 [[package]]
@@ -491,11 +509,12 @@ version = "0.14.0"
 
 [[package]]
 name = "qubit-local-files"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "getrandom 0.4.2",
  "libc",
  "log",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -520,6 +539,7 @@ dependencies = [
  "qubit-command",
  "qubit-config",
  "qubit-datatype",
+ "qubit-fs",
  "qubit-io",
  "qubit-local-files",
  "qubit-spi",
@@ -534,9 +554,10 @@ version = "0.3.0"
 
 [[package]]
 name = "qubit-spi"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "parking_lot",
+ "qubit-collections",
  "thiserror 2.0.18",
 ]
 
@@ -765,27 +786,6 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "strum"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
-dependencies = [
- "strum_macros",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]

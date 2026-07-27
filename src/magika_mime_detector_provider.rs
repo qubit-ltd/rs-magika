@@ -15,7 +15,7 @@ use qubit_mime::{
     MimeDetectorSpec,
     MimeError,
 };
-use qubit_spi::error::ProviderError;
+use qubit_spi::error::ProviderFailure;
 use qubit_spi::{
     ProviderDescriptor,
     ProviderId,
@@ -43,7 +43,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderError`] when Magika or ONNX Runtime cannot
+    /// Returns [`ProviderFailure`] when Magika or ONNX Runtime cannot
     /// initialize. The error preserves the underlying [`MimeError`] source and
     /// is classified as initialization failure because Magika's upstream error
     /// does not reliably distinguish a missing runtime from an invalid model or
@@ -52,10 +52,10 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     fn create_configured(
         &self,
         config: &MimeConfig,
-    ) -> Result<Arc<dyn MimeDetector>, ProviderError> {
+    ) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
         MagikaMimeDetector::from_mime_config(config.clone())
             .map(|detector| Arc::new(detector) as Arc<dyn MimeDetector>)
-            .map_err(map_provider_create_error)
+            .map_err(ProviderFailure::initialization_failed)
     }
 }
 
@@ -76,19 +76,4 @@ impl ProviderMetadata for MagikaMimeDetectorProvider {
         .expect("Magika provider aliases should be valid")
         .with_priority(20)
     }
-}
-
-/// Converts a detector initialization error while preserving its source.
-///
-/// # Parameters
-///
-/// * `error` - Magika detector initialization error to classify.
-///
-/// # Returns
-///
-/// A direct provider creation error classified as initialization failure.
-fn map_provider_create_error(error: MimeError) -> ProviderError {
-    let reason =
-        format!("failed to initialize the Magika MIME detector: {error}");
-    ProviderError::initialization_failed_with_source(reason, error)
 }
