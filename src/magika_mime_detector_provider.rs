@@ -18,9 +18,9 @@ use qubit_mime::{
 use qubit_spi::error::ProviderFailure;
 use qubit_spi::{
     ProviderDescriptor,
-    ProviderId,
     ProviderMetadata,
     ServiceProvider,
+    provider_descriptor,
 };
 
 use crate::MagikaMimeDetector;
@@ -68,12 +68,10 @@ impl ProviderMetadata for MagikaMimeDetectorProvider {
     /// priority.
     #[inline]
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::new(
-            ProviderId::new("magika")
-                .expect("Magika provider ID should be valid"),
+        provider_descriptor!(
+            "magika",
+            aliases: ["magika-mime-detector", "magikamimedetector"],
+            priority: 20,
         )
-        .with_aliases(["magika-mime-detector", "MagikaMimeDetector"])
-        .expect("Magika provider aliases should be valid")
-        .with_priority(20)
     }
 }
