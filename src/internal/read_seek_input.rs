@@ -10,7 +10,7 @@
 use std::io::SeekFrom;
 
 use magika::SyncInput;
-use qubit_io::ReadSeek;
+use qubit_io::std_io::ReadSeek;
 
 /// Adapts a seekable reader to Magika's synchronous random-access input.
 pub(crate) struct ReadSeekInput<'reader> {
