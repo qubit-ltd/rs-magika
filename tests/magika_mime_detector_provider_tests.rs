@@ -52,8 +52,7 @@ fn test_resolve_explicit_then_create_with_mime_config() {
     registry
         .register(MagikaMimeDetectorProvider)
         .expect("magika provider should register");
-    let selection =
-        ProviderSelection::named("magika").expect("selection should be valid");
+    let selection = ProviderSelection::named("magika").expect("selection should be valid");
     let provider = registry
         .resolve_selected(&selection)
         .expect("magika provider should resolve");
@@ -65,7 +64,9 @@ fn test_resolve_explicit_then_create_with_mime_config() {
 
     assert_eq!(
         Some("application/pdf".to_owned()),
-        detector.detect_by_filename("document.pdf"),
+        detector
+            .detect_by_filename("document.pdf")
+            .expect("filename detection should succeed"),
     );
 }
 
@@ -77,8 +78,7 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
     registry
         .register(MagikaMimeDetectorProvider)
         .expect("App startup should register the Magika provider");
-    let selection = ProviderSelection::named("magika")
-        .expect("Magika selection should be valid");
+    let selection = ProviderSelection::named("magika").expect("Magika selection should be valid");
 
     let explicit_provider = registry
         .resolve_selected(&selection)
@@ -89,7 +89,9 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
         .expect("bundled ONNX Runtime should initialize Magika");
     assert_eq!(
         Some("application/pdf".to_owned()),
-        explicit_detector.detect_by_filename("document.pdf"),
+        explicit_detector
+            .detect_by_filename("document.pdf")
+            .expect("filename detection should succeed"),
     );
 
     registry.set_default_selection(selection);
@@ -103,6 +105,8 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
 
     assert_eq!(
         Some("application/pdf".to_owned()),
-        detector.detect_by_filename("document.pdf"),
+        detector
+            .detect_by_filename("document.pdf")
+            .expect("filename detection should succeed"),
     );
 }

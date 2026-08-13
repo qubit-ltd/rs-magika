@@ -9,26 +9,13 @@
 
 use std::io::SeekFrom;
 use std::path::Path;
-use std::sync::{
-    Mutex,
-    PoisonError,
-};
+use std::sync::{Mutex, PoisonError};
 
-use magika::{
-    ContentType,
-    SyncInput,
-};
+use magika::{ContentType, SyncInput};
 use qubit_io::std_io::ReadSeek;
 use qubit_mime::{
-    DetectionSource,
-    MimeConfig,
-    MimeDetectionPolicy,
-    MimeDetector,
-    MimeDetectorCore,
-    MimeError,
-    MimeRepository,
-    MimeResult,
-    RepositoryMimeDetector,
+    DetectionSource, MimeConfig, MimeDetectionPolicy, MimeDetector, MimeDetectorCore, MimeError,
+    MimeRepository, MimeResult, RepositoryMimeDetector,
 };
 
 use crate::internal::ReadSeekInput;
@@ -50,7 +37,7 @@ use crate::internal::ReadSeekInput;
 /// use qubit_mime::{MimeDetector, MimeError};
 ///
 /// let detector = Arc::new(MagikaMimeDetector::new()?);
-/// let mime_type = detector.detect_by_content(b"%PDF-1.7");
+/// let mime_type = detector.detect_by_content(b"%PDF-1.7")?;
 /// assert_eq!(Some("application/pdf".to_owned()), mime_type);
 /// # Ok::<(), MimeError>(())
 /// ```
@@ -180,8 +167,7 @@ impl MagikaMimeDetector {
     where
         I: SyncInput,
     {
-        let mut session =
-            self.session.lock().map_err(map_session_lock_error)?;
+        let mut session = self.session.lock().map_err(map_session_lock_error)?;
         let file_type = session
             .identify_content_sync(input)
             .map_err(map_magika_error)?;
@@ -208,10 +194,8 @@ impl MagikaMimeDetector {
     /// [`MimeError::DetectorBackend`] when inference fails or the session lock
     /// is poisoned.
     fn guess_from_magika_file(&self, file: &Path) -> MimeResult<Vec<String>> {
-        let mut session =
-            self.session.lock().map_err(map_session_lock_error)?;
-        let file_type =
-            session.identify_file_sync(file).map_err(map_magika_error)?;
+        let mut session = self.session.lock().map_err(map_session_lock_error)?;
+        let file_type = session.identify_file_sync(file).map_err(map_magika_error)?;
         Ok(file_type
             .content_type()
             .and_then(content_type_to_mime)
@@ -235,27 +219,26 @@ impl MagikaMimeDetector {
     /// Returns [`MimeError::Io`] when seeking or reading fails, or
     /// [`MimeError::DetectorBackend`] when Magika inference fails or the
     /// session lock is poisoned.
-    fn guess_from_reader(
-        &self,
-        reader: &mut dyn ReadSeek,
-    ) -> MimeResult<Vec<String>> {
+    fn guess_from_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<Vec<String>> {
         let original_position = reader.stream_position()?;
         let length = reader.seek(SeekFrom::End(0))?;
         let mut input = ReadSeekInput::new(reader, length);
         let result = self.guess_from_magika_input(&mut input);
-        let restore_result =
-            input.reader_mut().seek(SeekFrom::Start(original_position));
+        let restore_result = input.reader_mut().seek(SeekFrom::Start(original_position));
         match (result, restore_result) {
             (Ok(candidates), Ok(_)) => Ok(candidates),
             (Err(error), Ok(_)) => Err(error),
-            (Ok(_), Err(error)) | (Err(_), Err(error)) => {
-                Err(MimeError::Io(error))
-            }
+            (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(MimeError::Io(error)),
         }
     }
 }
 
 impl MimeDetector for MagikaMimeDetector {
+    /// Gets the maximum prefix size accepted by filesystem-path detection.
+    fn max_buffer_size(&self) -> usize {
+        self.core.max_buffer_size()
+    }
+
     /// Detects a MIME type from repository filename rules.
     ///
     /// # Parameters
@@ -264,9 +247,10 @@ impl MimeDetector for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// The selected MIME type, or `None` when no repository rule matches.
+    /// `Ok(Some(_))` contains the selected MIME type; `Ok(None)` means no
+    /// repository rule matches.
     #[inline(always)]
-    fn detect_by_filename(&self, filename: &str) -> Option<String> {
+    fn detect_by_filename(&self, filename: &str) -> MimeResult<Option<String>> {
         self.filename_detector.detect_by_filename(filename)
     }
 
@@ -278,18 +262,23 @@ impl MimeDetector for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// The detected MIME type, or `None` when Magika returns no mapped type or
-    /// inference fails. Use [`Self::detect_reader`] or [`Self::detect_file`]
-    /// when inference errors must remain observable.
-    fn detect_by_content(&self, content: &[u8]) -> Option<String> {
-        let candidates = self.guess_from_magika_input(content).ok()?;
-        candidates.first().map(|mime_type| {
-            self.core.refine_detected_mime_type(
-                mime_type,
-                None,
-                DetectionSource::Content(content),
-            )
-        })
+    /// `Ok(Some(_))` contains the detected MIME type; `Ok(None)` means Magika
+    /// returned no mapped type.
+    ///
+    /// # Errors
+    /// Propagates Magika inference and media-classifier errors.
+    fn detect_by_content(&self, content: &[u8]) -> MimeResult<Option<String>> {
+        let candidates = self.guess_from_magika_input(content)?;
+        candidates
+            .first()
+            .map(|mime_type| {
+                self.core.refine_detected_mime_type(
+                    mime_type,
+                    None,
+                    DetectionSource::Content(content),
+                )
+            })
+            .transpose()
     }
 
     /// Detects a MIME type from bytes and an optional filename.
@@ -302,25 +291,26 @@ impl MimeDetector for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// The selected MIME type, or `None` when neither source yields a
-    /// candidate. Magika inference errors are suppressed; a filename candidate
-    /// may still be returned according to `policy`.
+    /// `Ok(Some(_))` contains the selected MIME type; `Ok(None)` means neither
+    /// source yields a candidate.
+    ///
+    /// # Errors
+    /// Propagates Magika inference and media-classifier errors.
     fn detect(
         &self,
         content: &[u8],
         filename: Option<&str>,
         policy: MimeDetectionPolicy,
-    ) -> Option<String> {
+    ) -> MimeResult<Option<String>> {
         let from_filename = filename
             .map(|filename| self.guess_from_filename(filename))
             .unwrap_or_default();
-        let from_content = if from_filename.len() == 1
-            && policy == MimeDetectionPolicy::PreferFilename
-        {
-            Vec::new()
-        } else {
-            self.guess_from_magika_input(content).unwrap_or_default()
-        };
+        let from_content =
+            if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
+                Vec::new()
+            } else {
+                self.guess_from_magika_input(content)?
+            };
         self.core.select_result(
             &from_filename,
             &from_content,
@@ -358,20 +348,14 @@ impl MimeDetector for MagikaMimeDetector {
         let from_filename = filename
             .map(|filename| self.guess_from_filename(filename))
             .unwrap_or_default();
-        let from_content = if from_filename.len() == 1
-            && policy == MimeDetectionPolicy::PreferFilename
-        {
-            Vec::new()
-        } else {
-            self.guess_from_reader(reader)?
-        };
-        self.core.select_reader_result(
-            &from_filename,
-            &from_content,
-            filename,
-            policy,
-            reader,
-        )
+        let from_content =
+            if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
+                Vec::new()
+            } else {
+                self.guess_from_reader(reader)?
+            };
+        self.core
+            .select_reader_result(&from_filename, &from_content, filename, policy, reader)
     }
 
     /// Detects a MIME type from a local file.
@@ -391,27 +375,22 @@ impl MimeDetector for MagikaMimeDetector {
     /// Returns [`MimeError::Io`] when file metadata or content cannot be read,
     /// or [`MimeError::DetectorBackend`] when Magika inference fails or the
     /// session lock is poisoned.
-    fn detect_file(
-        &self,
-        file: &Path,
-        policy: MimeDetectionPolicy,
-    ) -> MimeResult<Option<String>> {
+    fn detect_file(&self, file: &Path, policy: MimeDetectionPolicy) -> MimeResult<Option<String>> {
         let filename = file.to_string_lossy();
         let from_filename = self.guess_from_filename(&filename);
-        let from_content = if from_filename.len() == 1
-            && policy == MimeDetectionPolicy::PreferFilename
-        {
-            Vec::new()
-        } else {
-            self.guess_from_magika_file(file)?
-        };
-        Ok(self.core.select_result(
+        let from_content =
+            if from_filename.len() == 1 && policy == MimeDetectionPolicy::PreferFilename {
+                Vec::new()
+            } else {
+                self.guess_from_magika_file(file)?
+            };
+        self.core.select_result(
             &from_filename,
             &from_content,
             Some(&filename),
             policy,
             DetectionSource::Path(file),
-        ))
+        )
     }
 }
 
@@ -445,10 +424,7 @@ fn content_type_to_mime(content_type: ContentType) -> Option<String> {
 /// MIME detector backend error carrying the lock poisoning context.
 #[inline]
 fn map_session_lock_error<T>(error: PoisonError<T>) -> MimeError {
-    MimeError::detector_backend(
-        "magika",
-        format!("session lock poisoned: {error}"),
-    )
+    MimeError::detector_backend("magika", format!("session lock poisoned: {error}"))
 }
 
 /// Converts a Magika error to a MIME error.

@@ -8,38 +8,19 @@
 #![cfg(feature = "bundled-onnxruntime")]
 
 use std::fs::File;
-use std::io::{
-    Cursor,
-    Seek,
-    SeekFrom,
-    Write,
-};
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use qubit_magika::MagikaMimeDetector;
 use qubit_mime::{
-    CONFIG_MIME_AMBIGUOUS_MIME_MAPPING,
-    CONFIG_MIME_DETECTOR_DEFAULT,
-    CONFIG_MIME_ENABLE_PRECISE_DETECTION,
-    CONFIG_MIME_PRECISE_DETECTION_PATTERNS,
-    MediaStreamType,
-    MimeConfig,
-    MimeDetectionPolicy,
-    MimeDetector,
-    MimeError,
+    CONFIG_MIME_AMBIGUOUS_MIME_MAPPING, CONFIG_MIME_DETECTOR_DEFAULT,
+    CONFIG_MIME_ENABLE_PRECISE_DETECTION, CONFIG_MIME_PRECISE_DETECTION_PATTERNS, MediaStreamType,
+    MimeConfig, MimeDetectionPolicy, MimeDetector, MimeError,
 };
 use tempfile::NamedTempFile;
 
-use crate::support::{
-    FailingReadSeek,
-    RealFileCase,
-    StaticMediaStreamClassifier,
-    detector,
-};
+use crate::support::{FailingReadSeek, RealFileCase, StaticMediaStreamClassifier, detector};
 
 /// Real fixture files used to exercise filesystem-backed Magika detection.
 const REAL_FILE_CASES: &[RealFileCase] = &[
@@ -68,15 +49,17 @@ fn test_magika_detector_delegates_filename_detection_to_repository() {
 
     assert_eq!(
         Some("application/pdf".to_owned()),
-        detector.detect_by_filename("document.pdf")
+        detector
+            .detect_by_filename("document.pdf")
+            .expect("filename detection should succeed")
     );
 }
 
 /// Verifies accessors expose the configured core and repository.
 #[test]
 fn test_magika_detector_exposes_core_and_repository() {
-    let mut detector = MagikaMimeDetector::new()
-        .expect("bundled ONNX Runtime should initialize Magika");
+    let mut detector =
+        MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
 
     assert_eq!(
         Some("application/pdf".to_owned()),
@@ -97,11 +80,13 @@ fn test_magika_detector_detect_prefers_filename_without_content_detection() {
 
     assert_eq!(
         Some("application/pdf".to_owned()),
-        detector.detect(
-            b"not a pdf",
-            Some("document.pdf"),
-            MimeDetectionPolicy::PreferFilename,
-        )
+        detector
+            .detect(
+                b"not a pdf",
+                Some("document.pdf"),
+                MimeDetectionPolicy::PreferFilename,
+            )
+            .expect("combined detection should succeed")
     );
 }
 
@@ -112,11 +97,13 @@ fn test_magika_detector_detect_verifies_content_when_policy_requires() {
 
     assert_eq!(
         Some("text/x-python".to_owned()),
-        detector.detect(
-            b"#!/usr/bin/env python3\nprint('hello')\n",
-            Some("script.txt"),
-            MimeDetectionPolicy::VerifyContent,
-        )
+        detector
+            .detect(
+                b"#!/usr/bin/env python3\nprint('hello')\n",
+                Some("script.txt"),
+                MimeDetectionPolicy::VerifyContent,
+            )
+            .expect("combined detection should succeed")
     );
 }
 
@@ -132,9 +119,7 @@ fn test_magika_detector_reader_detection_prefers_filename_without_reading() {
             Some("document.pdf"),
             MimeDetectionPolicy::PreferFilename,
         )
-        .expect(
-            "filename-preferred reader detection should skip content reads",
-        );
+        .expect("filename-preferred reader detection should skip content reads");
 
     assert_eq!(Some("application/pdf".to_owned()), detected);
 }
@@ -178,18 +163,16 @@ fn test_magika_detector_reader_detection_refines_media_type() {
             "sh:text/x-shellscript,audio/x-shellscript",
         )
         .expect("ambiguous mapping should be configurable");
-    let config = MimeConfig::from_config(&raw_config)
-        .expect("precise detector config should parse");
+    let config =
+        MimeConfig::from_config(&raw_config).expect("precise detector config should parse");
     let mut detector = MagikaMimeDetector::from_mime_config(config)
         .expect("bundled ONNX Runtime should initialize Magika");
     detector
         .core_mut()
-        .set_media_stream_classifier(Some(Arc::new(
-            StaticMediaStreamClassifier::new(
-                MediaStreamType::AudioOnly,
-                Some(b'#'),
-            ),
-        )));
+        .set_media_stream_classifier(Some(Arc::new(StaticMediaStreamClassifier::new(
+            MediaStreamType::AudioOnly,
+            Some(b'#'),
+        ))));
     let mut reader = Cursor::new(b"#!/bin/sh\necho hello\n".to_vec());
     reader.set_position(2);
 
@@ -209,8 +192,7 @@ fn test_magika_detector_reader_detection_refines_media_type() {
 #[test]
 fn test_magika_detector_detect_file_reads_content_when_policy_requires() {
     let detector = detector();
-    let mut file = NamedTempFile::with_suffix(".txt")
-        .expect("temp file should be created");
+    let mut file = NamedTempFile::with_suffix(".txt").expect("temp file should be created");
     file.write_all(b"#!/usr/bin/env python3\nprint('hello')\n")
         .expect("temp file should be writable");
 
@@ -278,8 +260,7 @@ fn test_magika_reader_detects_real_fixtures_without_consuming_position() {
 
     for case in REAL_FILE_CASES {
         let path = fixture_path(case.relative_path);
-        let mut file =
-            File::open(&path).expect("real fixture file should be readable");
+        let mut file = File::open(&path).expect("real fixture file should be readable");
         file.seek(SeekFrom::Start(1))
             .expect("real fixture file should be seekable");
 
@@ -315,7 +296,9 @@ fn test_magika_detector_empty_content_returns_empty_file_mime_type() {
 
     assert_eq!(
         Some("inode/x-empty".to_owned()),
-        detector.detect_by_content(b"")
+        detector
+            .detect_by_content(b"")
+            .expect("content detection should succeed")
     );
 }
 
