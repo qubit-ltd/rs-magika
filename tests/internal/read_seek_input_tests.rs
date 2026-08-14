@@ -6,21 +6,15 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 
-use std::io::{
-    Seek,
-    SeekFrom,
-};
+use std::io::Seek;
+use std::io::SeekFrom;
 
-use qubit_mime::{
-    MimeDetectionPolicy,
-    MimeDetector,
-    MimeError,
-};
+use qubit_mime::MimeDetectionPolicy;
+use qubit_mime::MimeDetector;
+use qubit_mime::MimeError;
 
-use crate::support::{
-    FailingReadSeek,
-    detector,
-};
+use crate::support::FailingReadSeek;
+use crate::support::detector;
 
 /// Verifies the reader adapter restores its original position after a read
 /// error.

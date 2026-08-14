@@ -9,19 +9,15 @@
 
 use std::sync::Arc;
 
-use qubit_mime::{
-    MimeConfig,
-    MimeDetector,
-    MimeDetectorSpec,
-    MimeError,
-};
+use qubit_mime::MimeConfig;
+use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorSpec;
+use qubit_mime::MimeError;
+use qubit_spi::ProviderDescriptor;
+use qubit_spi::ProviderMetadata;
+use qubit_spi::ServiceProvider;
 use qubit_spi::error::ProviderFailure;
-use qubit_spi::{
-    ProviderDescriptor,
-    ProviderMetadata,
-    ServiceProvider,
-    provider_descriptor,
-};
+use qubit_spi::provider_descriptor;
 
 use crate::MagikaMimeDetector;
 

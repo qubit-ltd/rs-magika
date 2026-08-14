@@ -12,7 +12,10 @@ use std::error::Error;
 use std::sync::Arc;
 
 use qubit_magika::MagikaMimeDetectorProvider;
-use qubit_mime::{MimeConfig, MimeDetector, MimeDetectorRegistry, MimeResult};
+use qubit_mime::MimeConfig;
+use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorRegistry;
+use qubit_mime::MimeResult;
 use qubit_spi::ProviderSelection;
 
 /// Registers Magika and creates one detector for the application.
@@ -43,7 +46,9 @@ fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
 /// # Returns
 ///
 /// The detected MIME type, or `None` when no type is recognized.
-fn library_detect_content(detector: &dyn MimeDetector) -> MimeResult<Option<String>> {
+fn library_detect_content(
+    detector: &dyn MimeDetector,
+) -> MimeResult<Option<String>> {
     detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n")
 }
 
@@ -56,7 +61,9 @@ fn library_detect_content(detector: &dyn MimeDetector) -> MimeResult<Option<Stri
 /// # Returns
 ///
 /// The detected MIME type, or `None` when no repository rule matches.
-fn library_detect_filename(detector: &dyn MimeDetector) -> MimeResult<Option<String>> {
+fn library_detect_filename(
+    detector: &dyn MimeDetector,
+) -> MimeResult<Option<String>> {
     detector.detect_by_filename("document.pdf")
 }
 

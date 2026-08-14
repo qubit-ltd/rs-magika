@@ -9,11 +9,10 @@
 use std::io::Read;
 use std::path::Path;
 
-use qubit_mime::{
-    MediaStreamClassifier,
-    MediaStreamType,
-    MimeResult,
-};
+use qubit_mime::MediaStreamClassifier;
+use qubit_mime::MediaStreamType;
+use qubit_mime::MimeError;
+use qubit_mime::MimeResult;
 
 /// Deterministic classifier used to verify reader-based MIME refinement.
 #[derive(Debug)]
@@ -61,7 +60,7 @@ impl MediaStreamClassifier for StaticMediaStreamClassifier {
             let mut buffer = [0_u8; 1];
             reader.read_exact(&mut buffer)?;
             if buffer[0] != expected_first_byte {
-                return Err(qubit_mime::MimeError::InvalidClassifierInput {
+                return Err(MimeError::InvalidClassifierInput {
                     reason: "reader did not start at the beginning".to_owned(),
                 });
             }

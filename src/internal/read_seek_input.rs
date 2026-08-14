@@ -9,6 +9,7 @@
 
 use std::io::SeekFrom;
 
+use magika::Result;
 use magika::SyncInput;
 use qubit_io::std_io::ReadSeek;
 
@@ -54,7 +55,7 @@ impl SyncInput for ReadSeekInput<'_> {
     ///
     /// The length supplied when the adapter was created.
     #[inline(always)]
-    fn length(&self) -> magika::Result<u64> {
+    fn length(&self) -> Result<u64> {
         Ok(self.length)
     }
 
@@ -69,11 +70,7 @@ impl SyncInput for ReadSeekInput<'_> {
     ///
     /// Returns a Magika I/O error when seeking or reading fails.
     #[inline(always)]
-    fn read_at(
-        &mut self,
-        buffer: &mut [u8],
-        offset: u64,
-    ) -> magika::Result<()> {
+    fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> Result<()> {
         self.reader.seek(SeekFrom::Start(offset))?;
         self.reader.read_exact(buffer)?;
         Ok(())
