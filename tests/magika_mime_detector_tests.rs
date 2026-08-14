@@ -12,6 +12,8 @@ use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -136,6 +138,43 @@ fn test_magika_detector_reader_detection_prefers_filename_without_reading() {
         );
 
     assert_eq!(Some("application/pdf".to_owned()), detected);
+}
+
+/// Verifies Magika I/O errors are converted to MIME I/O errors.
+#[test]
+fn test_magika_detector_reader_maps_magika_io_error() {
+    let detector = detector();
+    let mut reader = FailingReadSeek::new(b"not a pdf".to_vec(), true, None);
+
+    let error = detector
+        .detect_reader(&mut reader, None, MimeDetectionPolicy::VerifyContent)
+        .expect_err("Magika read failure should be reported");
+
+    assert!(matches!(error, MimeError::Io(_)));
+}
+
+/// Verifies a poisoned Magika session lock is converted to a backend error.
+#[test]
+fn test_magika_detector_maps_poisoned_session_lock() {
+    let detector = MagikaMimeDetector::new()
+        .expect("bundled ONNX Runtime should initialize Magika");
+    let mut reader = FailingReadSeek::new(b"not a pdf".to_vec(), false, None)
+        .panic_on_read();
+
+    let panic_result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = detector.detect_reader(
+            &mut reader,
+            None,
+            MimeDetectionPolicy::VerifyContent,
+        );
+    }));
+    assert!(panic_result.is_err());
+
+    let error = detector
+        .detect_by_content(b"not a pdf")
+        .expect_err("poisoned session lock should be reported");
+
+    assert!(matches!(error, MimeError::DetectorBackend { .. }));
 }
 
 /// Verifies successful reader detection restores the original position.

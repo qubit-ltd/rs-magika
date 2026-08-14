@@ -20,6 +20,8 @@ pub(crate) struct FailingReadSeek {
     inner: Cursor<Vec<u8>>,
     /// Whether reads should fail.
     fail_reads: bool,
+    /// Whether reads should panic.
+    panic_on_read: bool,
     /// Start offset that should fail after a read has been attempted.
     fail_restore_to: Option<u64>,
     /// Whether a read has been attempted.
@@ -47,6 +49,7 @@ impl FailingReadSeek {
         Self {
             inner: Cursor::new(content),
             fail_reads,
+            panic_on_read: false,
             fail_restore_to,
             read_attempted: false,
         }
@@ -61,12 +64,25 @@ impl FailingReadSeek {
     pub(crate) fn position(&self) -> u64 {
         self.inner.position()
     }
+
+    /// Configures the reader to panic when a read is attempted.
+    ///
+    /// # Returns
+    ///
+    /// The reader configured to panic on reads.
+    pub(crate) fn panic_on_read(mut self) -> Self {
+        self.panic_on_read = true;
+        self
+    }
 }
 
 impl Read for FailingReadSeek {
     /// Reads from the wrapped cursor or returns a configured read error.
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         self.read_attempted = true;
+        if self.panic_on_read {
+            panic!("forced read panic");
+        }
         if self.fail_reads {
             Err(Error::new(ErrorKind::UnexpectedEof, "forced read failure"))
         } else {
