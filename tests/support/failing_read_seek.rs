@@ -41,11 +41,7 @@ impl FailingReadSeek {
     /// # Returns
     ///
     /// A configured seekable test reader.
-    pub(crate) fn new(
-        content: Vec<u8>,
-        fail_reads: bool,
-        fail_restore_to: Option<u64>,
-    ) -> Self {
+    pub(crate) fn new(content: Vec<u8>, fail_reads: bool, fail_restore_to: Option<u64>) -> Self {
         Self {
             inner: Cursor::new(content),
             fail_reads,

@@ -24,6 +24,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "bigdecimal"
+version = "0.4.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d6867f1565b3aad85681f1015055b087fcfd840d6aeee6eee7f2da317603695"
+dependencies = [
+ "autocfg",
+ "libm",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -181,6 +195,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -260,6 +280,16 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
 ]
 
 [[package]]
@@ -391,9 +421,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-budget"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc94844f6f5cca8005774cbd1d84e58b9369b50eab393aa9b34d0662edf435fb"
+checksum = "f93253bc135140ca58d3d4f7dffcc330394cf94fec873c5f86ec3bb41dbfa18e"
 dependencies = [
  "thiserror 2.0.20",
 ]
@@ -448,7 +478,7 @@ dependencies = [
  "log",
  "process-wrap",
  "qubit-clock",
- "qubit-redact",
+ "qubit-redact 0.6.0",
  "same-file",
  "thiserror 2.0.20",
 ]
@@ -460,7 +490,7 @@ dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.6.0",
  "qubit-utils",
  "qubit-value",
  "serde",
@@ -472,6 +502,8 @@ dependencies = [
 [[package]]
 name = "qubit-datatype"
 version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34053b226e9502874d804c156a54b0e44977aa3fdc4e79c71646b3ae221b72e3"
 dependencies = [
  "qubit-budget",
  "qubit-json",
@@ -482,12 +514,12 @@ dependencies = [
 
 [[package]]
 name = "qubit-fs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
  "qubit-io",
- "qubit-redact",
+ "qubit-redact 0.6.0",
 ]
 
 [[package]]
@@ -501,7 +533,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-json"
-version = "0.8.0"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c34de3f5710b2cfd4d89099ffb53359b66e8bf69514590a3ef49f9378e47455"
 dependencies = [
  "qubit-budget",
  "serde",
@@ -516,6 +550,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "qubit-budget",
+ "qubit-redact 0.6.0 (git+https://github.com/qubit-ltd/rs-redact)",
  "rustix",
  "windows-sys 0.61.2",
 ]
@@ -535,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
@@ -552,13 +587,22 @@ dependencies = [
 
 [[package]]
 name = "qubit-redact"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
+ "bigdecimal",
  "fluent-uri",
  "qubit-budget",
  "qubit-json",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "qubit-redact"
+version = "0.6.0"
+source = "git+https://github.com/qubit-ltd/rs-redact#1b7a86f195fd1fdb779d89c963956b81690b2b59"
+dependencies = [
+ "qubit-budget",
 ]
 
 [[package]]
@@ -578,12 +622,12 @@ checksum = "7f9bf5cd2e783a8a6edd6536826084ef0a82d1924b14f82e79fe0088b7b33748"
 
 [[package]]
 name = "qubit-value"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.6.0",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

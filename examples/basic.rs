@@ -46,9 +46,7 @@ fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
 /// # Returns
 ///
 /// The detected MIME type, or `None` when no type is recognized.
-fn library_detect_content(
-    detector: &dyn MimeDetector,
-) -> MimeResult<Option<String>> {
+fn library_detect_content(detector: &dyn MimeDetector) -> MimeResult<Option<String>> {
     detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n")
 }
 
@@ -61,9 +59,7 @@ fn library_detect_content(
 /// # Returns
 ///
 /// The detected MIME type, or `None` when no repository rule matches.
-fn library_detect_filename(
-    detector: &dyn MimeDetector,
-) -> MimeResult<Option<String>> {
+fn library_detect_filename(detector: &dyn MimeDetector) -> MimeResult<Option<String>> {
     detector.detect_by_filename("document.pdf")
 }
 

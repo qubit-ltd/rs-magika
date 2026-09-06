@@ -20,8 +20,7 @@ use crate::support::detector;
 /// error.
 #[test]
 fn test_read_seek_input_restores_position_after_read_error() {
-    let mut reader =
-        FailingReadSeek::new(b"#!/bin/sh\necho hello\n".to_vec(), true, None);
+    let mut reader = FailingReadSeek::new(b"#!/bin/sh\necho hello\n".to_vec(), true, None);
     reader
         .seek(SeekFrom::Start(2))
         .expect("test reader should seek to original position");
@@ -37,11 +36,7 @@ fn test_read_seek_input_restores_position_after_read_error() {
 /// Verifies the reader adapter reports a failed restoration seek.
 #[test]
 fn test_read_seek_input_reports_restore_error() {
-    let mut reader = FailingReadSeek::new(
-        b"#!/bin/sh\necho hello\n".to_vec(),
-        false,
-        Some(2),
-    );
+    let mut reader = FailingReadSeek::new(b"#!/bin/sh\necho hello\n".to_vec(), false, Some(2));
     reader
         .seek(SeekFrom::Start(2))
         .expect("test reader should seek to original position");

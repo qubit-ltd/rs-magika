@@ -34,10 +34,7 @@ impl StaticMediaStreamClassifier {
     /// # Returns
     ///
     /// A configured deterministic classifier.
-    pub(crate) fn new(
-        stream_type: MediaStreamType,
-        expected_first_byte: Option<u8>,
-    ) -> Self {
+    pub(crate) fn new(stream_type: MediaStreamType, expected_first_byte: Option<u8>) -> Self {
         Self {
             stream_type,
             expected_first_byte,
@@ -52,10 +49,7 @@ impl MediaStreamClassifier for StaticMediaStreamClassifier {
     }
 
     /// Optionally consumes one byte and returns the configured classification.
-    fn classify_reader(
-        &self,
-        reader: &mut dyn Read,
-    ) -> MimeResult<MediaStreamType> {
+    fn classify_reader(&self, reader: &mut dyn Read) -> MimeResult<MediaStreamType> {
         if let Some(expected_first_byte) = self.expected_first_byte {
             let mut buffer = [0_u8; 1];
             reader.read_exact(&mut buffer)?;
