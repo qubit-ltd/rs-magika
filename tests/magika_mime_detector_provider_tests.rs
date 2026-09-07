@@ -90,7 +90,9 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
             .expect("filename detection should succeed"),
     );
 
-    registry.set_default_selection(selection);
+    registry
+        .set_default_selection(selection)
+        .expect("default selection should be valid");
 
     let provider = registry
         .resolve()
