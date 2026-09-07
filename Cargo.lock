@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-fs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-magika"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "magika",
  "ort",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
