@@ -32,7 +32,9 @@ fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
     registry.register(MagikaMimeDetectorProvider)?;
     let selection = ProviderSelection::named("magika")?;
-    registry.set_default_selection(selection.clone());
+    registry
+        .set_default_selection(selection.clone())
+        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
     Ok(provider.create_configured(&MimeConfig::default())?)
 }
