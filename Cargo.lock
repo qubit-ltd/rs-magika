@@ -472,13 +472,13 @@ dependencies = [
 
 [[package]]
 name = "qubit-command"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "libc",
  "log",
  "process-wrap",
  "qubit-clock",
- "qubit-redact 0.6.0",
+ "qubit-redact 0.7.0",
  "same-file",
  "thiserror 2.0.20",
 ]
@@ -490,7 +490,7 @@ dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact 0.6.0",
+ "qubit-redact 0.7.0",
  "qubit-utils",
  "qubit-value",
  "serde",
@@ -519,7 +519,7 @@ dependencies = [
  "fluent-uri",
  "qubit-budget",
  "qubit-io",
- "qubit-redact 0.6.0",
+ "qubit-redact 0.7.0",
 ]
 
 [[package]]
@@ -550,7 +550,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "qubit-budget",
- "qubit-redact 0.6.0 (git+https://github.com/qubit-ltd/rs-redact)",
+ "qubit-redact 0.7.0 (git+https://github.com/qubit-ltd/rs-redact?branch=dev-starfish)",
  "rustix",
  "windows-sys 0.61.2",
 ]
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-redact"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bigdecimal",
  "fluent-uri",
@@ -599,15 +599,15 @@ dependencies = [
 
 [[package]]
 name = "qubit-redact"
-version = "0.6.0"
-source = "git+https://github.com/qubit-ltd/rs-redact#1b7a86f195fd1fdb779d89c963956b81690b2b59"
+version = "0.7.0"
+source = "git+https://github.com/qubit-ltd/rs-redact?branch=dev-starfish#41adde89b8b2b842bbb3e6c7a1d786a1818f2cc4"
 dependencies = [
  "qubit-budget",
 ]
 
 [[package]]
 name = "qubit-spi"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "parking_lot",
  "qubit-collections",
@@ -627,7 +627,7 @@ dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact 0.6.0",
+ "qubit-redact 0.7.0",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
