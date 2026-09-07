@@ -26,6 +26,7 @@ use qubit_mime::MimeError;
 use qubit_mime::MimeRepository;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
+use qubit_mime::{ContentRequirement, MimeContentBackend};
 
 use crate::internal::ReadSeekInput;
 
@@ -442,5 +443,15 @@ fn map_magika_error(error: Error) -> MimeError {
     match error {
         Error::IOError(error) => MimeError::Io(error),
         error => MimeError::detector_backend("magika", error.to_string()),
+    }
+}
+
+impl MimeContentBackend for MagikaMimeDetector {
+    fn content_requirement(&self) -> ContentRequirement {
+        ContentRequirement::Prefix(self.max_buffer_size())
+    }
+
+    fn detect_bytes(&self, bytes: &[u8]) -> MimeResult<Vec<String>> {
+        Ok(self.detect_by_content(bytes)?.into_iter().collect())
     }
 }
