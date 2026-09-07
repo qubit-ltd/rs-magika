@@ -17,8 +17,10 @@ use magika::Error;
 use magika::Session;
 use magika::SyncInput;
 use qubit_io::std_io::ReadSeek;
+use qubit_mime::ContentRequirement;
 use qubit_mime::DetectionSource;
 use qubit_mime::MimeConfig;
+use qubit_mime::MimeContentBackend;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorCore;
@@ -26,7 +28,6 @@ use qubit_mime::MimeError;
 use qubit_mime::MimeRepository;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
-use qubit_mime::{ContentRequirement, MimeContentBackend};
 
 use crate::internal::ReadSeekInput;
 
