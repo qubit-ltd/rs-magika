@@ -25,7 +25,7 @@ your application provides ONNX Runtime through another linking strategy.
 ```toml
 [dependencies]
 qubit-mime = "0.12"
-qubit-magika = "0.10"
+qubit-magika = "0.11"
 qubit-spi = "0.12"
 ```
 
