@@ -11,7 +11,9 @@
 
 mod internal;
 mod magika_mime_detector;
+mod magika_mime_detector_builder;
 mod magika_mime_detector_provider;
 
 pub use magika_mime_detector::MagikaMimeDetector;
+pub use magika_mime_detector_builder::MagikaMimeDetectorBuilder;
 pub use magika_mime_detector_provider::MagikaMimeDetectorProvider;

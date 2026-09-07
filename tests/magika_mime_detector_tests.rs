@@ -71,17 +71,18 @@ fn test_magika_detector_delegates_filename_detection_to_repository() {
 
 /// Verifies accessors expose the configured core and repository.
 #[test]
-fn test_magika_detector_exposes_core_and_repository() {
-    let mut detector = MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
+fn test_magika_detector_builder_applies_mime_configuration() {
+    let detector = MagikaMimeDetector::builder()
+        .mime_config(MimeConfig::default())
+        .build()
+        .expect("bundled ONNX Runtime should initialize Magika");
 
     assert_eq!(
         Some("application/pdf".to_owned()),
-        detector.core().merge_results(&[], &["application/pdf".to_owned()])
+        detector
+            .detect_by_filename("document.pdf")
+            .expect("configured detector should resolve repository filenames")
     );
-    assert!(detector.repository().get("application/pdf").is_some());
-
-    detector.core_mut().set_media_stream_classifier(None);
-    assert!(detector.core().media_stream_classifier().is_none());
 }
 
 /// Verifies filename-preferred detection skips conflicting content inference.
@@ -194,14 +195,14 @@ fn test_magika_detector_reader_detection_refines_media_type() {
         )
         .expect("ambiguous mapping should be configurable");
     let config = MimeConfig::from_config(&raw_config).expect("precise detector config should parse");
-    let mut detector =
-        MagikaMimeDetector::from_mime_config(config).expect("bundled ONNX Runtime should initialize Magika");
-    detector
-        .core_mut()
-        .set_media_stream_classifier(Some(Arc::new(StaticMediaStreamClassifier::new(
+    let detector = MagikaMimeDetector::builder()
+        .mime_config(config)
+        .media_stream_classifier(Some(Arc::new(StaticMediaStreamClassifier::new(
             MediaStreamType::AudioOnly,
             Some(b'#'),
-        ))));
+        ))))
+        .build()
+        .expect("bundled ONNX Runtime should initialize Magika");
     let mut reader = Cursor::new(b"#!/bin/sh\necho hello\n".to_vec());
     reader.set_position(2);
 
