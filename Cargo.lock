@@ -448,7 +448,7 @@ dependencies = [
  "log",
  "process-wrap",
  "qubit-clock",
- "qubit-redact",
+ "qubit-redact 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "same-file",
  "thiserror 2.0.20",
 ]
@@ -460,7 +460,7 @@ dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.8.0",
  "qubit-utils",
  "qubit-value",
  "serde",
@@ -489,7 +489,7 @@ dependencies = [
  "fluent-uri",
  "qubit-budget",
  "qubit-io",
- "qubit-redact",
+ "qubit-redact 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -520,7 +520,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "qubit-budget",
- "qubit-redact",
+ "qubit-redact 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rustix",
  "windows-sys 0.61.2",
 ]
@@ -558,14 +558,21 @@ dependencies = [
 [[package]]
 name = "qubit-redact"
 version = "0.8.0"
+dependencies = [
+ "qubit-budget",
+ "qubit-json",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qubit-redact"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4bc84cd4d94ab169a9c65af5254830ba969e680840638af18eddbbcd62c4c38"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
- "qubit-json",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -590,7 +597,7 @@ dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.8.0",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
