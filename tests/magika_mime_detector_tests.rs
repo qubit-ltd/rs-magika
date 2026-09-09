@@ -56,6 +56,35 @@ const REAL_FILE_CASES: &[RealFileCase] = &[
     },
 ];
 
+/// The content-backend API requests complete input and preserves reader
+/// position.
+#[test]
+fn test_magika_content_backend_detects_complete_input() {
+    use qubit_mime::ContentRequirement;
+    use qubit_mime::MimeContentBackend;
+    use qubit_mime::MimeDetectorBackend;
+
+    let detector = detector();
+    let backend: &dyn MimeContentBackend = detector;
+    assert_eq!(backend.content_requirement(), ContentRequirement::Complete);
+    assert_eq!(
+        MimeDetectorBackend::max_test_bytes(detector),
+        detector.max_buffer_size()
+    );
+    let content = include_bytes!("fixtures/real_files/script.py");
+    let candidates = backend.detect_bytes(content).expect("content backend inference");
+    assert_eq!(candidates, vec!["text/x-python"]);
+    let mut bytes = b"skip".to_vec();
+    bytes.extend_from_slice(content);
+    let mut reader = Cursor::new(bytes);
+    reader.set_position(4);
+    assert_eq!(
+        backend.detect_reader(&mut reader).expect("complete reader inference"),
+        candidates
+    );
+    assert_eq!(reader.position(), 4);
+}
+
 /// Verifies filename-only detection delegates to the MIME repository.
 #[test]
 fn test_magika_detector_delegates_filename_detection_to_repository() {
