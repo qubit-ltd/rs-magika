@@ -443,24 +443,26 @@ dependencies = [
 [[package]]
 name = "qubit-command"
 version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f19045413dfd18ab403247b08e9a055ce00dd8c1e96a25e9a76dc5cf3651e7ce"
 dependencies = [
  "libc",
  "log",
  "process-wrap",
  "qubit-clock",
- "qubit-redact 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-redact",
  "same-file",
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "qubit-config"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact 0.8.0",
+ "qubit-redact",
  "qubit-utils",
  "qubit-value",
  "serde",
@@ -484,12 +486,12 @@ dependencies = [
 
 [[package]]
 name = "qubit-fs"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
  "qubit-io",
- "qubit-redact 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-redact",
 ]
 
 [[package]]
@@ -520,7 +522,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "qubit-budget",
- "qubit-redact 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qubit-redact",
  "rustix",
  "windows-sys 0.61.2",
 ]
@@ -540,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
@@ -558,21 +560,14 @@ dependencies = [
 [[package]]
 name = "qubit-redact"
 version = "0.8.0"
-dependencies = [
- "qubit-budget",
- "qubit-json",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "qubit-redact"
-version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4bc84cd4d94ab169a9c65af5254830ba969e680840638af18eddbbcd62c4c38"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
+ "qubit-json",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -592,12 +587,12 @@ checksum = "7f9bf5cd2e783a8a6edd6536826084ef0a82d1924b14f82e79fe0088b7b33748"
 
 [[package]]
 name = "qubit-value"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact 0.8.0",
+ "qubit-redact",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
