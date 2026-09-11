@@ -47,7 +47,7 @@ default-features = false
 optional = true
 
 [dev-dependencies]
-qubit-config = { path = "../rs-config", version = "0.17" }
+qubit-config = { path = "../rs-config", version = "0.14" }
 tempfile = "3.27"
 
 [[test]]
