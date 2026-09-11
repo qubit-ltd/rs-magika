@@ -458,6 +458,8 @@ dependencies = [
 [[package]]
 name = "qubit-config"
 version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "731de875d77b66111ea523ec2064bb5fd81e3f87c95ede577a967dfb7db5d762"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
