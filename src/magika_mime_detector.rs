@@ -211,6 +211,9 @@ impl MagikaMimeDetector {
 }
 
 impl MimeDetectorBackend for MagikaMimeDetector {
+    fn content_requirement(&self) -> ContentRequirement {
+        ContentRequirement::Complete
+    }
     /// Gets shared selection and refinement behavior.
     fn core(&self) -> &MimeDetectorCore {
         &self.core
