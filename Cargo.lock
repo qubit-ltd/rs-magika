@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-fs"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
@@ -498,9 +498,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-io"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "150e82d6bc1397f90c9d11c15aef225d298f06c0bbce860699863268015ce94e"
+checksum = "e3eea3e8f7e4b8f96cff01287dec8214ec565b0531b5b495204d14df7a05b85e"
 dependencies = [
  "qubit-utils",
 ]
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-magika"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "magika",
  "ort",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
