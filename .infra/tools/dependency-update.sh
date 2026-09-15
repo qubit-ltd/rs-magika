@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 project_root=$(cd "$script_dir/../.." && pwd -P)
+"$script_dir/prepare-local-path-dependencies.sh"
 policy_config="$project_root/.infra/dep/policy.toml"
 tool_runner="$project_root/.infra/tools/infra-tool.sh"
 mode="update"
