@@ -1,6 +1,6 @@
 [rs-infra-style]
 source = "https://github.com/qubit-ltd/rs-infra-style.git"
-revision = "95348e66f5f39c98bb17b6cfa148e14a44ad4c6d"
+revision = "b38ed5bc601c7f81116da03dd6924583885eb986"
 binary = "rs-infra-style"
 package = "qubit-infra-style"
 
