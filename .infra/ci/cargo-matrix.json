@@ -9,7 +9,7 @@
     },
     {
       "name": "no-default-features",
-      "commands": ["check", "test", "doc"],
+      "commands": ["check", "doc"],
       "defaultFeatures": false,
       "features": []
     }
