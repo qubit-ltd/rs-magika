@@ -12,7 +12,7 @@ package = "qubit-infra-verify"
 
 [rs-infra-coverage]
 source = "https://github.com/qubit-ltd/rs-infra-coverage.git"
-revision = "7da441cd04bb5fc02576a5a22b3f0f858dfab948"
+revision = "ddeb488954bed71a24fd7cd318c515b469e72f79"
 binary = "rs-infra-coverage"
 package = "qubit-infra-coverage"
 
