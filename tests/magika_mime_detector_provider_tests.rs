@@ -36,7 +36,11 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 
     assert_eq!(
         vec!["magika"],
-        registry.provider_ids().iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        registry
+            .provider_ids()
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
     );
 }
 

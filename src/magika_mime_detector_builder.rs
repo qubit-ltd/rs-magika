@@ -34,7 +34,10 @@ impl MagikaMimeDetectorBuilder {
 
     /// Sets the optional classifier used for precise media refinement.
     #[must_use]
-    pub fn media_stream_classifier(mut self, media_stream_classifier: Option<Arc<dyn MediaStreamClassifier>>) -> Self {
+    pub fn media_stream_classifier(
+        mut self,
+        media_stream_classifier: Option<Arc<dyn MediaStreamClassifier>>,
+    ) -> Self {
         self.media_stream_classifier = media_stream_classifier;
         self
     }
