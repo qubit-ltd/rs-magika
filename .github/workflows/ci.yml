@@ -14,15 +14,181 @@ permissions:
   id-token: write
 
 jobs:
-  dependency-policy:
+  dependency-baseline:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: qubit-ltd/rs-dependency-policy/.github/actions/check@39895c60b725068b7a72dc14d0ae18ee60c30e46
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Check dependency baseline
+        run: ./dependency-update.sh --check
 
-  rust-ci:
-    uses: qubit-ltd/rs-local-files/.github/workflows/repository-ci.yml@main
-    with:
-      repository: rs-magika
-      revision: ${{ github.event.pull_request.head.sha || github.sha }}
-    secrets: inherit
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Install Rustfmt
+        run: rustup component add rustfmt
+      - name: Run infrastructure CI orchestration
+        run: ./ci-check.sh
+      - name: Install Clippy
+        run: rustup component add clippy
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  prepare-feature-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Validate and generate feature matrix
+        id: matrix
+        run: |
+          set -euo pipefail
+          config=.infra/ci/cargo-matrix.json
+          jq -e '
+            .version == 1
+            and (.checks | type == "array" and length > 0)
+            and all(.checks[];
+              (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+              and (.commands | type == "array" and length > 0)
+              and ((if has("defaultFeatures") then .defaultFeatures else true end) | type == "boolean")
+              and ((.features // []) | type == "array" and all(.[]; type == "string"))
+            )
+          ' "$config" > /dev/null
+          matrix=$(jq -c '{include: [.checks[] | {
+            name,
+            commands: (.commands | join(",")),
+            default_features: (if has("defaultFeatures") then .defaultFeatures else true end),
+            features: ((.features // []) | join(","))
+          }]}' "$config")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  feature-matrix:
+    name: Feature matrix (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    needs: prepare-feature-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare-feature-matrix.outputs.matrix) }}
+    env:
+      CARGO_TARGET_DIR: target/feature-matrix/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Run configured compatibility commands
+        run: |
+          set -euo pipefail
+          cargo_args=(--locked)
+          if [ "${{ matrix.default_features }}" = "false" ]; then
+            cargo_args+=(--no-default-features)
+          fi
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo_args+=(--features "${{ matrix.features }}")
+          fi
+          IFS=, read -r -a commands <<< "${{ matrix.commands }}"
+          for command in "${commands[@]}"; do
+            case "$command" in
+              check | build | test)
+                cargo "$command" "${cargo_args[@]}"
+                ;;
+              doc)
+                RUSTDOCFLAGS="-D warnings" cargo doc --no-deps "${cargo_args[@]}"
+                ;;
+              doc-test)
+                cargo test --doc "${cargo_args[@]}"
+                ;;
+              clippy)
+                rustup component add clippy
+                cargo clippy --all-targets "${cargo_args[@]}" -- -D warnings
+                ;;
+              *)
+                echo "error: unsupported configured command '$command'" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --version 0.8.6 --locked
+      - name: Collect and check coverage
+        run: ./coverage.sh
+
+  pages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Build Pages site
+        run: ./.infra/tools/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" build
+      - name: Prepare Pages artifact
+        run: ./.infra/tools/infra-tool.sh rs-infra-pages --project "$GITHUB_WORKSPACE" artifact
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  pages-deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [pages]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/deploy-pages@v4
+
+  advanced-verification:
+    name: Infrastructure suite (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [miri, address-sanitizer, loom, fuzz, audit, cross, platform]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94
+      - name: Install suite-specific tools
+        run: |
+          case "${{ matrix.suite }}" in
+            audit) cargo install cargo-audit --locked ;;
+            fuzz) cargo install cargo-fuzz --locked ;;
+            cross) cargo install cross --locked ;;
+            miri)
+              rustup toolchain install nightly --profile minimal --component miri,rust-src
+              cargo +nightly miri setup
+              ;;
+            address-sanitizer) rustup toolchain install nightly --profile minimal --component rust-src ;;
+          esac
+      - name: Run configured infrastructure suite
+        run: |
+          if [ "${{ matrix.suite }}" = "loom" ]; then
+            export RUSTFLAGS="--cfg loom"
+          fi
+          ./.infra/tools/infra-tool.sh rs-infra-verify --project "$GITHUB_WORKSPACE" run --suite "${{ matrix.suite }}"

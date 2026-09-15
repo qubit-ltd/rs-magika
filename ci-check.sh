@@ -1,5 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-exec env RS_CI_PROJECT_ROOT="$PROJECT_ROOT" "$PROJECT_ROOT/.infra/tools/rs-ci/ci-check.sh" "$@"
+project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+exec "$project_root/.infra/tools/infra-tool.sh" rs-infra-ci --project "$project_root" check "$@"

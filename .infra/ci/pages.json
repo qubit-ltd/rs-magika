@@ -1,0 +1,8 @@
+{
+  "site_title": "Rust project",
+  "default_language": "en",
+  "languages": {
+    "en": {"readme": "README.md", "output": "index.html", "label": "English"},
+    "zh_CN": {"readme": "README.zh_CN.md", "output": "zh_CN/index.html", "label": "中文"}
+  }
+}

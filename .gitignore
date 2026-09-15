@@ -34,3 +34,6 @@ external/
 # Backup files
 *.bak
 *.backup
+
+# Locally installed pinned rs-infra tools
+.infra/tools/bin/
