@@ -13,7 +13,7 @@ while IFS=$'\t' read -r relative_path repository_url branch; do
         echo "error: incomplete local dependency entry '$relative_path'" >&2; exit 1;
     }
     target="$project_root/$relative_path"
-    [ -f "$target/Cargo.toml" ] && continue
+    [ -e "$target/.git" ] && continue
     mkdir -p "$(dirname "$target")"
     git clone --depth 1 --branch "$branch" "$repository_url" "$target"
 done < "$config"
