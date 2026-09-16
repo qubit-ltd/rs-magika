@@ -60,6 +60,7 @@ fi
 if [ "$tool" = "rs-infra-ci" ]; then
     "$script_dir/infra-tool.sh" rs-infra-style --help >/dev/null
     "$script_dir/infra-tool.sh" rs-infra-verify --help >/dev/null
+    "$script_dir/infra-tool.sh" rs-infra-coverage --help >/dev/null
 fi
 
 exec env RS_INFRA_BIN_DIR="$bin_dir" "$target" "$@"
