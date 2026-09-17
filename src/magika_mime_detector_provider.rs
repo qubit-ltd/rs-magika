@@ -45,10 +45,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// does not reliably distinguish a missing runtime from an invalid model or
     /// configuration. `OnAbsence` fallback therefore does not suppress it.
     #[inline(always)]
-    fn create_configured(
-        &self,
-        config: &MimeConfig,
-    ) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
+    fn create_configured(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
         MagikaMimeDetector::from_mime_config(config.clone())
             .map(|detector| Arc::new(detector) as Arc<dyn MimeDetector>)
             .map_err(ProviderFailure::initialization_failed)

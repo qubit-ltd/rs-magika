@@ -147,9 +147,7 @@ impl MagikaMimeDetector {
         I: SyncInput,
     {
         let mut session = self.session.lock().map_err(map_session_lock_error)?;
-        let file_type = session
-            .identify_content_sync(input)
-            .map_err(map_magika_error)?;
+        let file_type = session.identify_content_sync(input).map_err(map_magika_error)?;
         Ok(file_type
             .content_type()
             .and_then(content_type_to_mime)
