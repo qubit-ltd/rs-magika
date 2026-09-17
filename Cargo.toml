@@ -36,7 +36,7 @@ default = ["bundled-onnxruntime"]
 bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
 
 [dependencies]
-magika = "1.1"
+magika = "^1.1"
 qubit-io = "0.17"
 qubit-spi = { version = "0.12" }
 qubit-mime = { path = "../rs-mime" }
@@ -48,7 +48,7 @@ optional = true
 
 [dev-dependencies]
 qubit-config = "0.14"
-tempfile = "3.27"
+tempfile = "^3.27"
 
 [[test]]
 name = "tests"
