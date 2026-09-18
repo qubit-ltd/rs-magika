@@ -562,6 +562,8 @@ dependencies = [
 [[package]]
 name = "qubit-mime"
 version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "546ed4baf5a88fe11526c4e7eb455bedd6d64cd17728e521d9e1a3c3f58bc61d"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
