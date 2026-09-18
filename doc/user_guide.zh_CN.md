@@ -1,0 +1,134 @@
+# qubit-magika 用户手册
+
+[English user guide](user_guide.md)｜[README](../README.zh_CN.md)｜[API 文档](https://docs.rs/qubit-magika)
+
+## 手册目标与读者
+
+本手册面向使用 `qubit-mime`、需要通过 Magika 判断文件内容的 Rust 应用。内容对应
+`qubit-magika` 0.14，最低 Rust 版本为 1.94。crate 提供
+`MagikaMimeDetector` 及可选的 `MagikaMimeDetectorProvider`，但不会替代
+`qubit-mime` 的 detector 选择机制和 MIME 策略。
+
+## 概念模型
+
+应用启动时需要分别完成两件事：
+
+1. 把 `MagikaMimeDetectorProvider` 注册到全局 `MimeDetectorRegistry`，并选择
+   `magika` provider。
+2. 使用 `MimeConfig` 创建 detector；该配置负责 `qubit-mime` 周边的选择和结果
+   优化行为。
+
+仅按文件名检测时使用仓库中的文件名规则；按内容、reader 或本地文件检测时使用
+Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runtime session。
+同一个 detector 内部会串行化推理调用，因此可以用 `Arc` 在应用中共享它。
+
+## 贯穿场景
+
+假设应用接收一个上传的 Python 脚本：它需要根据内容得到 MIME 类型，同时保留对普通
+路径的文件名检测能力。成功标准是应用启动时只初始化一个 detector，对 Python 内容
+返回 `text/x-python`，对 `.pdf` 文件名返回 `application/pdf`。
+
+## 安装与最小配置
+
+在依赖中加入当前版本：
+
+```toml
+[dependencies]
+qubit-mime = "0.17"
+qubit-magika = "0.14"
+qubit-spi = "0.12"
+```
+
+默认 feature `bundled-onnxruntime` 会下载并链接默认 Magika session 所需的 ONNX
+Runtime binary。如果应用通过其他方式提供 ONNX Runtime，可以关闭 default features，
+再在自己的依赖图中配置对应的链接方案。
+
+## 核心工作流
+
+在应用启动阶段注册 provider，并创建一个可共享的 detector：
+
+```rust
+use std::error::Error;
+use std::sync::Arc;
+
+use qubit_magika::MagikaMimeDetectorProvider;
+use qubit_mime::{MimeConfig, MimeDetector, MimeDetectorRegistry};
+use qubit_spi::ProviderSelection;
+
+fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
+    let registry = MimeDetectorRegistry::global();
+    registry.register(MagikaMimeDetectorProvider::new())?;
+    let selection = ProviderSelection::named("magika")?;
+    registry.set_default_selection(selection.clone());
+    let provider = registry.resolve_selected(&selection)?;
+    Ok(provider.create_configured(&MimeConfig::default())?)
+}
+```
+
+使用这个 detector 分别检测内容和文件名：
+
+```rust
+use qubit_mime::MimeDetector;
+
+fn classify(detector: &dyn MimeDetector) -> qubit_mime::MimeResult<()> {
+    assert_eq!(
+        Some("text/x-python".to_owned()),
+        detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n")?,
+    );
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        detector.detect_by_filename("document.pdf")?,
+    );
+    Ok(())
+}
+```
+
+如果只需要默认配置，也可以直接调用 `MagikaMimeDetector::new()`。需要传入 MIME
+配置或 media-stream classifier 时，使用 `MagikaMimeDetector::builder()` 或
+`MagikaMimeDetector::from_mime_config`。
+
+## 进阶用法
+
+provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
+`magikamimedetector`。推荐使用规范名称 `magika`。
+
+`MagikaMimeDetector` 还实现了 `qubit-mime` 针对 seekable reader、本地文件以及同步或
+异步 provider path 的后端操作。reader 检测结束后会恢复原来的位置。provider path
+检测要求输入内容完整，并遵守 detector 的内容预算配置。
+
+## 错误与诊断
+
+如果 Magika 或 ONNX Runtime 无法初始化，创建 detector 会返回 `MimeError`。检测过程
+中的输入 I/O、内容不完整、后端推理失败或共享 session 锁中毒，也会以 `MimeError`
+返回。
+
+`Ok(None)` 表示 detector 没有找到 MIME 候选，不等同于初始化失败或 I/O 错误。应用应
+在启动阶段处理初始化错误，在读取输入的边界处理每次检测的错误。
+
+## 排障
+
+- 如果第一次检测前创建 detector 就失败，检查 ONNX Runtime feature 选择以及
+  `MimeError` 携带的 runtime/model 错误。
+- 如果文件名检测和内容检测结果不同，请注意前者使用 `qubit-mime` 仓库规则，后者
+  使用 Magika 推理；应根据输入选择合适的 `qubit-mime` 策略。
+- 如果 provider 注册或选择失败，应先注册 provider，再解析 `ProviderSelection`，并
+  使用规范名称 `magika`。
+- 如果 reader 无法检测，请确认它支持 seek，并且可以恢复原始位置。
+
+## 限制与最佳实践
+
+- crate 不会自动注册 provider。
+- 创建 detector 会初始化模型和 runtime；应创建一个 detector 并共享，不要为每个
+  输入重复创建。
+- 同一个 detector 上的推理会在内部串行执行。
+- `qubit-magika` 不保证每个输入都有 MIME 结果；调用方必须处理 `Ok(None)` 和
+  `MimeError`。
+- 本 crate 暴露 Magika 映射后的 MIME 结果，不另行定义 MIME registry，也不替代
+  `qubit-mime` 配置。
+
+## 延伸阅读
+
+- [README](../README.zh_CN.md)
+- [English user guide](user_guide.md)
+- [API 文档](https://docs.rs/qubit-magika)
+- [示例](../examples/basic.rs)
