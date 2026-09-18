@@ -95,8 +95,13 @@ provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
 `magikamimedetector`。推荐使用规范名称 `magika`。
 
 `MagikaMimeDetector` 还实现了 `qubit-mime` 针对 seekable reader、本地文件以及同步或
-异步 provider path 的后端操作。reader 检测结束后会恢复原来的位置。provider path
-检测要求输入内容完整，并遵守 detector 的内容预算配置。
+异步 provider path 的后端操作。reader 检测结束后会恢复原来的位置；content backend
+从当前 cursor 对应的剩余资源开始检测，而通用 detector API 仍保持整份资源语义。
+Provider path 检测会累计限制 `max_bytes`：支持范围读取时只请求受预算限制的窗口，并在
+可用时使用条件 ETag 读取；不支持范围读取时执行一次有界读取，已知资源超过预算则返回
+错误。Magika 的 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的
+`MimeDetectionPolicy` 统一处理文件名回退。
+异步路径会先等待特征提取，再短暂锁定共享 Session 执行同步推理。
 
 ## 错误与诊断
 

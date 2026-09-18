@@ -86,6 +86,13 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建一次并
 共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
 
+Provider path 检测会把 `max_bytes` 作为所有 Magika 读取的累计预算。文件系统支持范围
+读取时，Magika 只请求受预算限制的窗口；如果同时支持条件读取，还会使用 ETag 快照。
+不支持范围读取的 provider 会在预算内执行一次读取；已知资源长度超过预算时返回
+`MimeError::BufferLimitExceeded`。Magika 返回 `Unknown` 或 `Undefined` 时结果为
+`Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
+异步路径先等待文件系统完成特征提取，再短暂锁定共享 Session 执行同步 Magika 推理。
+
 ## 延伸阅读
 
 - [English user guide](doc/user_guide.md)

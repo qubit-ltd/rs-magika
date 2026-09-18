@@ -105,8 +105,16 @@ The provider accepts these selection names: `magika`,
 
 `MagikaMimeDetector` also implements the `qubit-mime` backend operations for
 seekable readers, local files, and synchronous or asynchronous provider paths.
-Reader detection restores the original reader position. Provider-path
-detection requires complete content and observes the configured content budget.
+Reader detection restores the original reader position. Content-backend reader
+detection classifies the remaining resource from the current cursor, while the
+generic detector API keeps whole-resource semantics. Provider-path detection
+enforces `max_bytes` cumulatively across all reads. Range-capable providers use
+bounded windows and conditional ETag reads when available; providers without
+range support use a bounded single read and reject known resources larger than
+the budget. Unknown and undefined Magika types become `Ok(None)` so filename
+fallback follows the selected `MimeDetectionPolicy`.
+The asynchronous path awaits feature extraction before briefly locking the
+shared session for synchronous inference.
 
 ## Errors and Diagnostics
 

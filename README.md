@@ -92,6 +92,15 @@ Creating a detector initializes the embedded Magika model and ONNX Runtime
 session. Create it once, share it (for example with `Arc`), and expect inference
 calls on a shared detector to be serialized internally.
 
+Provider-path detection enforces `max_bytes` across all Magika reads. Range-capable
+filesystems use bounded windows and an ETag snapshot when conditional reads are
+available. Providers without range support use one bounded read; a known resource
+larger than the budget returns `MimeError::BufferLimitExceeded`. Unknown and
+undefined Magika types return `Ok(None)`, allowing the selected
+`MimeDetectionPolicy` to apply filename fallback consistently.
+The asynchronous path awaits filesystem feature extraction first, then briefly
+locks the shared session for synchronous Magika inference.
+
 ## Learn More
 
 - [English user guide](doc/user_guide.md)
