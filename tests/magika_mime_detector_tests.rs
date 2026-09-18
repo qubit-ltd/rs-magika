@@ -88,13 +88,9 @@ fn test_magika_content_backend_detects_complete_input() {
 /// The complete-content contract survives an `Arc<dyn MimeDetector>` wrapper.
 #[test]
 fn test_magika_complete_content_contract_survives_shared_detector_wrapper() {
-    let detector: Arc<dyn MimeDetector> = Arc::new(
-        MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika"),
-    );
-    assert_eq!(
-        detector.content_requirement(),
-        qubit_mime::ContentRequirement::Complete,
-    );
+    let detector: Arc<dyn MimeDetector> =
+        Arc::new(MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika"));
+    assert_eq!(detector.content_requirement(), qubit_mime::ContentRequirement::Complete,);
     assert!(matches!(
         detector.detect_prefix(b"prefix", None, MimeDetectionPolicy::VerifyContent),
         Err(MimeError::CompleteContentRequired),
