@@ -8,13 +8,13 @@
 [![English Document](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 
 `qubit-magika` 为 `qubit-mime` 提供基于 Magika 的
-`qubit_mime::MimeDetector`。它适合需要结合文件内容识别 MIME 类型、同时希望在
-应用启动时创建一个 detector 并在多个调用之间复用它的应用或库。
+`qubit_mime::MimeDetector`。它适合需要结合文件内容识别 MIME 类型，并希望在应用
+启动时创建一个 detector、在多次检测之间复用它的应用或库。
 
 ## 概述
 
-本 crate 默认启用 `bundled-onnxruntime`，便于普通构建直接链接和运行。如果业务
-程序自己提供 ONNX Runtime 链接方式，可以关闭默认 features。
+本 crate 默认启用 `bundled-onnxruntime`，普通构建无需单独安装 ONNX Runtime 即可
+链接和运行。如果应用通过其他方式提供 ONNX Runtime，可以关闭默认 feature。
 
 ## 安装
 
@@ -39,7 +39,7 @@ use qubit_mime::{
 };
 use qubit_spi::ProviderSelection;
 
-// App 启动时注册 Provider，并且只创建一次昂贵的推理 Session。
+// 应用启动时注册 Provider，并且只创建一次开销较高的推理 Session。
 fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
     registry.register(MagikaMimeDetectorProvider::new())?;
@@ -51,7 +51,7 @@ fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     Ok(provider.create_configured(&MimeConfig::default())?)
 }
 
-// 下游库借用 Detector，不重复构建模型。
+// 下游库复用 Detector，不重复初始化模型。
 fn library_x(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
     detector.detect_by_content(
         b"#!/usr/bin/env python3\nprint('hello')\n",
@@ -78,13 +78,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 `MagikaMimeDetector` 的文件名检测委托给
 `qubit_mime::RepositoryMimeDetector`。内容、reader 和文件检测使用 Magika 推理，
-然后返回 Magika 映射出的 MIME type。
+再返回 Magika 映射出的 MIME type。
 
 Provider 选择和 detector 配置是两个独立输入：`ProviderSelection` 决定允许哪个已注册
 Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的 detector 实例。
-`qubit-magika` 不会自动注册自己；App 在启动时显式控制进程级注册和默认选择。
-创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建
-一次并共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
+`qubit-magika` 不会自动注册自己；应用需要在启动时显式完成进程级注册并设置默认选择。
+创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建一次并
+共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
 
 ## 延伸阅读
 
