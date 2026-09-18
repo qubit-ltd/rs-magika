@@ -7,14 +7,13 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![中文文档](https://img.shields.io/badge/文档-中文版-blue.svg)](README.zh_CN.md)
 
-Magika-backed MIME detector integration for `qubit-mime`.
+`qubit-magika` adds a Magika-backed `qubit_mime::MimeDetector` for applications
+that need content-aware MIME detection without putting Magika and ONNX Runtime
+dependencies into `qubit-mime` itself. It is intended for applications and
+libraries that can initialize one detector during startup and share it across
+their detection calls.
 
 ## Overview
-
-Qubit Magika provides `MagikaMimeDetector`, a `qubit_mime::MimeDetector`
-implementation backed by Google's Magika model. It keeps Magika and ONNX
-Runtime dependencies outside `qubit-mime`, while still allowing applications to
-register Magika as a detector provider.
 
 The crate enables `bundled-onnxruntime` by default so ordinary builds can link
 and run without a separately installed ONNX Runtime. Disable default features if
@@ -24,8 +23,8 @@ your application provides ONNX Runtime through another linking strategy.
 
 ```toml
 [dependencies]
-qubit-mime = "0.16"
-qubit-magika = "0.13"
+qubit-mime = "0.17"
+qubit-magika = "0.14"
 qubit-spi = "0.12"
 ```
 
@@ -48,13 +47,15 @@ fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
     registry.register(MagikaMimeDetectorProvider::new())?;
     let selection = ProviderSelection::named("magika")?;
-    registry.set_default_selection(selection.clone());
+    registry
+        .set_default_selection(selection.clone())
+        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
     Ok(provider.create_configured(&MimeConfig::default())?)
 }
 
 // Downstream libraries borrow the detector instead of rebuilding the model.
-fn library_x(detector: &dyn MimeDetector) -> Option<String> {
+fn library_x(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
     detector.detect_by_content(
         b"#!/usr/bin/env python3\nprint('hello')\n",
     )
@@ -64,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let detector = create_detector()?;
     assert_eq!(
         Some("text/x-python".to_owned()),
-        library_x(detector.as_ref()),
+        library_x(detector.as_ref())?,
     );
     Ok(())
 }
@@ -74,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 - `magika`
 - `magika-mime-detector`
-- `MagikaMimeDetector`
+- `magikamimedetector`
 
 ## Notes
 
@@ -90,6 +91,13 @@ controls process-wide registration and the default selection during startup.
 Creating a detector initializes the embedded Magika model and ONNX Runtime
 session. Create it once, share it (for example with `Arc`), and expect inference
 calls on a shared detector to be serialized internally.
+
+## Learn More
+
+- [English user guide](doc/user_guide.md)
+- [中文用户手册](doc/user_guide.zh_CN.md)
+- [API documentation](https://docs.rs/qubit-magika)
+- [中文 README](README.zh_CN.md)
 
 ## Testing
 

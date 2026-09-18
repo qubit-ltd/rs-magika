@@ -7,14 +7,11 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![English Document](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 
-面向 `qubit-mime` 的 Magika 后端 MIME detector 集成。
+`qubit-magika` 为 `qubit-mime` 提供基于 Magika 的
+`qubit_mime::MimeDetector`。它适合需要结合文件内容识别 MIME 类型、同时希望在
+应用启动时创建一个 detector 并在多个调用之间复用它的应用或库。
 
 ## 概述
-
-Qubit Magika 提供 `MagikaMimeDetector`，它实现
-`qubit_mime::MimeDetector`，底层使用 Google Magika 模型。这样可以把
-Magika 和 ONNX Runtime 依赖隔离在 `qubit-magika` 中，而不是直接放进
-`qubit-mime` 核心库。
 
 本 crate 默认启用 `bundled-onnxruntime`，便于普通构建直接链接和运行。如果业务
 程序自己提供 ONNX Runtime 链接方式，可以关闭默认 features。
@@ -23,8 +20,8 @@ Magika 和 ONNX Runtime 依赖隔离在 `qubit-magika` 中，而不是直接放�
 
 ```toml
 [dependencies]
-qubit-mime = "0.16"
-qubit-magika = "0.13"
+qubit-mime = "0.17"
+qubit-magika = "0.14"
 qubit-spi = "0.12"
 ```
 
@@ -47,13 +44,15 @@ fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
     registry.register(MagikaMimeDetectorProvider::new())?;
     let selection = ProviderSelection::named("magika")?;
-    registry.set_default_selection(selection.clone());
+    registry
+        .set_default_selection(selection.clone())
+        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
     Ok(provider.create_configured(&MimeConfig::default())?)
 }
 
 // 下游库借用 Detector，不重复构建模型。
-fn library_x(detector: &dyn MimeDetector) -> Option<String> {
+fn library_x(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
     detector.detect_by_content(
         b"#!/usr/bin/env python3\nprint('hello')\n",
     )
@@ -63,7 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let detector = create_detector()?;
     assert_eq!(
         Some("text/x-python".to_owned()),
-        library_x(detector.as_ref()),
+        library_x(detector.as_ref())?,
     );
     Ok(())
 }
@@ -73,7 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 - `magika`
 - `magika-mime-detector`
-- `MagikaMimeDetector`
+- `magikamimedetector`
 
 ## 说明
 
@@ -86,6 +85,13 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 `qubit-magika` 不会自动注册自己；App 在启动时显式控制进程级注册和默认选择。
 创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建
 一次并共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
+
+## 延伸阅读
+
+- [English user guide](doc/user_guide.md)
+- [中文用户手册](doc/user_guide.zh_CN.md)
+- [API 文档](https://docs.rs/qubit-magika)
+- [English README](README.md)
 
 ## 测试
 
