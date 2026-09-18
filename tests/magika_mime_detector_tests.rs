@@ -33,6 +33,7 @@ use tempfile::NamedTempFile;
 
 use crate::support::FailingReadSeek;
 use crate::support::RealFileCase;
+use crate::support::SparseReadSeek;
 use crate::support::StaticMediaStreamClassifier;
 use crate::support::detector;
 
@@ -85,6 +86,56 @@ fn test_magika_content_backend_detects_complete_input() {
     assert_eq!(reader.position(), 4);
 }
 
+#[test]
+fn reader_window_content_backend_uses_sparse_reads() {
+    use qubit_mime::MimeContentBackend;
+
+    let detector = detector();
+    let backend: &dyn MimeContentBackend = detector;
+    let fixture = include_bytes!("fixtures/real_files/script.py").to_vec();
+    let mut reader = SparseReadSeek::new(32 * 1024 * 1024, fixture);
+    reader.seek(SeekFrom::Start(0)).expect("sparse reader should seek");
+
+    let candidates = backend
+        .detect_reader(&mut reader)
+        .expect("window detection should succeed");
+
+    assert_eq!(vec!["text/x-python".to_owned()], candidates);
+    assert!(reader.bytes_read() <= 8 * 1024);
+    assert_eq!(0, reader.stream_position().expect("position should be readable"));
+}
+
+#[test]
+fn reader_window_content_backend_starts_at_cursor() {
+    use qubit_mime::MimeContentBackend;
+
+    let detector = detector();
+    let backend: &dyn MimeContentBackend = detector;
+    let fixture = include_bytes!("fixtures/real_files/script.py");
+    let mut bytes = b"skip".to_vec();
+    bytes.extend_from_slice(fixture);
+    let expected = backend.detect_bytes(fixture).expect("fixture detection should succeed");
+    let mut reader = Cursor::new(bytes);
+    reader.seek(SeekFrom::Start(4)).expect("reader should seek");
+
+    assert_eq!(
+        expected,
+        backend
+            .detect_reader(&mut reader)
+            .expect("window detection should succeed")
+    );
+    assert_eq!(4, reader.stream_position().expect("position should be readable"));
+}
+
+#[test]
+fn reader_window_content_backend_restores_after_failure() {
+    let mut reader = FailingReadSeek::new(b"script".to_vec(), true, None);
+    let error = qubit_mime::MimeContentBackend::detect_reader(detector(), &mut reader)
+        .expect_err("forced reader failure should propagate");
+    assert!(matches!(error, MimeError::Io { .. }));
+    assert_eq!(0, reader.position());
+}
+
 /// The complete-content contract survives an `Arc<dyn MimeDetector>` wrapper.
 #[test]
 fn test_magika_complete_content_contract_survives_shared_detector_wrapper() {
@@ -107,6 +158,43 @@ fn test_magika_detector_delegates_filename_detection_to_repository() {
         detector
             .detect_by_filename("document.pdf")
             .expect("filename detection should succeed")
+    );
+}
+
+#[test]
+fn unknown_content_uses_policy() {
+    let detector = detector();
+    let unknown = [0xff_u8];
+
+    assert_eq!(
+        None,
+        detector
+            .detect_by_content(&unknown)
+            .expect("unknown content should be unmapped")
+    );
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        detector
+            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::Freedesktop)
+            .expect("freedesktop policy should use filename fallback"),
+    );
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        detector
+            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::ContentFirst)
+            .expect("content-first policy should use filename fallback when content is absent"),
+    );
+    assert_eq!(
+        None,
+        detector
+            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::VerifyContent)
+            .expect("verify policy should reject absent content candidates"),
+    );
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        detector
+            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::PreferFilename)
+            .expect("prefer-filename policy should skip content"),
     );
 }
 
