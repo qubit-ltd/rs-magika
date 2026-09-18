@@ -112,3 +112,28 @@ impl ProviderMetadata for MagikaMimeDetectorProvider {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use qubit_mime::MimeConfig;
+    use qubit_mime::MimeDetector;
+    use qubit_spi::ProviderMetadata;
+    use qubit_spi::ServiceProvider;
+
+    use super::MagikaMimeDetectorProvider;
+
+    #[test]
+    fn provider_constructor_and_configuration_work() {
+        let provider = MagikaMimeDetectorProvider::new();
+        assert_eq!("magika", provider.descriptor().id().as_str());
+        let detector = provider
+            .create_configured(&MimeConfig::default())
+            .expect("provider should create a detector");
+        assert_eq!(
+            Some("application/pdf".to_owned()),
+            detector
+                .detect_by_filename("document.pdf")
+                .expect("filename should classify")
+        );
+    }
+}

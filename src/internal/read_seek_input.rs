@@ -100,9 +100,9 @@ mod tests {
         let mut reader = Cursor::new(b"prefix-script".to_vec());
         let mut input = ReadSeekInput::new(&mut reader, 7, 6);
         let mut buffer = [0_u8; 6];
-        input.read_at(&mut buffer, 0).expect("bounded read should succeed");
+        SyncInput::read_at(&mut input, &mut buffer, 0).expect("bounded read should succeed");
         assert_eq!(&buffer, b"script");
-        assert_eq!(6, input.length().expect("length should be available"));
+        assert_eq!(6, SyncInput::length(&input).expect("length should be available"));
     }
 
     #[test]
@@ -110,6 +110,14 @@ mod tests {
         let mut reader = Cursor::new(b"script".to_vec());
         let mut input = ReadSeekInput::new(&mut reader, 0, 6);
         let mut buffer = [0_u8; 1];
-        assert!(input.read_at(&mut buffer, 6).is_err());
+        assert!(SyncInput::read_at(&mut input, &mut buffer, 6).is_err());
+    }
+
+    #[test]
+    fn bounded_input_rejects_base_offset_overflow() {
+        let mut reader = Cursor::new(vec![0_u8; 1]);
+        let mut input = ReadSeekInput::new(&mut reader, u64::MAX, 1);
+        let mut buffer = [0_u8; 1];
+        assert!(SyncInput::read_at(&mut input, &mut buffer, 0).is_err());
     }
 }

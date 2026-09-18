@@ -21,6 +21,11 @@ use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::ReadOptions;
 use qubit_mime::MimeError;
 
+#[cfg(test)]
+#[path = "../../tests/support/provider_file_system_spi.rs"]
+#[allow(dead_code)]
+pub(crate) mod provider_file_system_spi;
+
 /// Tracks the total number of bytes requested during one detection.
 #[derive(Debug)]
 pub(crate) struct ReadBudget {
@@ -103,10 +108,12 @@ impl<'a> SyncProviderInput<'a> {
 }
 
 impl SyncInput for SyncProviderInput<'_> {
+    #[inline(always)]
     fn length(&self) -> MagikaResult<u64> {
         Ok(self.length)
     }
 
+    #[inline(always)]
     fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         read_sync(
             self.file_system,
@@ -149,10 +156,12 @@ impl<'a> AsyncProviderInput<'a> {
 }
 
 impl AsyncInput for AsyncProviderInput<'_> {
+    #[inline(always)]
     async fn length(&self) -> MagikaResult<u64> {
         Ok(self.length)
     }
 
+    #[inline(always)]
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         validate_request(self.length, &mut self.budget, buffer.len(), offset)?;
         let options = read_options(offset, buffer.len(), self.version.as_ref());
@@ -239,9 +248,37 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::RawWaker;
+    use std::task::RawWakerVTable;
+    use std::task::Waker;
+
+    use magika::AsyncInput;
+    use magika::Error;
+
+    use super::AsyncProviderInput;
     use super::BudgetExceeded;
     use super::ReadBudget;
+    use super::copy_exact;
     use super::invalid_input;
+    use super::map_provider_magika_error;
+    use super::validate_request;
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        const VTABLE: RawWakerVTable =
+            RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
 
     #[test]
     fn budget_counts_repeated_reads() {
@@ -280,5 +317,38 @@ mod tests {
             invalid_input("invalid provider input").to_string()
         );
         assert!(BudgetExceeded { requested: 9, limit: 8 }.to_string().contains("9 > 8"));
+    }
+
+    #[test]
+    fn request_validation_and_copy_errors_are_mapped() {
+        let mut budget = ReadBudget::new(8);
+        assert!(validate_request(8, &mut budget, 0, 99).is_ok());
+        assert!(validate_request(8, &mut budget, 2, 7).is_err());
+        assert!(validate_request(8, &mut budget, 2, u64::MAX).is_err());
+        let mut output = [0_u8; 2];
+        assert!(copy_exact(&mut output, vec![1]).is_err());
+        assert!(copy_exact(&mut output, vec![1, 2]).is_ok());
+        let mapped = map_provider_magika_error(Error::IOError(std::io::Error::other("provider failure")));
+        assert!(matches!(mapped, qubit_mime::MimeError::Io(_)));
+    }
+
+    #[test]
+    fn async_provider_input_reads_and_reports_short_ranges() {
+        let spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec()).with_range();
+        let file_system = spi.async_file_system();
+        let path = qubit_fs::Path::parse("/fixture").expect("fixture path should parse");
+        let mut input = AsyncProviderInput::new(&file_system, &path, 6, None, 8);
+        assert_eq!(6, block_on(AsyncInput::length(&input)).expect("length should work"));
+        let mut output = [0_u8; 3];
+        block_on(AsyncInput::read_at(&mut input, &mut output, 1)).expect("range should read");
+        assert_eq!(&output, b"bcd");
+
+        let short_spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec())
+            .with_range()
+            .short_reads();
+        let short_file_system = short_spi.async_file_system();
+        let mut short_input = AsyncProviderInput::new(&short_file_system, &path, 6, None, 8);
+        let mut output = [0_u8; 3];
+        assert!(block_on(AsyncInput::read_at(&mut short_input, &mut output, 1)).is_err());
     }
 }

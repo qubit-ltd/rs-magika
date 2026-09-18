@@ -14,7 +14,6 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 
-use magika::AsyncInput;
 use magika::ContentType;
 use magika::Error;
 use magika::FeaturesOrRuled;
@@ -470,10 +469,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     }
 }
 
-async fn guess_from_async_input<I>(detector: &MagikaMimeDetector, input: I) -> MimeResult<Vec<String>>
-where
-    I: AsyncInput,
-{
+async fn guess_from_async_input(
+    detector: &MagikaMimeDetector,
+    input: AsyncProviderInput<'_>,
+) -> MimeResult<Vec<String>> {
     let file_type = FeaturesOrRuled::extract_async(input)
         .await
         .map_err(map_provider_magika_error)?;
@@ -504,15 +503,18 @@ where
 /// MIME type name, or `None` for undefined content.
 #[inline]
 fn content_type_to_mime(content_type: ContentType) -> Option<String> {
-    let mime_type = match content_type {
-        ContentType::Unknown | ContentType::Undefined => return None,
-        content_type => content_type.info().mime_type,
-    };
-    if mime_type.is_empty() {
-        None
-    } else {
-        Some(mime_type.to_owned())
+    owned_mime_type(content_type_mime_name(content_type))
+}
+
+fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
+    match content_type {
+        ContentType::Unknown | ContentType::Undefined => None,
+        content_type => Some(content_type.info().mime_type),
     }
+}
+
+fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
+    mime_type.filter(|mime_type| !mime_type.is_empty()).map(str::to_owned)
 }
 
 /// Converts a poisoned Magika session lock to a MIME error.
@@ -566,12 +568,151 @@ impl MimeContentBackend for MagikaMimeDetector {
 
 #[cfg(test)]
 mod tests {
-    use magika::ContentType;
+    use std::io::Cursor;
+    use std::io::Write;
 
+    use magika::ContentType;
+    use qubit_io::std_io::ReadSeek;
+    use qubit_mime::ContentRequirement;
+    use qubit_mime::MimeConfig;
+    use qubit_mime::MimeContentBackend;
+    use qubit_mime::MimeDetector;
+    use qubit_mime::MimeDetectorBackend;
+    use tempfile::NamedTempFile;
+
+    use super::MagikaMimeDetector;
     use super::content_type_to_mime;
 
     #[test]
     fn undefined_content_is_not_a_candidate() {
         assert_eq!(None, content_type_to_mime(ContentType::Undefined));
+    }
+
+    #[test]
+    fn constructor_and_builder_paths_are_covered() {
+        let detector = MagikaMimeDetector::new().expect("detector should initialize");
+        assert_eq!(
+            Some("application/pdf".to_owned()),
+            detector.guess_from_filename("document.pdf").first().cloned()
+        );
+        let content_backend: &dyn MimeContentBackend = &detector;
+        assert_eq!(ContentRequirement::Complete, content_backend.content_requirement());
+        assert_eq!(
+            vec!["text/x-python"],
+            content_backend
+                .detect_bytes(b"#!/usr/bin/env python3\nprint('ok')\n")
+                .expect("bytes should classify")
+        );
+        let detector_backend: &dyn MimeDetectorBackend = &detector;
+        assert_eq!(ContentRequirement::Complete, detector_backend.content_requirement());
+        assert_eq!(detector.max_buffer_size(), detector_backend.max_test_bytes());
+        assert_eq!(
+            vec!["application/pdf"],
+            detector_backend.guess_from_filename("document.pdf")
+        );
+        assert_eq!(
+            vec!["text/x-python"],
+            detector_backend
+                .guess_from_content(b"#!/usr/bin/env python3\nprint('ok')\n")
+                .expect("content should classify")
+        );
+        let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
+        assert_eq!(
+            vec!["text/x-python"],
+            MimeContentBackend::detect_reader(&detector, &mut reader).expect("content reader should classify")
+        );
+        let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
+        assert_eq!(
+            (vec!["text/x-python".to_owned()], Vec::new()),
+            MimeDetectorBackend::guess_from_reader(&detector, &mut reader).expect("detector reader should classify")
+        );
+        assert_eq!(
+            (vec!["text/x-python".to_owned()], Vec::new()),
+            MimeDetectorBackend::guess_from_file(
+                &detector,
+                std::path::Path::new("tests/fixtures/real_files/script.py"),
+            )
+            .expect("detector file should classify")
+        );
+        assert_eq!(
+            ContentRequirement::Complete,
+            MimeContentBackend::content_requirement(&detector)
+        );
+        assert_eq!(
+            ContentRequirement::Complete,
+            MimeDetectorBackend::content_requirement(&detector)
+        );
+        assert_eq!(
+            detector.max_buffer_size(),
+            MimeDetectorBackend::max_test_bytes(&detector)
+        );
+        assert_eq!(
+            vec!["application/pdf"],
+            MimeDetectorBackend::guess_from_filename(&detector, "document.pdf")
+        );
+        assert_eq!(
+            vec!["text/x-python"],
+            MimeDetectorBackend::guess_from_content(&detector, b"#!/usr/bin/env python3\nprint('ok')\n",)
+                .expect("fully qualified content should classify")
+        );
+        let _ = MagikaMimeDetector::builder()
+            .mime_config(MimeConfig::default())
+            .build()
+            .expect("builder should initialize");
+        let _ =
+            MagikaMimeDetector::from_mime_config(MimeConfig::default()).expect("configured detector should initialize");
+    }
+
+    #[test]
+    fn private_file_and_reader_paths_are_covered() {
+        let detector = MagikaMimeDetector::new().expect("detector should initialize");
+        let mut file = NamedTempFile::new().expect("temporary file should be created");
+        file.write_all(b"#!/usr/bin/env python3\nprint('ok')\n")
+            .expect("fixture should be written");
+        assert_eq!(
+            vec!["text/x-python"],
+            detector
+                .guess_from_magika_file(file.path())
+                .expect("file should classify")
+        );
+        let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
+        assert_eq!(
+            vec!["text/x-python"],
+            detector
+                .guess_from_reader_with_scope(&mut reader, super::ReaderScope::WholeResource)
+                .expect("reader should classify")
+        );
+        let mut reader = Cursor::new(b"skip#!/usr/bin/env python3\nprint('ok')\n".to_vec());
+        reader.set_position(4);
+        let reader: &mut dyn ReadSeek = &mut reader;
+        assert_eq!(
+            vec!["text/x-python"],
+            detector
+                .guess_from_reader_with_scope(reader, super::ReaderScope::Remaining)
+                .expect("remaining reader window should classify")
+        );
+    }
+
+    #[test]
+    fn magika_errors_map_to_mime_errors() {
+        let error = super::map_magika_error(magika::Error::IOError(std::io::Error::other("io")));
+        assert!(matches!(error, qubit_mime::MimeError::Io(_)));
+    }
+
+    #[test]
+    fn poisoned_session_errors_are_mapped() {
+        let detector =
+            std::sync::Arc::new(MagikaMimeDetector::new().expect("detector should initialize for lock test"));
+        let poisoned = std::sync::Arc::clone(&detector);
+        std::thread::spawn(move || {
+            let _guard = poisoned.session.lock().expect("session lock should be available");
+            panic!("poison session lock");
+        })
+        .join()
+        .expect_err("thread should poison the lock");
+        let mapped = detector
+            .guess_from_magika_input(&b"content"[..])
+            .expect_err("poisoned session should fail detection");
+        assert!(matches!(mapped, qubit_mime::MimeError::DetectorBackend { .. }));
     }
 }
