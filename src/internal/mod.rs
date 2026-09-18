@@ -7,6 +7,10 @@
 // =============================================================================
 //! Private implementation details for the Magika detector.
 
+mod provider_input;
 mod read_seek_input;
 
+pub(crate) use provider_input::AsyncProviderInput;
+pub(crate) use provider_input::SyncProviderInput;
+pub(crate) use provider_input::map_provider_magika_error;
 pub(crate) use read_seek_input::ReadSeekInput;

@@ -23,6 +23,8 @@ use magika::SyncInput;
 use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
 use qubit_fs::Path as FsPath;
+use qubit_fs::error::FsErrorKind;
+use qubit_fs::metadata::FileSystemCapability;
 use qubit_fs::read::ReadOptions;
 use qubit_io::std_io::ReadSeek;
 use qubit_mime::ContentRequirement;
@@ -34,7 +36,10 @@ use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
 
+use crate::internal::AsyncProviderInput;
 use crate::internal::ReadSeekInput;
+use crate::internal::SyncProviderInput;
+use crate::internal::map_provider_magika_error;
 
 /// Blocking MIME detector backed by Google's Magika model.
 ///
@@ -204,18 +209,36 @@ impl MagikaMimeDetector {
     /// Returns [`MimeError::Io`] when seeking or reading fails, or
     /// [`MimeError::DetectorBackend`] when Magika inference fails or the
     /// session lock is poisoned.
-    fn guess_from_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<Vec<String>> {
+    fn guess_from_reader_with_scope(&self, reader: &mut dyn ReadSeek, scope: ReaderScope) -> MimeResult<Vec<String>> {
         let original_position = reader.stream_position()?;
-        let length = reader.seek(SeekFrom::End(0))?;
-        let mut input = ReadSeekInput::new(reader, 0, length);
-        let result = self.guess_from_magika_input(&mut input);
-        let restore_result = input.reader_mut().seek(SeekFrom::Start(original_position));
+        let result = (|| {
+            let end = reader.seek(SeekFrom::End(0))?;
+            let base_offset = match scope {
+                ReaderScope::WholeResource => 0,
+                ReaderScope::Remaining => original_position,
+            };
+            let length = end.checked_sub(base_offset).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "reader end precedes window start")
+            })?;
+            let mut input = ReadSeekInput::new(reader, base_offset, length);
+            self.guess_from_magika_input(&mut input)
+        })();
+        let restore_result = reader.seek(SeekFrom::Start(original_position));
         match (result, restore_result) {
             (Ok(candidates), Ok(_)) => Ok(candidates),
             (Err(error), Ok(_)) => Err(error),
             (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(MimeError::Io(error)),
         }
     }
+}
+
+/// Defines the logical resource exposed to a reader based backend.
+#[derive(Clone, Copy)]
+enum ReaderScope {
+    /// The whole seekable resource, starting at byte zero.
+    WholeResource,
+    /// The resource from the caller's current position to EOF.
+    Remaining,
 }
 
 impl MimeDetectorBackend for MagikaMimeDetector {
@@ -281,7 +304,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// fails, or [`MimeError::DetectorBackend`] when Magika inference fails or
     /// the session lock is poisoned.
     fn guess_from_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<(Vec<String>, Vec<u8>)> {
-        Ok((self.guess_from_reader(reader)?, Vec::new()))
+        Ok((
+            self.guess_from_reader_with_scope(reader, ReaderScope::WholeResource)?,
+            Vec::new(),
+        ))
     }
 
     /// Detects a MIME type from a local file.
@@ -325,21 +351,57 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         path: &FsPath,
         max_bytes: usize,
     ) -> MimeResult<(Vec<String>, Option<Vec<u8>>)> {
-        let metadata = file_system.stat(path)?;
-        let length = metadata.len().ok_or(MimeError::CompleteContentRequired)?;
-        if length > usize::MAX as u64 {
+        let limit = self.max_test_bytes();
+        if max_bytes > limit {
             return Err(MimeError::BufferLimitExceeded {
-                requested: usize::MAX,
-                limit: max_bytes,
+                requested: max_bytes,
+                limit,
             });
         }
-        let mut input = ProviderSyncInput {
-            file_system,
-            path,
-            length,
-            budget: max_bytes,
+        let metadata = match file_system.stat(path) {
+            Ok(metadata) => Some(metadata),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
+                ) =>
+            {
+                None
+            }
+            Err(error) => return Err(error.into()),
         };
-        Ok((self.guess_from_magika_input(&mut input)?, None))
+        let capabilities = file_system.properties().capabilities();
+        if let Some(metadata) = metadata.as_ref()
+            && let Some(length) = metadata.len()
+        {
+            if capabilities.supports(FileSystemCapability::RangeRead) {
+                let version = capabilities
+                    .supports(FileSystemCapability::ConditionalRead)
+                    .then(|| metadata.etag().cloned())
+                    .flatten();
+                let input = SyncProviderInput::new(file_system, path, length, version, max_bytes);
+                let mut session = self.session.lock().map_err(map_session_lock_error)?;
+                let file_type = session
+                    .identify_content_sync(input)
+                    .map_err(map_provider_magika_error)?;
+                let candidates = file_type
+                    .content_type()
+                    .and_then(content_type_to_mime)
+                    .into_iter()
+                    .collect();
+                return Ok((candidates, None));
+            }
+            let requested = usize::try_from(length).unwrap_or(usize::MAX);
+            if length > max_bytes as u64 {
+                return Err(MimeError::BufferLimitExceeded {
+                    requested,
+                    limit: max_bytes,
+                });
+            }
+        }
+        let bytes = file_system.read_all(path, ReadOptions::default(), max_bytes)?;
+        let candidates = self.guess_from_magika_input(bytes.as_slice())?;
+        Ok((candidates, None))
     }
 
     /// Detects MIME candidates from an asynchronous filesystem path.
@@ -361,134 +423,73 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         max_bytes: usize,
     ) -> Pin<Box<dyn Future<Output = MimeResult<(Vec<String>, Option<Vec<u8>>)>> + Send + 'a>> {
         Box::pin(async move {
-            let metadata = file_system.stat(path).await?;
-            let length = metadata.len().ok_or(MimeError::CompleteContentRequired)?;
-            let input = ProviderAsyncInput {
-                file_system,
-                path,
-                length,
-                budget: max_bytes,
-            };
-            let file_type = FeaturesOrRuled::extract_async(input).await.map_err(map_magika_error)?;
-            let candidates = match file_type {
-                FeaturesOrRuled::Ruled(content_type) => content_type_to_mime(content_type).into_iter().collect(),
-                FeaturesOrRuled::Features(features) => {
-                    let mut session = self.session.lock().map_err(map_session_lock_error)?;
-                    let file_type = session.identify_features_sync(&features).map_err(map_magika_error)?;
-                    file_type
-                        .content_type()
-                        .and_then(content_type_to_mime)
-                        .into_iter()
-                        .collect()
+            let limit = self.max_test_bytes();
+            if max_bytes > limit {
+                return Err(MimeError::BufferLimitExceeded {
+                    requested: max_bytes,
+                    limit,
+                });
+            }
+            let metadata = match file_system.stat(path).await {
+                Ok(metadata) => Some(metadata),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
+                    ) =>
+                {
+                    None
                 }
+                Err(error) => return Err(error.into()),
             };
+            let capabilities = file_system.properties().capabilities();
+            if let Some(metadata) = metadata.as_ref()
+                && let Some(length) = metadata.len()
+            {
+                if capabilities.supports(FileSystemCapability::RangeRead) {
+                    let version = capabilities
+                        .supports(FileSystemCapability::ConditionalRead)
+                        .then(|| metadata.etag().cloned())
+                        .flatten();
+                    let input = AsyncProviderInput::new(file_system, path, length, version, max_bytes);
+                    let candidates = guess_from_async_input(self, input).await?;
+                    return Ok((candidates, None));
+                }
+                let requested = usize::try_from(length).unwrap_or(usize::MAX);
+                if length > max_bytes as u64 {
+                    return Err(MimeError::BufferLimitExceeded {
+                        requested,
+                        limit: max_bytes,
+                    });
+                }
+            }
+            let bytes = file_system.read_all(path, ReadOptions::default(), max_bytes).await?;
+            let candidates = self.guess_from_magika_input(bytes.as_slice())?;
             Ok((candidates, None))
         })
     }
 }
 
-/// Adapts synchronous filesystem reads to Magika's random-access input.
-struct ProviderSyncInput<'a> {
-    /// Filesystem used for bounded reads.
-    file_system: &'a FileSystem,
-    /// Path whose contents are being classified.
-    path: &'a FsPath,
-    /// Complete file length reported to Magika.
-    length: u64,
-    /// Maximum size of an individual read.
-    budget: usize,
-}
-
-impl magika::SyncInput for ProviderSyncInput<'_> {
-    /// Returns the complete file length.
-    fn length(&self) -> magika::Result<u64> {
-        Ok(self.length)
-    }
-
-    /// Reads one bounded range from the filesystem.
-    fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> magika::Result<()> {
-        let end = offset
-            .checked_add(buffer.len() as u64)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "offset overflow"))?;
-        if end > self.length {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "read exceeds input").into());
+async fn guess_from_async_input<I>(detector: &MagikaMimeDetector, input: I) -> MimeResult<Vec<String>>
+where
+    I: AsyncInput,
+{
+    let file_type = FeaturesOrRuled::extract_async(input)
+        .await
+        .map_err(map_provider_magika_error)?;
+    match file_type {
+        FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type).into_iter().collect()),
+        FeaturesOrRuled::Features(features) => {
+            let mut session = detector.session.lock().map_err(map_session_lock_error)?;
+            let file_type = session
+                .identify_features_sync(&features)
+                .map_err(map_provider_magika_error)?;
+            Ok(file_type
+                .content_type()
+                .and_then(content_type_to_mime)
+                .into_iter()
+                .collect())
         }
-        if buffer.len() > self.budget {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::FileTooLarge,
-                format!("qubit-magika-budget:{}:{}", buffer.len(), self.budget),
-            )
-            .into());
-        }
-        let bytes = self
-            .file_system
-            .read_prefix(
-                self.path,
-                ReadOptions::default()
-                    .with_offset(Some(offset))
-                    .with_length(Some(buffer.len() as u64)),
-                buffer.len(),
-            )
-            .map_err(|error| error.into_io_error())?
-            .into_bytes();
-        if bytes.len() != buffer.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short provider read").into());
-        }
-        buffer.copy_from_slice(&bytes);
-        Ok(())
-    }
-}
-
-/// Adapts asynchronous filesystem reads to Magika's random-access input.
-struct ProviderAsyncInput<'a> {
-    /// Filesystem used for bounded reads.
-    file_system: &'a AsyncFileSystem,
-    /// Path whose contents are being classified.
-    path: &'a FsPath,
-    /// Complete file length reported to Magika.
-    length: u64,
-    /// Maximum size of an individual read.
-    budget: usize,
-}
-
-impl AsyncInput for ProviderAsyncInput<'_> {
-    /// Returns the complete file length.
-    async fn length(&self) -> magika::Result<u64> {
-        Ok(self.length)
-    }
-
-    /// Reads one bounded range from the filesystem.
-    async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> magika::Result<()> {
-        let end = offset
-            .checked_add(buffer.len() as u64)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "offset overflow"))?;
-        if end > self.length {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "read exceeds input").into());
-        }
-        if buffer.len() > self.budget {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::FileTooLarge,
-                format!("qubit-magika-budget:{}:{}", buffer.len(), self.budget),
-            )
-            .into());
-        }
-        let bytes = self
-            .file_system
-            .read_prefix(
-                self.path,
-                ReadOptions::default()
-                    .with_offset(Some(offset))
-                    .with_length(Some(buffer.len() as u64)),
-                buffer.len(),
-            )
-            .await
-            .map_err(|error| error.into_io_error())?
-            .into_bytes();
-        if bytes.len() != buffer.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short provider read").into());
-        }
-        buffer.copy_from_slice(&bytes);
-        Ok(())
     }
 }
 
@@ -504,8 +505,7 @@ impl AsyncInput for ProviderAsyncInput<'_> {
 #[inline]
 fn content_type_to_mime(content_type: ContentType) -> Option<String> {
     let mime_type = match content_type {
-        ContentType::Unknown => "application/octet-stream",
-        ContentType::Undefined => "application/undefined",
+        ContentType::Unknown | ContentType::Undefined => return None,
         content_type => content_type.info().mime_type,
     };
     if mime_type.is_empty() {
@@ -555,5 +555,23 @@ impl MimeContentBackend for MagikaMimeDetector {
     /// Detects MIME candidates from complete content bytes.
     fn detect_bytes(&self, bytes: &[u8]) -> MimeResult<Vec<String>> {
         self.guess_from_magika_input(bytes)
+    }
+
+    /// Detects the logical content window from the current reader position to
+    /// EOF.
+    fn detect_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<Vec<String>> {
+        self.guess_from_reader_with_scope(reader, ReaderScope::Remaining)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use magika::ContentType;
+
+    use super::content_type_to_mime;
+
+    #[test]
+    fn undefined_content_is_not_a_candidate() {
+        assert_eq!(None, content_type_to_mime(ContentType::Undefined));
     }
 }

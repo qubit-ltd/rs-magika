@@ -43,17 +43,6 @@ impl<'reader> ReadSeekInput<'reader> {
             length,
         }
     }
-
-    /// Returns the wrapped reader for position restoration.
-    ///
-    /// # Returns
-    ///
-    /// The mutable seekable reader borrowed by this adapter.
-    #[must_use]
-    #[inline]
-    pub(crate) fn reader_mut(&mut self) -> &mut dyn ReadSeek {
-        self.reader
-    }
 }
 
 impl SyncInput for ReadSeekInput<'_> {
@@ -95,5 +84,32 @@ impl SyncInput for ReadSeekInput<'_> {
         self.reader.seek(SeekFrom::Start(absolute))?;
         self.reader.read_exact(buffer)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use magika::SyncInput;
+
+    use super::ReadSeekInput;
+
+    #[test]
+    fn bounded_input_reads_from_base_offset() {
+        let mut reader = Cursor::new(b"prefix-script".to_vec());
+        let mut input = ReadSeekInput::new(&mut reader, 7, 6);
+        let mut buffer = [0_u8; 6];
+        input.read_at(&mut buffer, 0).expect("bounded read should succeed");
+        assert_eq!(&buffer, b"script");
+        assert_eq!(6, input.length().expect("length should be available"));
+    }
+
+    #[test]
+    fn bounded_input_rejects_out_of_range_reads() {
+        let mut reader = Cursor::new(b"script".to_vec());
+        let mut input = ReadSeekInput::new(&mut reader, 0, 6);
+        let mut buffer = [0_u8; 1];
+        assert!(input.read_at(&mut buffer, 6).is_err());
     }
 }
