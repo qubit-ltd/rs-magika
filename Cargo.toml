@@ -1,6 +1,6 @@
 [package]
 name = "qubit-magika"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.94"
 autotests = false
@@ -38,8 +38,9 @@ bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
 [dependencies]
 magika = "^1.1"
 qubit-io = "0.17"
+qubit-fs = { version = "0.2", default-features = false, features = ["async"] }
 qubit-spi = { version = "0.12" }
-qubit-mime = "0.16"
+qubit-mime = "0.17"
 
 [dependencies.ort]
 version = "=2.0.0-rc.12"
@@ -48,6 +49,7 @@ optional = true
 
 [dev-dependencies]
 qubit-config = "0.14"
+qubit-fs-local = "0.9"
 tempfile = "^3.27"
 
 [[test]]

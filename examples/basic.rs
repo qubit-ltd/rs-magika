@@ -30,7 +30,7 @@ use qubit_spi::ProviderSelection;
 /// initialization fails.
 fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
-    registry.register(MagikaMimeDetectorProvider)?;
+    registry.register(MagikaMimeDetectorProvider::new())?;
     let selection = ProviderSelection::named("magika")?;
     registry
         .set_default_selection(selection.clone())

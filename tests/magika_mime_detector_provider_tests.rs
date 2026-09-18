@@ -16,7 +16,7 @@ use qubit_spi::ProviderSelection;
 /// Tests provider self-description and one-argument registration.
 #[test]
 fn test_magika_mime_detector_provider_metadata_and_registration() {
-    let descriptor = MagikaMimeDetectorProvider.descriptor();
+    let descriptor = MagikaMimeDetectorProvider::new().descriptor();
 
     assert_eq!(descriptor.id().as_str(), "magika");
     assert_eq!(
@@ -31,7 +31,7 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 
     let registry = MimeDetectorRegistry::default();
     registry
-        .register(MagikaMimeDetectorProvider)
+        .register(MagikaMimeDetectorProvider::new())
         .expect("magika provider should register");
 
     assert_eq!(
@@ -46,7 +46,7 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 fn test_resolve_explicit_then_create_with_mime_config() {
     let registry = MimeDetectorRegistry::default();
     registry
-        .register(MagikaMimeDetectorProvider)
+        .register(MagikaMimeDetectorProvider::new())
         .expect("magika provider should register");
     let selection = ProviderSelection::named("magika").expect("selection should be valid");
     let provider = registry
@@ -72,7 +72,7 @@ fn test_resolve_explicit_then_create_with_mime_config() {
 fn test_global_registry_resolve_explicit_and_default_then_create() {
     let registry = MimeDetectorRegistry::global();
     registry
-        .register(MagikaMimeDetectorProvider)
+        .register(MagikaMimeDetectorProvider::new())
         .expect("App startup should register the Magika provider");
     let selection = ProviderSelection::named("magika").expect("Magika selection should be valid");
 

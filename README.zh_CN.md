@@ -45,7 +45,7 @@ use qubit_spi::ProviderSelection;
 // App 启动时注册 Provider，并且只创建一次昂贵的推理 Session。
 fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
-    registry.register(MagikaMimeDetectorProvider)?;
+    registry.register(MagikaMimeDetectorProvider::new())?;
     let selection = ProviderSelection::named("magika")?;
     registry.set_default_selection(selection.clone());
     let provider = registry.resolve_selected(&selection)?;

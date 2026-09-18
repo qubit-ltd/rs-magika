@@ -22,8 +22,36 @@ use qubit_spi::provider_descriptor;
 use crate::MagikaMimeDetector;
 
 /// Provider for [`MagikaMimeDetector`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MagikaMimeDetectorProvider;
+#[derive(Clone, Default)]
+pub struct MagikaMimeDetectorProvider {
+    media_stream_classifier: Option<Arc<dyn qubit_mime::MediaStreamClassifier>>,
+}
+
+impl std::fmt::Debug for MagikaMimeDetectorProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MagikaMimeDetectorProvider")
+            .field(
+                "media_stream_classifier",
+                &self.media_stream_classifier.as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
+}
+
+impl MagikaMimeDetectorProvider {
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    pub fn with_media_stream_classifier(classifier: Arc<dyn qubit_mime::MediaStreamClassifier>) -> Self {
+        Self {
+            media_stream_classifier: Some(classifier),
+        }
+    }
+}
 
 impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// Creates a Magika-backed detector.
@@ -46,7 +74,10 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// configuration. `OnAbsence` fallback therefore does not suppress it.
     #[inline(always)]
     fn create_configured(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
-        MagikaMimeDetector::from_mime_config(config.clone())
+        MagikaMimeDetector::builder()
+            .mime_config(config.clone())
+            .media_stream_classifier(self.media_stream_classifier.clone())
+            .build()
             .map(|detector| Arc::new(detector) as Arc<dyn MimeDetector>)
             .map_err(ProviderFailure::initialization_failed)
     }

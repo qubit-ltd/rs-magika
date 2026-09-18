@@ -46,7 +46,7 @@ use qubit_spi::ProviderSelection;
 // App startup registers the provider and creates the expensive session once.
 fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let registry = MimeDetectorRegistry::global();
-    registry.register(MagikaMimeDetectorProvider)?;
+    registry.register(MagikaMimeDetectorProvider::new())?;
     let selection = ProviderSelection::named("magika")?;
     registry.set_default_selection(selection.clone());
     let provider = registry.resolve_selected(&selection)?;
