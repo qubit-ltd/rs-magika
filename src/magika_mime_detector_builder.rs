@@ -2,6 +2,8 @@
 //    Copyright (c) 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Builder for Magika MIME detectors.
 
@@ -18,6 +20,15 @@ use crate::MagikaMimeDetector;
 use crate::magika_mime_detector::map_magika_error;
 
 /// Builder for a [`MagikaMimeDetector`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use qubit_magika::MagikaMimeDetectorBuilder;
+///
+/// let detector = MagikaMimeDetectorBuilder::default().build()?;
+/// # Ok::<(), qubit_mime::MimeError>(())
+/// ```
 #[derive(Debug, Default)]
 pub struct MagikaMimeDetectorBuilder {
     mime_config: MimeConfig,

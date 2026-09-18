@@ -22,12 +22,24 @@ use qubit_spi::provider_descriptor;
 use crate::MagikaMimeDetector;
 
 /// Provider for [`MagikaMimeDetector`].
+///
+/// # Examples
+///
+/// ```
+/// use qubit_magika::MagikaMimeDetectorProvider;
+/// use qubit_spi::ProviderMetadata;
+///
+/// let provider = MagikaMimeDetectorProvider::new();
+/// assert_eq!(provider.descriptor().id().as_str(), "magika");
+/// ```
 #[derive(Clone, Default)]
 pub struct MagikaMimeDetectorProvider {
+    /// Optional classifier used for precise media-stream refinement.
     media_stream_classifier: Option<Arc<dyn qubit_mime::MediaStreamClassifier>>,
 }
 
 impl std::fmt::Debug for MagikaMimeDetectorProvider {
+    /// Formats the provider without exposing classifier internals.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MagikaMimeDetectorProvider")
@@ -40,11 +52,13 @@ impl std::fmt::Debug for MagikaMimeDetectorProvider {
 }
 
 impl MagikaMimeDetectorProvider {
+    /// Creates a provider with the default configuration.
     #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a provider with a classifier for precise media refinement.
     #[inline]
     pub fn with_media_stream_classifier(classifier: Arc<dyn qubit_mime::MediaStreamClassifier>) -> Self {
         Self {
@@ -72,7 +86,6 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// is classified as initialization failure because Magika's upstream error
     /// does not reliably distinguish a missing runtime from an invalid model or
     /// configuration. `OnAbsence` fallback therefore does not suppress it.
-    #[inline(always)]
     fn create_configured(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
         MagikaMimeDetector::builder()
             .mime_config(config.clone())

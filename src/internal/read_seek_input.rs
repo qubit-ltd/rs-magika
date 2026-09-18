@@ -35,7 +35,7 @@ impl<'reader> ReadSeekInput<'reader> {
     /// # Returns
     ///
     /// A random-access Magika input adapter.
-    #[inline(always)]
+    #[inline]
     pub(crate) fn new(reader: &'reader mut dyn ReadSeek, base_offset: u64, length: u64) -> Self {
         Self {
             reader,
@@ -49,7 +49,8 @@ impl<'reader> ReadSeekInput<'reader> {
     /// # Returns
     ///
     /// The mutable seekable reader borrowed by this adapter.
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub(crate) fn reader_mut(&mut self) -> &mut dyn ReadSeek {
         self.reader
     }
@@ -61,7 +62,7 @@ impl SyncInput for ReadSeekInput<'_> {
     /// # Returns
     ///
     /// The length supplied when the adapter was created.
-    #[inline(always)]
+    #[inline]
     fn length(&self) -> Result<u64> {
         Ok(self.length)
     }
@@ -76,7 +77,7 @@ impl SyncInput for ReadSeekInput<'_> {
     /// # Errors
     ///
     /// Returns a Magika I/O error when seeking or reading fails.
-    #[inline(always)]
+    #[inline]
     fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> Result<()> {
         let end = offset
             .checked_add(buffer.len() as u64)

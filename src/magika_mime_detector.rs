@@ -70,7 +70,8 @@ pub struct MagikaMimeDetector {
 
 impl MagikaMimeDetector {
     /// Creates a detector builder.
-    #[inline(always)]
+    #[must_use]
+    #[inline]
     pub fn builder() -> crate::MagikaMimeDetectorBuilder {
         crate::MagikaMimeDetectorBuilder::default()
     }
@@ -87,7 +88,6 @@ impl MagikaMimeDetector {
     /// Returns [`MimeError::Io`] for runtime I/O failures or
     /// [`MimeError::DetectorBackend`] when Magika or ONNX Runtime cannot
     /// initialize.
-    #[inline(always)]
     pub fn new() -> MimeResult<Self> {
         Self::from_mime_config(MimeConfig::default())
     }
@@ -127,7 +127,7 @@ impl MagikaMimeDetector {
     /// # Returns
     ///
     /// Candidate MIME type names.
-    #[inline(always)]
+    #[inline]
     fn guess_from_filename(&self, filename: &str) -> Vec<String> {
         self.filename_detector.guess_from_filename(filename)
     }
@@ -219,14 +219,17 @@ impl MagikaMimeDetector {
 }
 
 impl MimeDetectorBackend for MagikaMimeDetector {
+    /// Reports that this backend requires complete content.
     fn content_requirement(&self) -> ContentRequirement {
         ContentRequirement::Complete
     }
+
     /// Gets shared selection and refinement behavior.
     fn core(&self) -> &MimeDetectorCore {
         &self.core
     }
 
+    /// Returns the configured maximum content buffer size.
     fn max_test_bytes(&self) -> usize {
         self.core.max_buffer_size()
     }
@@ -239,14 +242,13 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// `Ok(Some(_))` contains the selected MIME type; `Ok(None)` means no
-    /// repository rule matches.
-    #[inline(always)]
+    /// The returned vector contains zero or more repository MIME candidates.
+    #[inline]
     fn guess_from_filename(&self, filename: &str) -> Vec<String> {
         self.guess_from_filename(filename)
     }
 
-    /// Detects a MIME type from content bytes using blocking Magika inference.
+    /// Detects MIME candidates from complete bytes.
     ///
     /// # Parameters
     ///
@@ -254,8 +256,8 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// `Ok(Some(_))` contains the detected MIME type; `Ok(None)` means Magika
-    /// returned no mapped type.
+    /// The returned vector contains zero or more MIME candidates. Filename and
+    /// policy selection are handled by the higher-level detector API.
     ///
     /// # Errors
     /// Propagates Magika inference and media-classifier errors.
@@ -263,34 +265,15 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         self.guess_from_magika_input(content)
     }
 
-    /// Detects a MIME type from bytes and an optional filename.
-    ///
-    /// # Parameters
-    ///
-    /// * `content` - Complete content bytes to inspect.
-    /// * `filename` - Optional filename used for repository matching.
-    /// * `policy` - Strategy for combining filename and content candidates.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Some(_))` contains the selected MIME type; `Ok(None)` means neither
-    /// source yields a candidate.
-    ///
-    /// # Errors
-    /// Propagates Magika inference and media-classifier errors.
-    /// Detects a MIME type from a seekable reader without consuming its
-    /// position.
+    /// Detects MIME candidates from a seekable reader without consuming it.
     ///
     /// # Parameters
     ///
     /// * `reader` - Seekable content source whose position is restored.
-    /// * `filename` - Optional filename used for repository matching.
-    /// * `policy` - Strategy for combining filename and content candidates.
     ///
     /// # Returns
     ///
-    /// The selected MIME type, or `None` when neither source yields a
-    /// candidate.
+    /// The returned vector contains zero or more MIME candidates.
     ///
     /// # Errors
     ///
@@ -306,7 +289,6 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// # Parameters
     ///
     /// * `file` - Local file to inspect.
-    /// * `policy` - Strategy for combining filename and content candidates.
     ///
     /// # Returns
     ///
@@ -322,6 +304,21 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         Ok((self.guess_from_magika_file(file)?, Vec::new()))
     }
 
+    /// Detects MIME candidates from a synchronous filesystem path.
+    ///
+    /// The complete file length is reported to Magika, while each read is
+    /// bounded by `max_bytes`.
+    ///
+    /// # Parameters
+    ///
+    /// * `file_system` - Filesystem used to access the path.
+    /// * `path` - File path to inspect.
+    /// * `max_bytes` - Maximum bytes allowed in one read.
+    ///
+    /// # Errors
+    ///
+    /// Returns a MIME error when metadata, filesystem reads, or Magika
+    /// inference fails.
     fn guess_from_provider_path(
         &self,
         file_system: &FileSystem,
@@ -345,6 +342,18 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         Ok((self.guess_from_magika_input(&mut input)?, None))
     }
 
+    /// Detects MIME candidates from an asynchronous filesystem path.
+    ///
+    /// # Parameters
+    ///
+    /// * `file_system` - Asynchronous filesystem used to access the path.
+    /// * `path` - File path to inspect.
+    /// * `max_bytes` - Maximum bytes allowed in one read.
+    ///
+    /// # Errors
+    ///
+    /// Returns a MIME error when metadata, filesystem reads, or Magika
+    /// inference fails.
     fn guess_from_async_provider_path<'a>(
         &'a self,
         file_system: &'a AsyncFileSystem,
@@ -378,18 +387,25 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     }
 }
 
+/// Adapts synchronous filesystem reads to Magika's random-access input.
 struct ProviderSyncInput<'a> {
+    /// Filesystem used for bounded reads.
     file_system: &'a FileSystem,
+    /// Path whose contents are being classified.
     path: &'a FsPath,
+    /// Complete file length reported to Magika.
     length: u64,
+    /// Maximum size of an individual read.
     budget: usize,
 }
 
 impl magika::SyncInput for ProviderSyncInput<'_> {
+    /// Returns the complete file length.
     fn length(&self) -> magika::Result<u64> {
         Ok(self.length)
     }
 
+    /// Reads one bounded range from the filesystem.
     fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> magika::Result<()> {
         let end = offset
             .checked_add(buffer.len() as u64)
@@ -423,18 +439,25 @@ impl magika::SyncInput for ProviderSyncInput<'_> {
     }
 }
 
+/// Adapts asynchronous filesystem reads to Magika's random-access input.
 struct ProviderAsyncInput<'a> {
+    /// Filesystem used for bounded reads.
     file_system: &'a AsyncFileSystem,
+    /// Path whose contents are being classified.
     path: &'a FsPath,
+    /// Complete file length reported to Magika.
     length: u64,
+    /// Maximum size of an individual read.
     budget: usize,
 }
 
 impl AsyncInput for ProviderAsyncInput<'_> {
+    /// Returns the complete file length.
     async fn length(&self) -> magika::Result<u64> {
         Ok(self.length)
     }
 
+    /// Reads one bounded range from the filesystem.
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> magika::Result<()> {
         let end = offset
             .checked_add(buffer.len() as u64)
@@ -524,10 +547,12 @@ pub(crate) fn map_magika_error(error: Error) -> MimeError {
 }
 
 impl MimeContentBackend for MagikaMimeDetector {
+    /// Reports that Magika requires complete content.
     fn content_requirement(&self) -> ContentRequirement {
         ContentRequirement::Complete
     }
 
+    /// Detects MIME candidates from complete content bytes.
     fn detect_bytes(&self, bytes: &[u8]) -> MimeResult<Vec<String>> {
         self.guess_from_magika_input(bytes)
     }
