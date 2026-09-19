@@ -103,7 +103,7 @@ to supply MIME configuration or a media-stream classifier.
 Use `detect_path` when the bytes live behind a `qubit-fs` provider rather than a
 local `std::fs::File`. The filesystem and logical path are owned by the
 application; `max_bytes` is the maximum cumulative number of bytes Magika may
-request:
+request through range reads:
 
 ```rust
 use qubit_fs::{FileSystem, Path};
@@ -125,7 +125,10 @@ fn detect_uploaded_path(
 
 For a filesystem that advertises range reads, Magika requests bounded windows
 and can use a conditional ETag read. Without range support, a known resource
-larger than the budget is rejected before the full content is loaded. The
+larger than the budget is rejected before the full content is loaded;
+`qubit-fs::read_all` may probe one byte beyond `max_bytes` to detect an oversized
+resource. Known oversized lengths return `MimeError::BufferLimitExceeded`;
+overflow discovered during `read_all` returns `MimeError::FileSystem`. The
 asynchronous equivalent is `detect_async_path` on `AsyncFileSystem`.
 
 ## Media Classifier Example
@@ -191,6 +194,11 @@ execution-provider libraries are discoverable by the dynamic loader. The
 `ort`) API is used; the environment is process-global and can only be
 committed once.
 
+The repository's Linux CI checks this dynamic-loader setup with ONNX Runtime
+1.24.2: it initializes the shared library, constructs a detector, and verifies
+that Python content is classified as `text/x-python`. `ORT_LIBRARY_PATH` must
+name the shared-library file itself, rather than its containing directory.
+
 ## Advanced Usage
 
 The provider accepts these selection names: `magika`,
@@ -202,10 +210,10 @@ seekable readers, local files, and synchronous or asynchronous provider paths.
 Reader detection restores the original reader position. Content-backend reader
 detection classifies the remaining resource from the current cursor, while the
 generic detector API keeps whole-resource semantics. Provider-path detection
-enforces `max_bytes` cumulatively across all reads. Range-capable providers use
+enforces `max_bytes` cumulatively across range requests. Range-capable providers use
 bounded windows and conditional ETag reads when available; providers without
-range support use a bounded single read and reject known resources larger than
-the budget. Unknown and undefined Magika types become `Ok(None)` so filename
+range support may probe one extra byte to detect overflow and reject oversized
+resources. Unknown and undefined Magika types become `Ok(None)` so filename
 fallback follows the selected `MimeDetectionPolicy`.
 The asynchronous path awaits feature extraction before synchronously running
 inference while holding the shared session lock. Inference and lock waiting can

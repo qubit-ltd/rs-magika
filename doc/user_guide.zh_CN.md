@@ -93,7 +93,7 @@ fn classify(detector: &dyn MimeDetector) -> qubit_mime::MimeResult<()> {
 ## Provider Path 示例
 
 当数据位于 `qubit-fs` provider 后面，而不是本地 `std::fs::File` 时，使用
-`detect_path`。文件系统和逻辑路径由应用自己持有；`max_bytes` 表示 Magika 所有读取
+`detect_path`。文件系统和逻辑路径由应用自己持有；`max_bytes` 表示 Magika 范围读取
 累计允许请求的最大字节数：
 
 ```rust
@@ -115,7 +115,10 @@ fn detect_uploaded_path(
 ```
 
 如果文件系统声明支持范围读取，Magika 会请求受预算限制的窗口，并在可用时使用条件
-ETag 读取；不支持范围读取时，已知资源超过预算会在完整加载前被拒绝。异步版本是在
+ETag 读取；不支持范围读取时，已知资源超过预算会在完整加载前被拒绝。
+`qubit-fs::read_all` 为判断是否超限，可能额外探测第 `max_bytes + 1` 个字节；
+已知长度超限时返回 `MimeError::BufferLimitExceeded`，在 `read_all` 中发现超限时
+返回 `MimeError::FileSystem`。异步版本是在
 `AsyncFileSystem` 上调用 `detect_async_path`。
 
 ## Media Classifier 示例
@@ -176,6 +179,10 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
 系统加载器找到。`ort::init_from` 必须早于第一个 detector（或其他 `ort` API）调用；
 该环境是进程级全局状态，只能 commit 一次。
 
+仓库的 Linux CI 使用 ONNX Runtime 1.24.2 验证这条动态加载路径：先初始化共享库，
+再创建 detector，并确认 Python 内容识别为 `text/x-python`。`ORT_LIBRARY_PATH` 必须
+指向共享库文件本身，而不是所在目录。
+
 ## 进阶用法
 
 provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
@@ -184,9 +191,9 @@ provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
 `MagikaMimeDetector` 还实现了 `qubit-mime` 针对 seekable reader、本地文件以及同步或
 异步 provider path 的后端操作。reader 检测结束后会恢复原来的位置；content backend
 从当前 cursor 对应的剩余资源开始检测，而通用 detector API 仍保持整份资源语义。
-Provider path 检测会累计限制 `max_bytes`：支持范围读取时只请求受预算限制的窗口，并在
-可用时使用条件 ETag 读取；不支持范围读取时执行一次有界读取，已知资源超过预算则返回
-错误。Magika 的 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的
+Provider path 检测会累计限制范围读取的 `max_bytes`：支持范围读取时只请求受预算限制的
+窗口，并在可用时使用条件 ETag 读取；不支持范围读取时可能额外探测 1 字节以判断超限，
+并对超限资源返回错误。Magika 的 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的
 `MimeDetectionPolicy` 统一处理文件名回退。
 异步路径会先等待特征提取，再持有共享 Session 锁同步执行推理。推理和等待锁都可能占用
 异步执行器线程；需要隔离时，应由应用把检测放到阻塞工作线程或服务边界中。
@@ -207,7 +214,7 @@ Provider path 检测会累计限制 `max_bytes`：支持范围读取时只请求
    的自定义配置。
 
 provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍然兼容；新配置
-   推荐使用 `magika`。
+推荐使用 `magika`。
 
 ## 错误与诊断
 

@@ -14,7 +14,10 @@
 ## 概述
 
 本 crate 默认启用 `bundled-onnxruntime`，普通构建无需单独安装 ONNX Runtime 即可
-链接和运行。如果应用通过其他方式提供 ONNX Runtime，可以关闭默认 feature。
+链接和运行。应用也可以关闭默认 feature，自行提供兼容的 ONNX Runtime 共享库。使用
+`ort` 动态加载器时，须先调用 `ort::init_from` 初始化共享库，再创建 detector。
+Linux CI 会用这套配置对 Python 内容实际执行一次推理；依赖和启动示例见
+[用户手册](doc/user_guide.zh_CN.md)。
 
 ## 安装
 
@@ -86,10 +89,12 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建一次并
 共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
 
-Provider path 检测会把 `max_bytes` 作为所有 Magika 读取的累计预算。文件系统支持范围
+Provider path 检测会把 `max_bytes` 作为 Magika 范围读取的累计请求预算。文件系统支持范围
 读取时，Magika 只请求受预算限制的窗口；如果同时支持条件读取，还会使用 ETag 快照。
-不支持范围读取的 provider 会在预算内执行一次读取；已知资源长度超过预算时返回
-`MimeError::BufferLimitExceeded`。Magika 返回 `Unknown` 或 `Undefined` 时结果为
+不支持范围读取时，`qubit-fs::read_all` 为判断是否超限，可能额外探测第
+`max_bytes + 1` 个字节；已知长度超限时返回 `MimeError::BufferLimitExceeded`，
+在 `read_all` 中发现超限时返回 `MimeError::FileSystem`。Magika 返回
+`Unknown` 或 `Undefined` 时结果为
 `Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
 异步路径先等待文件系统完成特征提取，再持有共享 Session 锁同步执行 Magika 推理。
 推理和等待锁都可能占用异步执行器线程；需要隔离时，应由应用把检测放到阻塞工作线程

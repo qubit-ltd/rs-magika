@@ -17,7 +17,10 @@ their detection calls.
 
 The crate enables `bundled-onnxruntime` by default so ordinary builds can link
 and run without a separately installed ONNX Runtime. Disable default features if
-your application provides ONNX Runtime through another linking strategy.
+your application provides a compatible ONNX Runtime shared library. With `ort`'s
+dynamic loader, initialize that library with `ort::init_from` before creating a
+detector. The Linux CI runs a real Python-content inference with this setup;
+see the [user guide](doc/user_guide.md) for the dependency and startup example.
 
 ## Installation
 
@@ -92,10 +95,12 @@ Creating a detector initializes the embedded Magika model and ONNX Runtime
 session. Create it once, share it (for example with `Arc`), and expect inference
 calls on a shared detector to be serialized internally.
 
-Provider-path detection enforces `max_bytes` across all Magika reads. Range-capable
-filesystems use bounded windows and an ETag snapshot when conditional reads are
-available. Providers without range support use one bounded read; a known resource
-larger than the budget returns `MimeError::BufferLimitExceeded`. Unknown and
+Provider-path detection uses `max_bytes` as the cumulative request budget for
+Magika's range reads. Range-capable filesystems use bounded windows and an ETag
+snapshot when conditional reads are available. Without range support,
+`qubit-fs::read_all` may probe one byte beyond `max_bytes` to detect overflow;
+known oversized resources return `MimeError::BufferLimitExceeded`, while an
+overflow discovered during `read_all` returns `MimeError::FileSystem`. Unknown and
 undefined Magika types return `Ok(None)`, allowing the selected
 `MimeDetectionPolicy` to apply filename fallback consistently.
 The asynchronous path awaits filesystem feature extraction first, then performs
