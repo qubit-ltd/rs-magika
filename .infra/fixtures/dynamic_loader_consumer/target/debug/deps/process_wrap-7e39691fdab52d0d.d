@@ -1,9 +1,0 @@
-/tmp/rs-magika-worktree-iHn5rG/.infra/fixtures/dynamic_loader_consumer/target/debug/deps/process_wrap-7e39691fdab52d0d.d: /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/lib.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/generic_wrap.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std/core.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std/process_group.rs
-
-/tmp/rs-magika-worktree-iHn5rG/.infra/fixtures/dynamic_loader_consumer/target/debug/deps/libprocess_wrap-7e39691fdab52d0d.rmeta: /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/lib.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/generic_wrap.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std/core.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std/process_group.rs
-
-/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/lib.rs:
-/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/generic_wrap.rs:
-/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std.rs:
-/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std/core.rs:
-/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/process-wrap-10.0.0/src/std/process_group.rs:
