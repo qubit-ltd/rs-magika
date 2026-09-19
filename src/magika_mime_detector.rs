@@ -331,14 +331,14 @@ impl MimeDetectorBackend for MagikaMimeDetector {
 
     /// Detects MIME candidates from a synchronous filesystem path.
     ///
-    /// The complete file length is reported to Magika, while each read is
-    /// bounded by `max_bytes`.
+    /// The complete file length is reported to Magika, while the cumulative
+    /// bytes requested by all reads are bounded by `max_bytes`.
     ///
     /// # Parameters
     ///
     /// * `file_system` - Filesystem used to access the path.
     /// * `path` - File path to inspect.
-    /// * `max_bytes` - Maximum bytes allowed in one read.
+    /// * `max_bytes` - Maximum cumulative bytes allowed across all reads.
     ///
     /// # Errors
     ///
@@ -409,7 +409,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// * `file_system` - Asynchronous filesystem used to access the path.
     /// * `path` - File path to inspect.
-    /// * `max_bytes` - Maximum bytes allowed in one read.
+    /// * `max_bytes` - Maximum cumulative bytes allowed across all reads.
     ///
     /// # Errors
     ///
