@@ -101,6 +101,36 @@ jobs:
           ./ci-check.sh --only=feature-matrix
       - name: Compile custom ONNX Runtime consumer
         run: cargo check --manifest-path .infra/fixtures/dynamic_loader_consumer/Cargo.toml
+      - name: Download ONNX Runtime shared library
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rs-magika-ort"
+          gh release download v1.24.2 \
+            --repo microsoft/onnxruntime \
+            --pattern 'onnxruntime-linux-x64-1.24.2.tgz' \
+            --dir "$RUNNER_TEMP/rs-magika-ort"
+          printf '%s  %s\n' \
+            '43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6' \
+            "$RUNNER_TEMP/rs-magika-ort/onnxruntime-linux-x64-1.24.2.tgz" | sha256sum -c -
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import tarfile
+
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rs-magika-ort"
+          archive = root / "onnxruntime-linux-x64-1.24.2.tgz"
+          with tarfile.open(archive, "r:gz") as package:
+              package.extractall(root, filter="data")
+          matches = list(root.rglob("libonnxruntime.so.1.24.2"))
+          if len(matches) != 1:
+              raise SystemExit(f"expected one ONNX Runtime library, found {len(matches)}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"ORT_LIBRARY_PATH={matches[0]}\n")
+          PY
+      - name: Run custom ONNX Runtime consumer
+        run: cargo run --manifest-path .infra/fixtures/dynamic_loader_consumer/Cargo.toml
 
   coverage:
     needs: [verify]
