@@ -20,11 +20,11 @@ use qubit_mime::MimeError;
 use super::budget_exceeded::BudgetExceeded;
 use super::read_budget::ReadBudget;
 
-#[cfg(test)]
-#[path = "../../tests/support/provider_file_system_spi.rs"]
-#[allow(dead_code)]
-pub(crate) mod provider_file_system_spi;
-
+/// Reads exactly one Magika range through a synchronous provider.
+///
+/// Reserves `buffer.len()` bytes before I/O, requests the optional resource
+/// version, and rejects short ranges. Filesystem failures become Magika I/O
+/// errors; invalid ranges and exhausted budgets fail before the provider call.
 pub(crate) fn read_sync(
     file_system: &FileSystem,
     path: &Path,
@@ -42,6 +42,24 @@ pub(crate) fn read_sync(
     copy_exact(buffer, bytes)
 }
 
+/// Validates a random-access read and reserves its requested bytes from the
+/// per-detection cumulative budget before the provider is called.
+///
+/// # Parameters
+///
+/// * `length` - Logical length reported to Magika.
+/// * `budget` - Remaining cumulative read budget for this detection.
+/// * `requested` - Number of bytes in this read request.
+/// * `offset` - Start of the requested logical range.
+///
+/// # Returns
+///
+/// `Ok(())` when the request fits both the logical range and byte budget.
+///
+/// # Errors
+///
+/// Returns an I/O error when the range overflows or exceeds `length`, or when
+/// reserving `requested` would exceed the cumulative budget.
 pub(crate) fn validate_request(
     length: u64,
     budget: &mut ReadBudget,
@@ -63,6 +81,9 @@ pub(crate) fn validate_request(
     Ok(())
 }
 
+/// Builds a provider range request starting at `offset` for `length` bytes.
+///
+/// When `version` is present, the provider must match that resource version.
 pub(crate) fn read_options(offset: u64, length: usize, version: Option<&ResourceVersion>) -> ReadOptions {
     ReadOptions::default()
         .with_offset(Some(offset))
@@ -70,6 +91,10 @@ pub(crate) fn read_options(offset: u64, length: usize, version: Option<&Resource
         .with_if_match(version.cloned())
 }
 
+/// Copies a provider range into Magika's buffer only when its length matches.
+///
+/// A short or unexpectedly long range returns a Magika I/O error instead of
+/// leaving a partially initialized inference buffer.
 pub(crate) fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> {
     if bytes.len() != buffer.len() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
@@ -78,6 +103,7 @@ pub(crate) fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> 
     Ok(())
 }
 
+/// Constructs an invalid-input error for a rejected provider request.
 pub(crate) fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -103,41 +129,15 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-    use std::task::Context;
-    use std::task::Poll;
-    use std::task::RawWaker;
-    use std::task::RawWakerVTable;
-    use std::task::Waker;
-
-    use magika::AsyncInput;
     use magika::Error;
-    use magika::SyncInput;
-    use qubit_fs::Path as FsPath;
     use qubit_mime::MimeError;
 
     use super::copy_exact;
     use super::invalid_input;
     use super::map_provider_magika_error;
     use super::validate_request;
-    use crate::internal::async_provider_input::AsyncProviderInput;
     use crate::internal::budget_exceeded::BudgetExceeded;
     use crate::internal::read_budget::ReadBudget;
-    use crate::internal::sync_provider_input::SyncProviderInput;
-
-    fn block_on<F: Future>(future: F) -> F::Output {
-        const VTABLE: RawWakerVTable =
-            RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
-        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-        let mut context = Context::from_waker(&waker);
-        let mut future = std::pin::pin!(future);
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    }
 
     #[test]
     fn budget_counts_repeated_reads() {
@@ -189,37 +189,5 @@ mod tests {
         assert!(copy_exact(&mut output, vec![1, 2]).is_ok());
         let mapped = map_provider_magika_error(Error::IOError(std::io::Error::other("provider failure")));
         assert!(matches!(mapped, MimeError::Io(_)));
-    }
-
-    #[test]
-    fn sync_provider_input_reads_ranges_and_reports_length() {
-        let spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec()).with_range();
-        let file_system = spi.file_system();
-        let path = FsPath::parse("/fixture").expect("fixture path should parse");
-        let mut input = SyncProviderInput::new(&file_system, &path, 6, None, 8);
-        assert_eq!(6, SyncInput::length(&input).expect("length should work"));
-        let mut output = [0_u8; 3];
-        SyncInput::read_at(&mut input, &mut output, 1).expect("range should read");
-        assert_eq!(&output, b"bcd");
-    }
-
-    #[test]
-    fn async_provider_input_reads_and_reports_short_ranges() {
-        let spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec()).with_range();
-        let file_system = spi.async_file_system();
-        let path = FsPath::parse("/fixture").expect("fixture path should parse");
-        let mut input = AsyncProviderInput::new(&file_system, &path, 6, None, 8);
-        assert_eq!(6, block_on(AsyncInput::length(&input)).expect("length should work"));
-        let mut output = [0_u8; 3];
-        block_on(AsyncInput::read_at(&mut input, &mut output, 1)).expect("range should read");
-        assert_eq!(&output, b"bcd");
-
-        let short_spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec())
-            .with_range()
-            .short_reads();
-        let short_file_system = short_spi.async_file_system();
-        let mut short_input = AsyncProviderInput::new(&short_file_system, &path, 6, None, 8);
-        let mut output = [0_u8; 3];
-        assert!(block_on(AsyncInput::read_at(&mut short_input, &mut output, 1)).is_err());
     }
 }

@@ -220,6 +220,19 @@ fn provider_path_short_read_is_an_io_error() {
 }
 
 #[test]
+fn provider_path_async_short_read_is_an_io_error() {
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().short_reads();
+    let error = run_ready(detector().detect_async_path(
+        &provider.async_file_system(),
+        &path("/script.py"),
+        8192,
+        MimeDetectionPolicy::VerifyContent,
+    ))
+    .expect_err("short async provider ranges must fail");
+    assert!(matches!(error, MimeError::Io(_)));
+}
+
+#[test]
 fn provider_path_async_without_range_rejects_known_oversize() {
     let provider = large_provider(false);
     let error = run_ready(detector().detect_async_path(
