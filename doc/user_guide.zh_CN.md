@@ -37,6 +37,7 @@ Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runt
 qubit-mime = "0.17"
 qubit-magika = "0.14"
 qubit-spi = "0.12"
+qubit-fs = "0.2" # 直接调用 detect_path 时需要
 ```
 
 默认 feature `bundled-onnxruntime` 会下载并链接默认 Magika session 所需的 ONNX
@@ -89,6 +90,89 @@ fn classify(detector: &dyn MimeDetector) -> qubit_mime::MimeResult<()> {
 配置或 media-stream classifier 时，使用 `MagikaMimeDetector::builder()` 或
 `MagikaMimeDetector::from_mime_config`。
 
+## Provider Path 示例
+
+当数据位于 `qubit-fs` provider 后面，而不是本地 `std::fs::File` 时，使用
+`detect_path`。文件系统和逻辑路径由应用自己持有；`max_bytes` 表示 Magika 所有读取
+累计允许请求的最大字节数：
+
+```rust
+use qubit_fs::{FileSystem, Path};
+use qubit_mime::{MimeDetectionPolicy, MimeDetector, MimeDetectorBackend};
+
+fn detect_uploaded_path(
+    detector: &dyn MimeDetector,
+    file_system: &FileSystem,
+    path: &Path,
+) -> qubit_mime::MimeResult<Option<String>> {
+    detector.detect_path(
+        file_system,
+        path,
+        8 * 1024,
+        MimeDetectionPolicy::VerifyContent,
+    )
+}
+```
+
+如果文件系统声明支持范围读取，Magika 会请求受预算限制的窗口，并在可用时使用条件
+ETag 读取；不支持范围读取时，已知资源超过预算会在完整加载前被拒绝。异步版本是在
+`AsyncFileSystem` 上调用 `detect_async_path`。
+
+## Media Classifier 示例
+
+Media refinement 是可选的。例如，内置的 ffprobe classifier 可以区分仅音频、仅视频和
+音视频内容。需要先安装 `ffprobe`，并确保它位于 `PATH` 中：
+
+```rust
+use std::sync::Arc;
+
+use qubit_magika::MagikaMimeDetector;
+use qubit_mime::FfprobeCommandMediaStreamClassifier;
+
+fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
+    let classifier = Arc::new(FfprobeCommandMediaStreamClassifier::new());
+    MagikaMimeDetector::builder()
+        .media_stream_classifier(Some(classifier))
+        .build()
+}
+```
+
+如果应用使用 registry 构造 detector，也可以把同一个 classifier 传给
+`MagikaMimeDetectorProvider::with_media_stream_classifier`。classifier 失败时返回
+`MimeError`；只有 classifier 成功时才会进行 refinement。
+
+## 自定义 ONNX Runtime 配置
+
+如果应用自行提供 ONNX Runtime，可以关闭 bundled binary，并启用 `ort` 的动态加载器。
+下面的声明可以直接复制，并与 `qubit-magika 0.14` 版本保持一致：
+
+```toml
+[dependencies]
+qubit-magika = { version = "0.14", default-features = false }
+qubit-mime = "0.17"
+qubit-spi = "0.12"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
+```
+
+创建 detector 前先初始化 runtime。Windows 使用 `onnxruntime.dll`，macOS 使用
+`libonnxruntime.dylib`，Linux 使用 `libonnxruntime.so`：
+
+```rust,no_run
+use std::path::PathBuf;
+
+use qubit_magika::MagikaMimeDetector;
+
+fn create_detector() -> Result<MagikaMimeDetector, Box<dyn std::error::Error>> {
+    let runtime = PathBuf::from(std::env::var("ORT_LIBRARY_PATH")?);
+    ort::init_from(runtime)?.commit();
+    Ok(MagikaMimeDetector::new()?)
+}
+```
+
+将 `ORT_LIBRARY_PATH` 设置为完整的共享库路径，并确保 execution-provider 动态库能被
+系统加载器找到。`ort::init_from` 必须早于第一个 detector（或其他 `ort` API）调用；
+该环境是进程级全局状态，只能 commit 一次。
+
 ## 进阶用法
 
 provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
@@ -102,6 +186,24 @@ Provider path 检测会累计限制 `max_bytes`：支持范围读取时只请求
 错误。Magika 的 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的
 `MimeDetectionPolicy` 统一处理文件名回退。
 异步路径会先等待特征提取，再短暂锁定共享 Session 执行同步推理。
+
+## 迁移指南
+
+从 0.14 以前的集成版本升级时，按以下顺序处理：
+
+1. 将配套依赖升级到 `qubit-mime 0.17`、`qubit-spi 0.12`，并使用 Rust 1.94。
+2. 保持 provider 注册和 detector 配置分离：注册
+   `MagikaMimeDetectorProvider`，选择 `magika`，然后调用
+   `create_configured(&MimeConfig)`。
+3. 将每次请求创建 `MagikaMimeDetector::new()` 改为启动时创建一次，并通过 `Arc`
+   共享。
+4. 如果使用 provider path，把 `max_bytes` 视为所有读取累计预算。支持范围读取的
+   provider 可能执行多次有界读取；不支持范围读取的 provider 会拒绝已知的超大资源。
+5. 如果应用自己管理 ONNX Runtime，关闭 default feature，并在创建 detector 前使用上面
+   的自定义配置。
+
+provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍然兼容；新配置
+   推荐使用 `magika`。
 
 ## 错误与诊断
 

@@ -42,6 +42,7 @@ Add the crate versions used by this release:
 qubit-mime = "0.17"
 qubit-magika = "0.14"
 qubit-spi = "0.12"
+qubit-fs = "0.2" # needed when calling detect_path directly
 ```
 
 The default feature, `bundled-onnxruntime`, downloads and links the ONNX Runtime
@@ -97,6 +98,96 @@ For direct construction, `MagikaMimeDetector::new()` uses
 `MagikaMimeDetector::from_mime_config` are available when the application needs
 to supply MIME configuration or a media-stream classifier.
 
+## Provider-Path Example
+
+Use `detect_path` when the bytes live behind a `qubit-fs` provider rather than a
+local `std::fs::File`. The filesystem and logical path are owned by the
+application; `max_bytes` is the maximum cumulative number of bytes Magika may
+request:
+
+```rust
+use qubit_fs::{FileSystem, Path};
+use qubit_mime::{MimeDetectionPolicy, MimeDetector, MimeDetectorBackend};
+
+fn detect_uploaded_path(
+    detector: &dyn MimeDetector,
+    file_system: &FileSystem,
+    path: &Path,
+) -> qubit_mime::MimeResult<Option<String>> {
+    detector.detect_path(
+        file_system,
+        path,
+        8 * 1024,
+        MimeDetectionPolicy::VerifyContent,
+    )
+}
+```
+
+For a filesystem that advertises range reads, Magika requests bounded windows
+and can use a conditional ETag read. Without range support, a known resource
+larger than the budget is rejected before the full content is loaded. The
+asynchronous equivalent is `detect_async_path` on `AsyncFileSystem`.
+
+## Media Classifier Example
+
+Media refinement is optional. For example, the built-in ffprobe classifier can
+distinguish audio-only, video-only, and audio-video content. `ffprobe` must be
+installed and available on `PATH`:
+
+```rust
+use std::sync::Arc;
+
+use qubit_magika::MagikaMimeDetector;
+use qubit_mime::FfprobeCommandMediaStreamClassifier;
+
+fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
+    let classifier = Arc::new(FfprobeCommandMediaStreamClassifier::new());
+    MagikaMimeDetector::builder()
+        .media_stream_classifier(Some(classifier))
+        .build()
+}
+```
+
+The same classifier can be passed to
+`MagikaMimeDetectorProvider::with_media_stream_classifier` when the application
+uses registry-based construction. Classifier failures are reported as
+`MimeError`; refinement is best-effort only when the classifier succeeds.
+
+## Custom ONNX Runtime Configuration
+
+To use an ONNX Runtime library supplied by the application, disable the bundled
+binary and enable `ort`'s dynamic loader. These declarations are copy-pasteable
+and keep the versions aligned with `qubit-magika` 0.14:
+
+```toml
+[dependencies]
+qubit-magika = { version = "0.14", default-features = false }
+qubit-mime = "0.17"
+qubit-spi = "0.12"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
+```
+
+Initialize the runtime before constructing the detector. Use `onnxruntime.dll`
+on Windows, `libonnxruntime.dylib` on macOS, or `libonnxruntime.so` on Linux:
+
+```rust,no_run
+use std::path::PathBuf;
+
+use qubit_magika::MagikaMimeDetector;
+
+fn create_detector() -> Result<MagikaMimeDetector, Box<dyn std::error::Error>> {
+    let runtime = PathBuf::from(std::env::var("ORT_LIBRARY_PATH")?);
+    ort::init_from(runtime)?.commit();
+    Ok(MagikaMimeDetector::new()?)
+}
+```
+
+Set `ORT_LIBRARY_PATH` to the complete shared-library path and ensure any
+execution-provider libraries are discoverable by the dynamic loader. The
+`ort::init_from` call must happen before the first detector (or any other
+`ort`) API is used; the environment is process-global and can only be
+committed once.
+
 ## Advanced Usage
 
 The provider accepts these selection names: `magika`,
@@ -115,6 +206,26 @@ the budget. Unknown and undefined Magika types become `Ok(None)` so filename
 fallback follows the selected `MimeDetectionPolicy`.
 The asynchronous path awaits feature extraction before briefly locking the
 shared session for synchronous inference.
+
+## Migration Guide
+
+When upgrading a pre-0.14 integration, apply these changes in order:
+
+1. Upgrade the coordinated dependencies to `qubit-mime 0.17`, `qubit-spi
+   0.12`, and Rust 1.94.
+2. Keep provider registration and detector configuration separate: register
+   `MagikaMimeDetectorProvider`, select `magika`, then call
+   `create_configured(&MimeConfig)`.
+3. Replace per-request `MagikaMimeDetector::new()` calls with one startup
+   detector shared through `Arc`.
+4. If you use provider paths, treat `max_bytes` as a cumulative budget across
+   all reads. Range-capable providers may therefore perform multiple bounded
+   reads, while non-range providers reject known oversized resources.
+5. If the application owns ONNX Runtime, disable the default feature and use
+   the custom configuration shown above before creating the detector.
+
+The provider names `magika`, `magika-mime-detector`, and
+`magikamimedetector` remain accepted; use `magika` for new configuration.
 
 ## Errors and Diagnostics
 
