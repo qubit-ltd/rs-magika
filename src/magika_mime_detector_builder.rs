@@ -31,7 +31,9 @@ use crate::magika_mime_detector::map_magika_error;
 /// ```
 #[derive(Debug, Default)]
 pub struct MagikaMimeDetectorBuilder {
+    /// MIME selection and refinement settings copied into the detector.
     mime_config: MimeConfig,
+    /// Optional classifier shared with the detector for media refinement.
     media_stream_classifier: Option<Arc<dyn MediaStreamClassifier>>,
 }
 

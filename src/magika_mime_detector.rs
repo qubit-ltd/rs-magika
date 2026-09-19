@@ -461,6 +461,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     }
 }
 
+/// Extracts features through asynchronous provider reads, then runs inference.
+///
+/// Session locking and inference remain synchronous after feature extraction;
+/// provider errors and poisoned locks are returned as `MimeError`.
 async fn guess_from_async_input(
     detector: &MagikaMimeDetector,
     input: AsyncProviderInput<'_>,
@@ -492,12 +496,15 @@ async fn guess_from_async_input(
 ///
 /// # Returns
 ///
-/// MIME type name, or `None` for undefined content.
+/// MIME type name, or `None` for unknown, undefined, or empty MIME mappings.
 #[inline]
 fn content_type_to_mime(content_type: ContentType) -> Option<String> {
     owned_mime_type(content_type_mime_name(content_type))
 }
 
+/// Returns Magika's MIME name, excluding unknown and undefined classifications.
+///
+/// A known content type yields `Some`; sentinel types yield `None`.
 fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
     match content_type {
         ContentType::Unknown | ContentType::Undefined => None,
@@ -505,6 +512,9 @@ fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
     }
 }
 
+/// Copies a nonempty MIME name into an owned result.
+///
+/// Empty or absent names remain `None`, so policy fallback can handle them.
 fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
     mime_type.filter(|mime_type| !mime_type.is_empty()).map(str::to_owned)
 }

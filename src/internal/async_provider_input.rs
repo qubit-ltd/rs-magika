@@ -20,15 +20,24 @@ use super::read_budget::ReadBudget;
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput<'a> {
+    /// Filesystem supplying the requested ranges.
     file_system: &'a AsyncFileSystem,
+    /// Logical resource path within the filesystem.
     path: &'a Path,
+    /// Complete logical resource length reported to Magika.
     length: u64,
+    /// Optional version constraint applied to each range read.
     version: Option<ResourceVersion>,
+    /// Cumulative limit shared by all reads in one detection.
     budget: ReadBudget,
 }
 
 impl<'a> AsyncProviderInput<'a> {
-    /// Creates an asynchronous provider input.
+    /// Creates an asynchronous input for one resource and cumulative byte
+    /// limit.
+    ///
+    /// The borrowed filesystem and path must remain valid through feature
+    /// extraction. `version` constrains each range read when present.
     pub(crate) fn new(
         file_system: &'a AsyncFileSystem,
         path: &'a Path,
@@ -54,6 +63,9 @@ impl AsyncInput for AsyncProviderInput<'_> {
     }
 
     /// Reads one validated range from the provider.
+    ///
+    /// Reserves bytes before asynchronous I/O and rejects short ranges or
+    /// provider failures as Magika I/O errors.
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         validate_request(self.length, &mut self.budget, buffer.len(), offset)?;
         let options = read_options(offset, buffer.len(), self.version.as_ref());

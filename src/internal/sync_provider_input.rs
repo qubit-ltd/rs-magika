@@ -18,15 +18,23 @@ use super::read_budget::ReadBudget;
 
 /// Adapts synchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct SyncProviderInput<'a> {
+    /// Filesystem supplying the requested ranges.
     file_system: &'a FileSystem,
+    /// Logical resource path within the filesystem.
     path: &'a Path,
+    /// Complete logical resource length reported to Magika.
     length: u64,
+    /// Optional version constraint applied to each range read.
     version: Option<ResourceVersion>,
+    /// Cumulative limit shared by all reads in one detection.
     budget: ReadBudget,
 }
 
 impl<'a> SyncProviderInput<'a> {
-    /// Creates a synchronous provider input.
+    /// Creates a synchronous input for one resource and cumulative byte limit.
+    ///
+    /// The borrowed filesystem and path must remain valid through inference.
+    /// `version` constrains each range read when present.
     pub(crate) fn new(
         file_system: &'a FileSystem,
         path: &'a Path,
@@ -52,6 +60,9 @@ impl SyncInput for SyncProviderInput<'_> {
     }
 
     /// Reads one validated range from the provider.
+    ///
+    /// Reserves bytes before blocking I/O and rejects short ranges or provider
+    /// failures as Magika I/O errors.
     fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         read_sync(
             self.file_system,

@@ -19,6 +19,7 @@ pub(crate) struct BudgetExceeded {
 }
 
 impl fmt::Display for BudgetExceeded {
+    /// Formats the requested and allowed byte totals for provider diagnostics.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
