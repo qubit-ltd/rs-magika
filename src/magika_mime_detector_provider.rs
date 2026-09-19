@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use qubit_mime::MediaStreamClassifier;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorSpec;
@@ -35,7 +36,7 @@ use crate::MagikaMimeDetector;
 #[derive(Clone, Default)]
 pub struct MagikaMimeDetectorProvider {
     /// Optional classifier used for precise media-stream refinement.
-    media_stream_classifier: Option<Arc<dyn qubit_mime::MediaStreamClassifier>>,
+    media_stream_classifier: Option<Arc<dyn MediaStreamClassifier>>,
 }
 
 impl std::fmt::Debug for MagikaMimeDetectorProvider {
@@ -60,7 +61,7 @@ impl MagikaMimeDetectorProvider {
 
     /// Creates a provider with a classifier for precise media refinement.
     #[inline]
-    pub fn with_media_stream_classifier(classifier: Arc<dyn qubit_mime::MediaStreamClassifier>) -> Self {
+    pub fn with_media_stream_classifier(classifier: Arc<dyn MediaStreamClassifier>) -> Self {
         Self {
             media_stream_classifier: Some(classifier),
         }

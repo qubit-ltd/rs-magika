@@ -24,6 +24,7 @@ use qubit_mime::CONFIG_MIME_AMBIGUOUS_MIME_MAPPING;
 use qubit_mime::CONFIG_MIME_DETECTOR_DEFAULT;
 use qubit_mime::CONFIG_MIME_ENABLE_PRECISE_DETECTION;
 use qubit_mime::CONFIG_MIME_PRECISE_DETECTION_PATTERNS;
+use qubit_mime::ContentRequirement;
 use qubit_mime::MediaStreamType;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectionPolicy;
@@ -129,9 +130,11 @@ fn reader_window_content_backend_starts_at_cursor() {
 
 #[test]
 fn reader_window_content_backend_restores_after_failure() {
+    use qubit_mime::MimeContentBackend as ContentBackend;
+
     let mut reader = FailingReadSeek::new(b"script".to_vec(), true, None);
-    let error = qubit_mime::MimeContentBackend::detect_reader(detector(), &mut reader)
-        .expect_err("forced reader failure should propagate");
+    let error =
+        ContentBackend::detect_reader(detector(), &mut reader).expect_err("forced reader failure should propagate");
     assert!(matches!(error, MimeError::Io { .. }));
     assert_eq!(0, reader.position());
 }
@@ -141,7 +144,7 @@ fn reader_window_content_backend_restores_after_failure() {
 fn test_magika_complete_content_contract_survives_shared_detector_wrapper() {
     let detector: Arc<dyn MimeDetector> =
         Arc::new(MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika"));
-    assert_eq!(detector.content_requirement(), qubit_mime::ContentRequirement::Complete,);
+    assert_eq!(detector.content_requirement(), ContentRequirement::Complete,);
     assert!(matches!(
         detector.detect_prefix(b"prefix", None, MimeDetectionPolicy::VerifyContent),
         Err(MimeError::CompleteContentRequired),

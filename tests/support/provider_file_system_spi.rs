@@ -16,6 +16,7 @@ use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
 use qubit_fs::FsError;
 use qubit_fs::FsResult;
+use qubit_fs::Path;
 use qubit_fs::error::FsErrorKind;
 use qubit_fs::error::FsOperation;
 use qubit_fs::metadata::FileKind;
@@ -152,7 +153,7 @@ impl ProviderFileSystemSpi {
         .expect("test properties should be valid")
     }
 
-    fn metadata(&self, path: &qubit_fs::Path) -> FileMetadata {
+    fn metadata(&self, path: &Path) -> FileMetadata {
         let mut metadata = FileMetadata::new(FileKind::File).with_len(self.length);
         if self.conditional {
             metadata = metadata.with_etag(Some(ResourceVersion::new("v1")));
@@ -185,7 +186,7 @@ impl ProviderFileSystemSpi {
         ))
     }
 
-    fn unsupported_stat(path: &qubit_fs::Path) -> FsError {
+    fn unsupported_stat(path: &Path) -> FsError {
         FsError::new(FsErrorKind::UnsupportedOperation, FsOperation::Stat, "stat unavailable").with_path(path.clone())
     }
 }

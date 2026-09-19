@@ -7,175 +7,25 @@
 // =============================================================================
 //! Provider-neutral random-access inputs for Magika.
 
-use std::fmt;
 use std::io;
 
-use magika::AsyncInput;
 use magika::Error;
 use magika::Result as MagikaResult;
-use magika::SyncInput;
-use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::ReadOptions;
 use qubit_mime::MimeError;
 
+use super::budget_exceeded::BudgetExceeded;
+use super::read_budget::ReadBudget;
+
 #[cfg(test)]
 #[path = "../../tests/support/provider_file_system_spi.rs"]
 #[allow(dead_code)]
 pub(crate) mod provider_file_system_spi;
 
-/// Tracks the total number of bytes requested during one detection.
-#[derive(Debug)]
-pub(crate) struct ReadBudget {
-    used: usize,
-    limit: usize,
-}
-
-impl ReadBudget {
-    /// Creates an empty budget with the supplied limit.
-    pub(crate) const fn new(limit: usize) -> Self {
-        Self { used: 0, limit }
-    }
-
-    /// Reserves one read from the cumulative budget.
-    pub(crate) fn consume(&mut self, count: usize) -> std::result::Result<(), BudgetExceeded> {
-        let Some(requested) = self.used.checked_add(count) else {
-            return Err(BudgetExceeded {
-                requested: usize::MAX,
-                limit: self.limit,
-            });
-        };
-        if requested > self.limit {
-            return Err(BudgetExceeded {
-                requested,
-                limit: self.limit,
-            });
-        }
-        self.used = requested;
-        Ok(())
-    }
-}
-
-/// Describes a read that exceeds the detector's cumulative budget.
-#[derive(Debug)]
-pub(crate) struct BudgetExceeded {
-    /// Total requested bytes including the rejected read.
-    pub(crate) requested: usize,
-    /// Configured cumulative limit.
-    pub(crate) limit: usize,
-}
-
-impl fmt::Display for BudgetExceeded {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "provider read budget exceeded: {} > {}",
-            self.requested, self.limit
-        )
-    }
-}
-
-impl std::error::Error for BudgetExceeded {}
-
-/// Adapts synchronous filesystem ranges to Magika's random-access input.
-pub(crate) struct SyncProviderInput<'a> {
-    file_system: &'a FileSystem,
-    path: &'a Path,
-    length: u64,
-    version: Option<ResourceVersion>,
-    budget: ReadBudget,
-}
-
-impl<'a> SyncProviderInput<'a> {
-    /// Creates a synchronous provider input.
-    pub(crate) fn new(
-        file_system: &'a FileSystem,
-        path: &'a Path,
-        length: u64,
-        version: Option<ResourceVersion>,
-        limit: usize,
-    ) -> Self {
-        Self {
-            file_system,
-            path,
-            length,
-            version,
-            budget: ReadBudget::new(limit),
-        }
-    }
-}
-
-impl SyncInput for SyncProviderInput<'_> {
-    #[inline(always)]
-    fn length(&self) -> MagikaResult<u64> {
-        Ok(self.length)
-    }
-
-    #[inline(always)]
-    fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
-        read_sync(
-            self.file_system,
-            self.path,
-            self.length,
-            self.version.as_ref(),
-            &mut self.budget,
-            buffer,
-            offset,
-        )
-    }
-}
-
-/// Adapts asynchronous filesystem ranges to Magika's random-access input.
-pub(crate) struct AsyncProviderInput<'a> {
-    file_system: &'a AsyncFileSystem,
-    path: &'a Path,
-    length: u64,
-    version: Option<ResourceVersion>,
-    budget: ReadBudget,
-}
-
-impl<'a> AsyncProviderInput<'a> {
-    /// Creates an asynchronous provider input.
-    pub(crate) fn new(
-        file_system: &'a AsyncFileSystem,
-        path: &'a Path,
-        length: u64,
-        version: Option<ResourceVersion>,
-        limit: usize,
-    ) -> Self {
-        Self {
-            file_system,
-            path,
-            length,
-            version,
-            budget: ReadBudget::new(limit),
-        }
-    }
-}
-
-impl AsyncInput for AsyncProviderInput<'_> {
-    #[inline(always)]
-    async fn length(&self) -> MagikaResult<u64> {
-        Ok(self.length)
-    }
-
-    #[inline(always)]
-    async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
-        validate_request(self.length, &mut self.budget, buffer.len(), offset)?;
-        let options = read_options(offset, buffer.len(), self.version.as_ref());
-        let bytes = self
-            .file_system
-            .read_prefix(self.path, options, buffer.len())
-            .await
-            .map_err(|error| error.into_io_error())?
-            .into_bytes();
-        copy_exact(buffer, bytes)
-    }
-}
-
-fn read_sync(
+pub(crate) fn read_sync(
     file_system: &FileSystem,
     path: &Path,
     length: u64,
@@ -192,7 +42,12 @@ fn read_sync(
     copy_exact(buffer, bytes)
 }
 
-fn validate_request(length: u64, budget: &mut ReadBudget, requested: usize, offset: u64) -> MagikaResult<()> {
+pub(crate) fn validate_request(
+    length: u64,
+    budget: &mut ReadBudget,
+    requested: usize,
+    offset: u64,
+) -> MagikaResult<()> {
     if requested == 0 {
         return Ok(());
     }
@@ -208,14 +63,14 @@ fn validate_request(length: u64, budget: &mut ReadBudget, requested: usize, offs
     Ok(())
 }
 
-fn read_options(offset: u64, length: usize, version: Option<&ResourceVersion>) -> ReadOptions {
+pub(crate) fn read_options(offset: u64, length: usize, version: Option<&ResourceVersion>) -> ReadOptions {
     ReadOptions::default()
         .with_offset(Some(offset))
         .with_length(Some(length as u64))
         .with_if_match(version.cloned())
 }
 
-fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> {
+pub(crate) fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> {
     if bytes.len() != buffer.len() {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
     }
@@ -223,7 +78,7 @@ fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> {
     Ok(())
 }
 
-fn invalid_input(message: &'static str) -> io::Error {
+pub(crate) fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
@@ -258,15 +113,17 @@ mod tests {
     use magika::AsyncInput;
     use magika::Error;
     use magika::SyncInput;
+    use qubit_fs::Path as FsPath;
+    use qubit_mime::MimeError;
 
-    use super::AsyncProviderInput;
-    use super::BudgetExceeded;
-    use super::ReadBudget;
-    use super::SyncProviderInput;
     use super::copy_exact;
     use super::invalid_input;
     use super::map_provider_magika_error;
     use super::validate_request;
+    use crate::internal::async_provider_input::AsyncProviderInput;
+    use crate::internal::budget_exceeded::BudgetExceeded;
+    use crate::internal::read_budget::ReadBudget;
+    use crate::internal::sync_provider_input::SyncProviderInput;
 
     fn block_on<F: Future>(future: F) -> F::Output {
         const VTABLE: RawWakerVTable =
@@ -331,14 +188,14 @@ mod tests {
         assert!(copy_exact(&mut output, vec![1]).is_err());
         assert!(copy_exact(&mut output, vec![1, 2]).is_ok());
         let mapped = map_provider_magika_error(Error::IOError(std::io::Error::other("provider failure")));
-        assert!(matches!(mapped, qubit_mime::MimeError::Io(_)));
+        assert!(matches!(mapped, MimeError::Io(_)));
     }
 
     #[test]
     fn sync_provider_input_reads_ranges_and_reports_length() {
         let spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec()).with_range();
         let file_system = spi.file_system();
-        let path = qubit_fs::Path::parse("/fixture").expect("fixture path should parse");
+        let path = FsPath::parse("/fixture").expect("fixture path should parse");
         let mut input = SyncProviderInput::new(&file_system, &path, 6, None, 8);
         assert_eq!(6, SyncInput::length(&input).expect("length should work"));
         let mut output = [0_u8; 3];
@@ -350,7 +207,7 @@ mod tests {
     fn async_provider_input_reads_and_reports_short_ranges() {
         let spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec()).with_range();
         let file_system = spi.async_file_system();
-        let path = qubit_fs::Path::parse("/fixture").expect("fixture path should parse");
+        let path = FsPath::parse("/fixture").expect("fixture path should parse");
         let mut input = AsyncProviderInput::new(&file_system, &path, 6, None, 8);
         assert_eq!(6, block_on(AsyncInput::length(&input)).expect("length should work"));
         let mut output = [0_u8; 3];

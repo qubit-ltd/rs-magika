@@ -37,6 +37,7 @@ use qubit_mime::RepositoryMimeDetector;
 
 use crate::internal::AsyncProviderInput;
 use crate::internal::ReadSeekInput;
+use crate::internal::ReaderScope;
 use crate::internal::SyncProviderInput;
 use crate::internal::map_provider_magika_error;
 
@@ -229,15 +230,6 @@ impl MagikaMimeDetector {
             (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(MimeError::Io(error)),
         }
     }
-}
-
-/// Defines the logical resource exposed to a reader based backend.
-#[derive(Clone, Copy)]
-enum ReaderScope {
-    /// The whole seekable resource, starting at byte zero.
-    WholeResource,
-    /// The resource from the caller's current position to EOF.
-    Remaining,
 }
 
 impl MimeDetectorBackend for MagikaMimeDetector {
@@ -572,12 +564,14 @@ mod tests {
     use std::io::Write;
 
     use magika::ContentType;
+    use magika::Error;
     use qubit_io::std_io::ReadSeek;
     use qubit_mime::ContentRequirement;
     use qubit_mime::MimeConfig;
     use qubit_mime::MimeContentBackend;
     use qubit_mime::MimeDetector;
     use qubit_mime::MimeDetectorBackend;
+    use qubit_mime::MimeError;
     use tempfile::NamedTempFile;
 
     use super::MagikaMimeDetector;
@@ -695,8 +689,8 @@ mod tests {
 
     #[test]
     fn magika_errors_map_to_mime_errors() {
-        let error = super::map_magika_error(magika::Error::IOError(std::io::Error::other("io")));
-        assert!(matches!(error, qubit_mime::MimeError::Io(_)));
+        let error = super::map_magika_error(Error::IOError(std::io::Error::other("io")));
+        assert!(matches!(error, MimeError::Io(_)));
     }
 
     #[test]
@@ -713,6 +707,6 @@ mod tests {
         let mapped = detector
             .guess_from_magika_input(&b"content"[..])
             .expect_err("poisoned session should fail detection");
-        assert!(matches!(mapped, qubit_mime::MimeError::DetectorBackend { .. }));
+        assert!(matches!(mapped, MimeError::DetectorBackend { .. }));
     }
 }
