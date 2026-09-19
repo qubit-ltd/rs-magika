@@ -1,0 +1,9 @@
+/tmp/rs-magika-worktree-iHn5rG/.infra/fixtures/dynamic_loader_consumer/target/debug/deps/ort_sys-1d4d0745e7c1d5e4.d: /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/lib.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/internal/mod.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/internal/dirs.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/stub.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/version.rs
+
+/tmp/rs-magika-worktree-iHn5rG/.infra/fixtures/dynamic_loader_consumer/target/debug/deps/libort_sys-1d4d0745e7c1d5e4.rmeta: /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/lib.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/internal/mod.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/internal/dirs.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/stub.rs /home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/version.rs
+
+/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/lib.rs:
+/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/internal/mod.rs:
+/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/internal/dirs.rs:
+/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/stub.rs:
+/home/starfish/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-sys-2.0.0-rc.12/src/version.rs:

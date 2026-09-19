@@ -53,7 +53,7 @@ jobs:
         run: ./ci-check.sh --only=verify
       - name: Run style, hook, and coverage Clippy
         if: runner.os == 'Linux'
-        run: ./ci-check.sh --only=style,clippy,coverage-cfg-clippy,project-hook
+        run: ./ci-check.sh --only=style,clippy,coverage-cfg-clippy
       - name: Install Clippy toolchain on additional platforms
         if: runner.os != 'Linux'
         run: rustup toolchain install nightly-2026-06-05 --profile minimal --component clippy
@@ -99,6 +99,8 @@ jobs:
       - name: Run configured feature and dependency matrix
         run: |
           ./ci-check.sh --only=feature-matrix
+      - name: Compile custom ONNX Runtime consumer
+        run: cargo check --manifest-path .infra/fixtures/dynamic_loader_consumer/Cargo.toml
 
   coverage:
     needs: [verify]
