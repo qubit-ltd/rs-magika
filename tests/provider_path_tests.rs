@@ -237,3 +237,30 @@ fn provider_path_async_without_range_rejects_known_oversize() {
         }
     ));
 }
+
+#[test]
+fn provider_path_rejects_requested_limit_above_detector_limit() {
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range();
+    let error = detector()
+        .detect_path(
+            &provider.file_system(),
+            &path("/script.py"),
+            usize::MAX,
+            MimeDetectionPolicy::VerifyContent,
+        )
+        .expect_err("requested limit above detector limit should fail");
+    assert!(matches!(error, MimeError::BufferLimitExceeded { .. }));
+}
+
+#[test]
+fn provider_async_path_rejects_requested_limit_above_detector_limit() {
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range();
+    let error = run_ready(detector().detect_async_path(
+        &provider.async_file_system(),
+        &path("/script.py"),
+        usize::MAX,
+        MimeDetectionPolicy::VerifyContent,
+    ))
+    .expect_err("requested limit above detector limit should fail");
+    assert!(matches!(error, MimeError::BufferLimitExceeded { .. }));
+}

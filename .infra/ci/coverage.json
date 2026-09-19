@@ -1,9 +1,6 @@
 {
-  "threshold_exempt_files": {
-    "qubit-magika": [
-      "src/internal/provider_input.rs",
-      "src/internal/read_seek_input.rs",
-      "src/magika_mime_detector_provider.rs"
-    ]
+  "threshold_exempt_files": {},
+  "thresholds": {
+    "functions": 90
   }
 }

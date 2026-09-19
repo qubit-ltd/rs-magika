@@ -5,13 +5,21 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+#[cfg(feature = "bundled-onnxruntime")]
+use std::sync::Arc;
+
 use qubit_magika::MagikaMimeDetectorProvider;
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_mime::MediaStreamType;
 #[cfg(feature = "bundled-onnxruntime")]
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorRegistry;
 use qubit_spi::ProviderMetadata;
 #[cfg(feature = "bundled-onnxruntime")]
 use qubit_spi::ProviderSelection;
+
+#[cfg(feature = "bundled-onnxruntime")]
+use crate::support::StaticMediaStreamClassifier;
 
 /// Tests provider self-description and one-argument registration.
 #[test]
@@ -38,6 +46,15 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
         vec!["magika"],
         registry.provider_ids().iter().map(|id| id.as_str()).collect::<Vec<_>>(),
     );
+}
+
+#[cfg(feature = "bundled-onnxruntime")]
+#[test]
+fn test_provider_debug_and_classifier_configuration() {
+    let provider = MagikaMimeDetectorProvider::with_media_stream_classifier(Arc::new(
+        StaticMediaStreamClassifier::new(MediaStreamType::AudioOnly, None),
+    ));
+    assert!(format!("{provider:?}").contains("configured"));
 }
 
 /// Tests explicit Registry selection before configured detector creation.

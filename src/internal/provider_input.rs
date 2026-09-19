@@ -257,10 +257,12 @@ mod tests {
 
     use magika::AsyncInput;
     use magika::Error;
+    use magika::SyncInput;
 
     use super::AsyncProviderInput;
     use super::BudgetExceeded;
     use super::ReadBudget;
+    use super::SyncProviderInput;
     use super::copy_exact;
     use super::invalid_input;
     use super::map_provider_magika_error;
@@ -330,6 +332,18 @@ mod tests {
         assert!(copy_exact(&mut output, vec![1, 2]).is_ok());
         let mapped = map_provider_magika_error(Error::IOError(std::io::Error::other("provider failure")));
         assert!(matches!(mapped, qubit_mime::MimeError::Io(_)));
+    }
+
+    #[test]
+    fn sync_provider_input_reads_ranges_and_reports_length() {
+        let spi = super::provider_file_system_spi::ProviderFileSystemSpi::new(b"abcdef".to_vec()).with_range();
+        let file_system = spi.file_system();
+        let path = qubit_fs::Path::parse("/fixture").expect("fixture path should parse");
+        let mut input = SyncProviderInput::new(&file_system, &path, 6, None, 8);
+        assert_eq!(6, SyncInput::length(&input).expect("length should work"));
+        let mut output = [0_u8; 3];
+        SyncInput::read_at(&mut input, &mut output, 1).expect("range should read");
+        assert_eq!(&output, b"bcd");
     }
 
     #[test]

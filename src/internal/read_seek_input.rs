@@ -120,4 +120,12 @@ mod tests {
         let mut buffer = [0_u8; 1];
         assert!(SyncInput::read_at(&mut input, &mut buffer, 0).is_err());
     }
+
+    #[test]
+    fn bounded_input_rejects_relative_offset_overflow() {
+        let mut reader = Cursor::new(vec![0_u8; 1]);
+        let mut input = ReadSeekInput::new(&mut reader, 0, u64::MAX);
+        let mut buffer = [0_u8; 1];
+        assert!(SyncInput::read_at(&mut input, &mut buffer, u64::MAX).is_err());
+    }
 }
