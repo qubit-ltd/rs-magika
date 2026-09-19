@@ -164,20 +164,23 @@ and keep the versions aligned with `qubit-magika` 0.14:
 qubit-magika = { version = "0.14", default-features = false }
 qubit-mime = "0.17"
 qubit-spi = "0.12"
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
 Initialize the runtime before constructing the detector. Use `onnxruntime.dll`
 on Windows, `libonnxruntime.dylib` on macOS, or `libonnxruntime.so` on Linux:
 
 ```rust,no_run
+use std::error::Error;
 use std::path::PathBuf;
 
 use qubit_magika::MagikaMimeDetector;
 
-fn create_detector() -> Result<MagikaMimeDetector, Box<dyn std::error::Error>> {
+fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
     let runtime = PathBuf::from(std::env::var("ORT_LIBRARY_PATH")?);
-    ort::init_from(runtime)?.commit();
+    if !ort::init_from(runtime)?.commit() {
+        return Err("ONNX Runtime environment was already initialized".into());
+    }
     Ok(MagikaMimeDetector::new()?)
 }
 ```
@@ -204,8 +207,10 @@ bounded windows and conditional ETag reads when available; providers without
 range support use a bounded single read and reject known resources larger than
 the budget. Unknown and undefined Magika types become `Ok(None)` so filename
 fallback follows the selected `MimeDetectionPolicy`.
-The asynchronous path awaits feature extraction before briefly locking the
-shared session for synchronous inference.
+The asynchronous path awaits feature extraction before synchronously running
+inference while holding the shared session lock. Inference and lock waiting can
+occupy the async executor thread; move detection to a blocking worker or service
+boundary when that isolation is required.
 
 ## Migration Guide
 
@@ -255,6 +260,9 @@ startup and handle per-input errors at the boundary where the input is read.
 - Detector construction initializes the model and runtime; create one detector
   and share it instead of constructing one per input.
 - Inference on one detector is serialized internally.
+- Async provider-path detection does not move model inference to a dedicated
+  blocking executor. Account for this when choosing the application's runtime
+  and worker arrangement.
 - `qubit-magika` does not promise a MIME result for every input; callers must
   handle `Ok(None)` and `MimeError`.
 - This crate exposes Magika's mapped MIME result; it does not define a separate

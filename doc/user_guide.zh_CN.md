@@ -151,20 +151,23 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 qubit-magika = { version = "0.14", default-features = false }
 qubit-mime = "0.17"
 qubit-spi = "0.12"
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
 创建 detector 前先初始化 runtime。Windows 使用 `onnxruntime.dll`，macOS 使用
 `libonnxruntime.dylib`，Linux 使用 `libonnxruntime.so`：
 
 ```rust,no_run
+use std::error::Error;
 use std::path::PathBuf;
 
 use qubit_magika::MagikaMimeDetector;
 
-fn create_detector() -> Result<MagikaMimeDetector, Box<dyn std::error::Error>> {
+fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
     let runtime = PathBuf::from(std::env::var("ORT_LIBRARY_PATH")?);
-    ort::init_from(runtime)?.commit();
+    if !ort::init_from(runtime)?.commit() {
+        return Err("ONNX Runtime environment was already initialized".into());
+    }
     Ok(MagikaMimeDetector::new()?)
 }
 ```
@@ -185,7 +188,8 @@ Provider path 检测会累计限制 `max_bytes`：支持范围读取时只请求
 可用时使用条件 ETag 读取；不支持范围读取时执行一次有界读取，已知资源超过预算则返回
 错误。Magika 的 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的
 `MimeDetectionPolicy` 统一处理文件名回退。
-异步路径会先等待特征提取，再短暂锁定共享 Session 执行同步推理。
+异步路径会先等待特征提取，再持有共享 Session 锁同步执行推理。推理和等待锁都可能占用
+异步执行器线程；需要隔离时，应由应用把检测放到阻塞工作线程或服务边界中。
 
 ## 迁移指南
 
@@ -230,6 +234,8 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 - 创建 detector 会初始化模型和 runtime；应创建一个 detector 并共享，不要为每个
   输入重复创建。
 - 同一个 detector 上的推理会在内部串行执行。
+- 异步 provider path 不会自动把模型推理转移到专用阻塞执行器；应用需要结合自己的
+  runtime 和 worker 配置评估线程占用。
 - `qubit-magika` 不保证每个输入都有 MIME 结果；调用方必须处理 `Ok(None)` 和
   `MimeError`。
 - 本 crate 暴露 Magika 映射后的 MIME 结果，不另行定义 MIME registry，也不替代

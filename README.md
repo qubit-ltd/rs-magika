@@ -98,8 +98,10 @@ available. Providers without range support use one bounded read; a known resourc
 larger than the budget returns `MimeError::BufferLimitExceeded`. Unknown and
 undefined Magika types return `Ok(None)`, allowing the selected
 `MimeDetectionPolicy` to apply filename fallback consistently.
-The asynchronous path awaits filesystem feature extraction first, then briefly
-locks the shared session for synchronous Magika inference.
+The asynchronous path awaits filesystem feature extraction first, then performs
+Magika inference synchronously while holding the shared session lock. The
+inference and lock wait can occupy the async executor thread; applications that
+need isolation should move detection to a blocking worker or service boundary.
 
 ## Learn More
 

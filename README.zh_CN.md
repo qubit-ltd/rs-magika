@@ -91,7 +91,9 @@ Provider path 检测会把 `max_bytes` 作为所有 Magika 读取的累计预算
 不支持范围读取的 provider 会在预算内执行一次读取；已知资源长度超过预算时返回
 `MimeError::BufferLimitExceeded`。Magika 返回 `Unknown` 或 `Undefined` 时结果为
 `Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
-异步路径先等待文件系统完成特征提取，再短暂锁定共享 Session 执行同步 Magika 推理。
+异步路径先等待文件系统完成特征提取，再持有共享 Session 锁同步执行 Magika 推理。
+推理和等待锁都可能占用异步执行器线程；需要隔离时，应由应用把检测放到阻塞工作线程
+或服务边界中。
 
 ## 延伸阅读
 
