@@ -5,7 +5,7 @@
 ## 手册目标与读者
 
 本手册面向使用 `qubit-mime`、需要通过 Magika 判断文件内容的 Rust 应用。内容对应
-`qubit-magika` 0.14，最低 Rust 版本为 1.94。crate 提供
+`qubit-magika` 0.15，最低 Rust 版本为 1.94。crate 提供
 `MagikaMimeDetector` 及可选的 `MagikaMimeDetectorProvider`，但不会替代
 `qubit-mime` 的 detector 选择机制和 MIME 策略。
 
@@ -22,6 +22,12 @@
 Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runtime session。
 同一个 detector 内部会串行化推理调用，因此可以用 `Arc` 在应用中共享它。
 
+需要链接时自动发现时，可启用 `qubit-magika = { version = "0.15", features =
+["inventory"] }`。这会将 `MagikaMimeDetectorProvider::new()` 提交给 MIME detector
+inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默认选择仍为
+`repository`。配置媒体流分类器的 Provider 仍需显式构造和注册。
+应用中还应加入 `use qubit_magika as _;`，使 inventory 提交项参与链接。
+
 ## 贯穿场景
 
 假设应用接收一个上传的 Python 脚本：它需要根据内容得到 MIME 类型，同时保留对普通
@@ -34,9 +40,9 @@ Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runt
 
 ```toml
 [dependencies]
-qubit-mime = "0.17"
-qubit-magika = "0.14"
-qubit-spi = "0.12"
+qubit-mime = "0.18"
+qubit-magika = "0.15"
+qubit-spi = "0.13"
 qubit-fs = "0.2" # 直接调用 detect_path 时需要
 ```
 
@@ -147,13 +153,13 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 ## 自定义 ONNX Runtime 配置
 
 如果应用自行提供 ONNX Runtime，可以关闭 bundled binary，并启用 `ort` 的动态加载器。
-下面的声明可以直接复制，并与 `qubit-magika 0.14` 版本保持一致：
+下面的声明可以直接复制，并与 `qubit-magika 0.15` 版本保持一致：
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.14", default-features = false }
-qubit-mime = "0.17"
-qubit-spi = "0.12"
+qubit-magika = { version = "0.15", default-features = false }
+qubit-mime = "0.18"
+qubit-spi = "0.13"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
@@ -202,7 +208,7 @@ Provider path 检测会累计限制范围读取的 `max_bytes`：支持范围读
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
-1. 将配套依赖升级到 `qubit-mime 0.17`、`qubit-spi 0.12`，并使用 Rust 1.94。
+1. 将配套依赖升级到 `qubit-mime 0.18`、`qubit-spi 0.13`，并使用 Rust 1.94。
 2. 保持 provider 注册和 detector 配置分离：注册
    `MagikaMimeDetectorProvider`，选择 `magika`，然后调用
    `create_configured(&MimeConfig)`。
@@ -237,7 +243,8 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 
 ## 限制与最佳实践
 
-- crate 不会自动注册 provider。
+- Provider 自动发现需要启用 `inventory` feature；默认构建仍使用显式注册。
+  Inventory 仅提交未配置分类器的 Provider。
 - 创建 detector 会初始化模型和 runtime；应创建一个 detector 并共享，不要为每个
   输入重复创建。
 - 同一个 detector 上的推理会在内部串行执行。

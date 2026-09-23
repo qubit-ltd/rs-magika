@@ -26,9 +26,9 @@ see the [user guide](doc/user_guide.md) for the dependency and startup example.
 
 ```toml
 [dependencies]
-qubit-mime = "0.17"
-qubit-magika = "0.14"
-qubit-spi = "0.12"
+qubit-mime = "0.18"
+qubit-magika = "0.15"
+qubit-spi = "0.13"
 ```
 
 ## Quick Start
@@ -89,8 +89,15 @@ Magika inference, then return Magika's MIME type mapping.
 Provider selection and detector configuration are separate inputs. A
 `ProviderSelection` decides which registered provider may create the service;
 `MimeConfig` controls the detector instance after that provider is resolved.
-`qubit-magika` does not register itself automatically: the App explicitly
-controls process-wide registration and the default selection during startup.
+By default, the App explicitly registers the provider during startup. Enable
+`qubit-magika`'s `inventory` feature to submit
+`MagikaMimeDetectorProvider::new()` to the MIME detector inventory: linked
+applications then discover `magika` through `MimeDetectorRegistry::builtin()`
+and `global()`. The stable default remains `repository`; select `magika`
+explicitly when needed. A provider with a media-stream classifier still needs
+explicit registration with `with_media_stream_classifier`.
+Reference the crate in the application (`use qubit_magika as _;`) so the linker
+retains its inventory submission.
 Creating a detector initializes the embedded Magika model and ONNX Runtime
 session. Create it once, share it (for example with `Arc`), and expect inference
 calls on a shared detector to be serialized internally.

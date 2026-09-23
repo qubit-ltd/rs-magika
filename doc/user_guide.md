@@ -5,7 +5,7 @@
 ## Purpose and Audience
 
 This guide is for Rust applications that use `qubit-mime` and need Magika to
-classify file content. It covers `qubit-magika` 0.14, which requires Rust 1.94.
+classify file content. It covers `qubit-magika` 0.15, which requires Rust 1.94.
 The crate supplies the `MagikaMimeDetector` implementation and an optional
 `MagikaMimeDetectorProvider`; it does not replace `qubit-mime`'s detector
 selection or MIME policy.
@@ -25,6 +25,14 @@ detector initializes Magika's embedded model and the ONNX Runtime session.
 Inference calls made through one detector are serialized internally, so one
 initialized detector can be shared with `Arc`.
 
+For link-time discovery, enable `qubit-magika = { version = "0.15", features =
+["inventory"] }`. This submits `MagikaMimeDetectorProvider::new()` to the MIME
+detector inventory; `MimeDetectorRegistry::builtin()` then includes `magika`
+while retaining `repository` as its default. A provider configured with a
+media-stream classifier must still be constructed and registered explicitly.
+Reference the crate in the application with `use qubit_magika as _;` so its
+inventory submission is linked.
+
 ## Scenario
 
 An application accepts an uploaded Python script and needs a content-derived
@@ -39,9 +47,9 @@ Add the crate versions used by this release:
 
 ```toml
 [dependencies]
-qubit-mime = "0.17"
-qubit-magika = "0.14"
-qubit-spi = "0.12"
+qubit-mime = "0.18"
+qubit-magika = "0.15"
+qubit-spi = "0.13"
 qubit-fs = "0.2" # needed when calling detect_path directly
 ```
 
@@ -160,13 +168,13 @@ uses registry-based construction. Classifier failures are reported as
 
 To use an ONNX Runtime library supplied by the application, disable the bundled
 binary and enable `ort`'s dynamic loader. These declarations are copy-pasteable
-and keep the versions aligned with `qubit-magika` 0.14:
+and keep the versions aligned with `qubit-magika` 0.15:
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.14", default-features = false }
-qubit-mime = "0.17"
-qubit-spi = "0.12"
+qubit-magika = { version = "0.15", default-features = false }
+qubit-mime = "0.18"
+qubit-spi = "0.13"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
@@ -224,8 +232,8 @@ boundary when that isolation is required.
 
 When upgrading a pre-0.14 integration, apply these changes in order:
 
-1. Upgrade the coordinated dependencies to `qubit-mime 0.17`, `qubit-spi
-   0.12`, and Rust 1.94.
+1. Upgrade the coordinated dependencies to `qubit-mime 0.18`, `qubit-spi
+   0.13`, and Rust 1.94.
 2. Keep provider registration and detector configuration separate: register
    `MagikaMimeDetectorProvider`, select `magika`, then call
    `create_configured(&MimeConfig)`.
@@ -264,7 +272,8 @@ startup and handle per-input errors at the boundary where the input is read.
 
 ## Limitations and Best Practices
 
-- The crate does not register its provider automatically.
+- Provider discovery requires the opt-in `inventory` feature; the default build
+  uses explicit registration. Inventory submits only the unconfigured provider.
 - Detector construction initializes the model and runtime; create one detector
   and share it instead of constructing one per input.
 - Inference on one detector is serialized internally.

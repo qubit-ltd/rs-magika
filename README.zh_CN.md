@@ -23,9 +23,9 @@ Linux CI 会用这套配置对 Python 内容实际执行一次推理；依赖和
 
 ```toml
 [dependencies]
-qubit-mime = "0.17"
-qubit-magika = "0.14"
-qubit-spi = "0.12"
+qubit-mime = "0.18"
+qubit-magika = "0.15"
+qubit-spi = "0.13"
 ```
 
 ## 快速开始
@@ -85,7 +85,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 Provider 选择和 detector 配置是两个独立输入：`ProviderSelection` 决定允许哪个已注册
 Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的 detector 实例。
-`qubit-magika` 不会自动注册自己；应用需要在启动时显式完成进程级注册并设置默认选择。
+默认情况下，应用仍需在启动时显式注册 Provider。启用 `qubit-magika` 的
+`inventory` feature 后，已链接的应用会在 `MimeDetectorRegistry::builtin()` 和
+`global()` 中发现由 `MagikaMimeDetectorProvider::new()` 提交的 `magika` Provider。
+默认选择仍是 `repository`；需要 Magika 时应显式选择。若需配置媒体流分类器，
+仍须通过 `with_media_stream_classifier` 显式构造并注册 Provider。
+应用还需引用该 crate（`use qubit_magika as _;`），确保链接器保留 inventory 提交项。
 创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建一次并
 共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
 

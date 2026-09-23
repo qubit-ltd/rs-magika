@@ -84,7 +84,7 @@ fn test_resolve_explicit_then_create_with_mime_config() {
 }
 
 /// Tests App startup registration and library-side explicit/default use.
-#[cfg(feature = "bundled-onnxruntime")]
+#[cfg(all(feature = "bundled-onnxruntime", not(feature = "inventory")))]
 #[test]
 fn test_global_registry_resolve_explicit_and_default_then_create() {
     let registry = MimeDetectorRegistry::global();
@@ -124,4 +124,19 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
             .detect_by_filename("document.pdf")
             .expect("filename detection should succeed"),
     );
+}
+
+/// An inventory-enabled build discovers the default Magika provider while
+/// retaining repository selection.
+#[cfg(feature = "inventory")]
+#[test]
+fn test_magika_provider_is_discovered_with_repository_default() {
+    let registry = MimeDetectorRegistry::builtin();
+    assert!(registry.provider_ids().iter().any(|id| id.as_str() == "magika"));
+    assert_eq!(
+        qubit_spi::ProviderSelection::named("repository").expect("valid repository ID"),
+        registry.default_selection(),
+    );
+    let selection = qubit_spi::ProviderSelection::named("magika").expect("valid magika ID");
+    registry.resolve_selected(&selection).expect("Magika should resolve");
 }
