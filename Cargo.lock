@@ -497,9 +497,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-fs"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd7ae1da8567edf1ab2789920e856106ac4e493f4b67a2be85442de4ac6f2f"
+checksum = "542be2b6a0cc55b183c701abeda66110370baacdf3f7c9b029ddeff96225b38e"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
@@ -509,9 +509,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-fs-local"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04583f9b8fd717d14d46462326837ed729c4dd55e81fc36b8b2d9c03aebfa22f"
+checksum = "6f8ace5865fb6ba97a74dd11d7acb1bf7fd0624867e25d354dfdc31dcd5f4256"
 dependencies = [
  "qubit-fs",
  "qubit-io",
@@ -570,9 +570,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "150f650567999ee994afe57db59f57ff21b36b16c2d04fb27568d40cd6375b57"
+checksum = "c0dd98d5767978299647ae0687185f13a26c877c94c26026d7989272ea3077e7"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
