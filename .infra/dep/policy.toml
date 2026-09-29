@@ -1,5 +1,5 @@
 format = 2
 source = "https://github.com/qubit-ltd/rs-infra-dependency.git"
-revision = "56b803eb6f76a3ffbb6c13b6f2910e9571106684"
+revision = "56037222a006c9f0560e1e477bb9d947495aef00"
 baseline = "v2026.09.14"
 internal-prefixes = ["qubit-"]
