@@ -1,0 +1,6 @@
+{
+  "threshold_exempt_files": {},
+  "thresholds": {
+    "functions": 90
+  }
+}

@@ -44,14 +44,6 @@ external/
 
 /.infra/*/tool.revision*
 
-!/.infra/coverage/
-
-/.infra/coverage/*
-
-!/.infra/coverage/coverage.json
-
-!/.infra/coverage/tool.toml
-
 # Shared Rust project ignore entries (rs-infra)
 **/target/
 /fuzz/artifacts/
@@ -64,6 +56,10 @@ pids
 *.seed
 *.pid.lock
 coverage/
+!/.infra/coverage/
+/.infra/coverage/*
+!/.infra/coverage/coverage.json
+!/.infra/coverage/tool.toml
 .nyc_output
 /ci-summary.json
 /coverage-badge.json
