@@ -189,5 +189,21 @@ mod tests {
         assert!(copy_exact(&mut output, vec![1, 2]).is_ok());
         let mapped = map_provider_magika_error(Error::IOError(std::io::Error::other("provider failure")));
         assert!(matches!(mapped, MimeError::Io(_)));
+
+        let error = BudgetExceeded {
+            requested: 16,
+            limit: 8,
+        };
+        let mapped = map_provider_magika_error(Error::IOError(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            error,
+        )));
+        assert!(matches!(
+            mapped,
+            MimeError::BufferLimitExceeded {
+                requested: 16,
+                limit: 8
+            }
+        ));
     }
 }

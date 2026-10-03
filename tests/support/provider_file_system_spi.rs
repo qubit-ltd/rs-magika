@@ -54,6 +54,7 @@ pub(crate) struct ProviderFileSystemSpi {
     conditional: bool,
     stat_supported: bool,
     short_read: bool,
+    fail_reads: bool,
     observations: Arc<ProviderObservations>,
 }
 
@@ -74,6 +75,7 @@ impl ProviderFileSystemSpi {
             conditional: false,
             stat_supported: true,
             short_read: false,
+            fail_reads: false,
             observations: Arc::new(ProviderObservations::default()),
         }
     }
@@ -111,6 +113,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn short_reads(mut self) -> Self {
         self.short_read = true;
+        self
+    }
+
+    pub(crate) fn fail_reads(mut self) -> Self {
+        self.fail_reads = true;
         self
     }
 
@@ -211,6 +218,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
             Box::new(ProviderReader {
                 bytes,
                 position: 0,
+                fail_reads: self.fail_reads,
                 observations: Arc::clone(&self.observations),
             }),
         ))
@@ -234,6 +242,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                 Box::new(ProviderReader {
                     bytes,
                     position: 0,
+                    fail_reads: self.fail_reads,
                     observations: Arc::clone(&self.observations),
                 }),
             ))
@@ -244,16 +253,20 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
 struct ProviderReader {
     bytes: Vec<u8>,
     position: usize,
+    fail_reads: bool,
     observations: Arc<ProviderObservations>,
 }
 
 impl ProviderReader {
-    fn read_bytes(&mut self, output: &mut [u8]) -> usize {
+    fn read_bytes(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if self.fail_reads {
+            return Err(io::Error::other("configured provider read failure"));
+        }
         let count = output.len().min(self.bytes.len().saturating_sub(self.position));
         output[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
         self.position += count;
         self.observations.read_bytes.fetch_add(count, Ordering::SeqCst);
-        count
+        Ok(count)
     }
 }
 
@@ -261,7 +274,7 @@ impl Input for ProviderReader {
     type Item = u8;
 
     unsafe fn read_unchecked(&mut self, output: &mut [u8], index: usize, count: usize) -> io::Result<usize> {
-        Ok(self.read_bytes(&mut output[index..index + count]))
+        self.read_bytes(&mut output[index..index + count])
     }
 }
 
@@ -275,6 +288,6 @@ impl AsyncInput for ProviderReader {
         index: usize,
         count: usize,
     ) -> std::task::Poll<io::Result<usize>> {
-        std::task::Poll::Ready(Ok(self.read_bytes(&mut output[index..index + count])))
+        std::task::Poll::Ready(self.read_bytes(&mut output[index..index + count]))
     }
 }
