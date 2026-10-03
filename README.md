@@ -26,8 +26,8 @@ see the [user guide](doc/user_guide.md) for the dependency and startup example.
 
 ```toml
 [dependencies]
-qubit-mime = "0.18"
-qubit-magika = "0.15"
+qubit-mime = "0.19"
+qubit-magika = "0.16"
 qubit-spi = "0.13"
 ```
 

@@ -1,6 +1,6 @@
 [package]
 name = "qubit-magika"
-version = "0.15.1"
+version = "0.16.0"
 edition = "2024"
 rust-version = "1.94"
 autotests = false
@@ -38,7 +38,7 @@ magika = "^1.1"
 qubit-io = "0.17"
 qubit-fs = { version = "0.2", default-features = false, features = ["async"] }
 qubit-spi = { version = "0.13" }
-qubit-mime = "0.18"
+qubit-mime = "0.19"
 
 [dependencies.ort]
 version = "=2.0.0-rc.12"

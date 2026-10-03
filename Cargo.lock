@@ -419,9 +419,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-codec"
-version = "0.14.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dd84631c4950529f775395738e856ccde0c761381ba91e94dc7d04807b922bf"
+checksum = "a4e907054590c1818cb69fae360b2bf60d69890199dea8edd9bd991bb98a3c5b"
 dependencies = [
  "qubit-utils",
  "thiserror 2.0.20",
@@ -429,9 +429,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-codec-misc"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3bdedede7b6f37328aac34f741f3a46d6f6e7a4d9f16ae2b4d68ebd64039e24"
+checksum = "3a2c3fe3f8e02664f64ad2f325998f480e877ac39695fe3f3ef99f6bb4436a16"
 dependencies = [
  "base64",
  "percent-encoding",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-magika"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "magika",
  "ort",
@@ -570,9 +570,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.18.1"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0dd98d5767978299647ae0687185f13a26c877c94c26026d7989272ea3077e7"
+checksum = "0053bf7cb801c450215d870a1689b2fefc373fc6696419951ca31e67a3463436"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
