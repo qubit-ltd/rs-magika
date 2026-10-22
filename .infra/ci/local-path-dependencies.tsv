@@ -1,1 +1,15 @@
 # relative git root<TAB>repository URL<TAB>default branch
+../rs-budget	https://github.com/qubit-ltd/rs-budget	main
+../rs-command	https://github.com/qubit-ltd/rs-command	main
+../rs-config	https://github.com/qubit-ltd/rs-config	main
+../rs-datatype	https://github.com/qubit-ltd/rs-datatype	main
+../rs-fs	https://github.com/qubit-ltd/rs-fs	main
+../rs-fs-local	https://github.com/qubit-ltd/rs-fs-local	main
+../rs-io	https://github.com/qubit-ltd/rs-io	main
+../rs-json	https://github.com/qubit-ltd/rs-json	main
+../rs-local-files	https://github.com/qubit-ltd/rs-local-files	main
+../rs-mime	https://github.com/qubit-ltd/rs-mime	main
+../rs-redact	https://github.com/qubit-ltd/rs-redact	main
+../rs-value	https://github.com/qubit-ltd/rs-value	main
+../rs-fs-registry	https://github.com/qubit-ltd/rs-fs-registry	main
+../rs-fs-testkit	https://github.com/qubit-ltd/rs-fs-testkit	main
