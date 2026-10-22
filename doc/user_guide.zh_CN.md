@@ -22,7 +22,7 @@
 Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runtime session。
 同一个 detector 内部会串行化推理调用，因此可以用 `Arc` 在应用中共享它。
 
-需要链接时自动发现时，可启用 `qubit-magika = { version = "0.15", features =
+需要链接时自动发现时，可启用 `qubit-magika = { version = "0.17", features =
 ["inventory"] }`。这会将 `MagikaMimeDetectorProvider::new()` 提交给 MIME detector
 inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默认选择仍为
 `repository`。配置媒体流分类器的 Provider 仍需显式构造和注册。
@@ -40,8 +40,8 @@ inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默�
 
 ```toml
 [dependencies]
-qubit-mime = "0.18"
-qubit-magika = "0.15"
+qubit-mime = "0.20"
+qubit-magika = "0.17"
 qubit-spi = "0.13"
 qubit-fs = "0.2" # 直接调用 detect_path 时需要
 ```
@@ -157,8 +157,8 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.15", default-features = false }
-qubit-mime = "0.18"
+qubit-magika = { version = "0.17", default-features = false }
+qubit-mime = "0.20"
 qubit-spi = "0.13"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```

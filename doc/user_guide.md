@@ -25,7 +25,7 @@ detector initializes Magika's embedded model and the ONNX Runtime session.
 Inference calls made through one detector are serialized internally, so one
 initialized detector can be shared with `Arc`.
 
-For link-time discovery, enable `qubit-magika = { version = "0.15", features =
+For link-time discovery, enable `qubit-magika = { version = "0.17", features =
 ["inventory"] }`. This submits `MagikaMimeDetectorProvider::new()` to the MIME
 detector inventory; `MimeDetectorRegistry::builtin()` then includes `magika`
 while retaining `repository` as its default. A provider configured with a
@@ -47,8 +47,8 @@ Add the crate versions used by this release:
 
 ```toml
 [dependencies]
-qubit-mime = "0.18"
-qubit-magika = "0.15"
+qubit-mime = "0.20"
+qubit-magika = "0.17"
 qubit-spi = "0.13"
 qubit-fs = "0.2" # needed when calling detect_path directly
 ```
@@ -172,8 +172,8 @@ and keep the versions aligned with `qubit-magika` 0.15:
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.15", default-features = false }
-qubit-mime = "0.18"
+qubit-magika = { version = "0.17", default-features = false }
+qubit-mime = "0.20"
 qubit-spi = "0.13"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```

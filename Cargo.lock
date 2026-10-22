@@ -406,6 +406,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qubit-budget"
+version = "0.9.1"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "qubit-clock"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -450,24 +457,26 @@ dependencies = [
 [[package]]
 name = "qubit-command"
 version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4eefa953629a97935a65b525bf1637be312c53d55bee4fe82d5403a84f3950b0"
 dependencies = [
  "libc",
  "log",
  "process-wrap",
  "qubit-clock",
- "qubit-redact",
+ "qubit-redact 0.9.0",
  "same-file",
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "qubit-config"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
- "qubit-budget",
+ "qubit-budget 0.9.1",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.10.0",
  "qubit-utils",
  "qubit-value",
  "serde",
@@ -478,9 +487,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
- "qubit-budget",
+ "qubit-budget 0.9.1",
  "qubit-json",
  "serde",
  "serde_json",
@@ -492,9 +501,9 @@ name = "qubit-fs"
 version = "0.2.2"
 dependencies = [
  "fluent-uri",
- "qubit-budget",
- "qubit-io",
- "qubit-redact",
+ "qubit-budget 0.7.1",
+ "qubit-io 0.17.0",
+ "qubit-redact 0.9.0",
 ]
 
 [[package]]
@@ -502,8 +511,15 @@ name = "qubit-fs-local"
 version = "0.10.2"
 dependencies = [
  "qubit-fs",
- "qubit-io",
+ "qubit-io 0.17.0",
  "qubit-local-files",
+]
+
+[[package]]
+name = "qubit-io"
+version = "0.19.0"
+dependencies = [
+ "qubit-utils",
 ]
 
 [[package]]
@@ -517,8 +533,8 @@ dependencies = [
 name = "qubit-json"
 version = "0.12.0"
 dependencies = [
- "qubit-budget",
- "qubit-io",
+ "qubit-budget 0.9.1",
+ "qubit-io 0.19.0",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -530,23 +546,22 @@ version = "0.5.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
- "qubit-budget",
- "qubit-io",
- "qubit-redact",
+ "qubit-budget 0.7.1",
+ "qubit-redact 0.9.0",
  "rustix",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "qubit-magika"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "magika",
  "ort",
  "qubit-config",
  "qubit-fs",
  "qubit-fs-local",
- "qubit-io",
+ "qubit-io 0.17.0",
  "qubit-mime",
  "qubit-spi",
  "tempfile",
@@ -554,14 +569,14 @@ dependencies = [
 
 [[package]]
 name = "qubit-mime"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "qubit-codec-misc",
  "qubit-command",
  "qubit-config",
  "qubit-datatype",
  "qubit-fs",
- "qubit-io",
+ "qubit-io 0.17.0",
  "qubit-local-files",
  "qubit-spi",
  "regex",
@@ -574,7 +589,14 @@ name = "qubit-redact"
 version = "0.9.0"
 dependencies = [
  "fluent-uri",
- "qubit-budget",
+ "qubit-budget 0.7.1",
+]
+
+[[package]]
+name = "qubit-redact"
+version = "0.10.0"
+dependencies = [
+ "qubit-budget 0.9.1",
  "qubit-json",
  "serde",
  "serde_json",
@@ -600,12 +622,12 @@ checksum = "7f9bf5cd2e783a8a6edd6536826084ef0a82d1924b14f82e79fe0088b7b33748"
 
 [[package]]
 name = "qubit-value"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
- "qubit-budget",
+ "qubit-budget 0.9.1",
  "qubit-datatype",
  "qubit-json",
- "qubit-redact",
+ "qubit-redact 0.10.0",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1264,3 +1286,79 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[patch.unused]]
+name = "qubit-codec"
+version = "0.16.2"
+
+[[patch.unused]]
+name = "qubit-command"
+version = "0.11.0"
+
+[[patch.unused]]
+name = "qubit-event-bus"
+version = "0.20.1"
+
+[[patch.unused]]
+name = "qubit-event-bus-redis"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "qubit-fs"
+version = "0.3.0"
+
+[[patch.unused]]
+name = "qubit-fs-local"
+version = "0.11.0"
+
+[[patch.unused]]
+name = "qubit-fs-registry"
+version = "0.8.0"
+
+[[patch.unused]]
+name = "qubit-fs-testkit"
+version = "0.8.0"
+
+[[patch.unused]]
+name = "qubit-http"
+version = "0.16.0"
+
+[[patch.unused]]
+name = "qubit-ioc"
+version = "0.4.0"
+
+[[patch.unused]]
+name = "qubit-local-files"
+version = "0.5.0"
+
+[[patch.unused]]
+name = "qubit-metadata"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "qubit-model-metadata"
+version = "0.2.0"
+
+[[patch.unused]]
+name = "qubit-reflect"
+version = "0.2.1"
+
+[[patch.unused]]
+name = "qubit-task"
+version = "0.11.0"
+
+[[patch.unused]]
+name = "qubit-validation-rules"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "qubit-validator"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "qubit-web"
+version = "0.3.0"
+
+[[patch.unused]]
+name = "qubit-websocket"
+version = "0.2.0"
