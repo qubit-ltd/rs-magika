@@ -23,8 +23,8 @@ Linux CI 会用这套配置对 Python 内容实际执行一次推理；依赖和
 
 ```toml
 [dependencies]
-qubit-mime = "0.20"
-qubit-magika = "0.17"
+qubit-mime = "0.21"
+qubit-magika = "0.18"
 qubit-spi = "0.13"
 ```
 

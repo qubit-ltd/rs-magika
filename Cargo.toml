@@ -1,6 +1,6 @@
 [package]
 name = "qubit-magika"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 rust-version = "1.94"
 autotests = false
@@ -37,10 +37,10 @@ inventory = ["qubit-mime/inventory", "qubit-spi/inventory"]
 magika = "^1.1"
 qubit-io = { path = "../rs-io", version = "0.19" }
 
-qubit-fs = { path = "../rs-fs", version = "0.2", default-features = false, features = ["async"] }
+qubit-fs = { path = "../rs-fs", version = "0.3", default-features = false, features = ["async"] }
 
 qubit-spi = { version = "0.13" }
-qubit-mime = "0.20"
+qubit-mime = "0.21"
 
 [dependencies.ort]
 version = "=2.0.0-rc.12"
@@ -49,7 +49,7 @@ optional = true
 
 [dev-dependencies]
 qubit-config = "0.15"
-qubit-fs-local = "0.10"
+qubit-fs-local = "0.11"
 tempfile = "^3.27"
 
 [[test]]
