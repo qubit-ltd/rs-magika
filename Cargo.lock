@@ -427,6 +427,8 @@ dependencies = [
 [[package]]
 name = "qubit-codec"
 version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b85095606a088f262b4d2bc8b74d356e7cc919f2847e2718cf97f9cb8895fbf"
 dependencies = [
  "qubit-utils",
  "thiserror 2.0.20",
@@ -1280,59 +1282,3 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[patch.unused]]
-name = "qubit-event-bus"
-version = "0.20.1"
-
-[[patch.unused]]
-name = "qubit-event-bus-redis"
-version = "0.7.0"
-
-[[patch.unused]]
-name = "qubit-fs-registry"
-version = "0.8.0"
-
-[[patch.unused]]
-name = "qubit-fs-testkit"
-version = "0.8.0"
-
-[[patch.unused]]
-name = "qubit-http"
-version = "0.16.0"
-
-[[patch.unused]]
-name = "qubit-ioc"
-version = "0.4.0"
-
-[[patch.unused]]
-name = "qubit-metadata"
-version = "0.7.0"
-
-[[patch.unused]]
-name = "qubit-model-metadata"
-version = "0.2.0"
-
-[[patch.unused]]
-name = "qubit-reflect"
-version = "0.2.1"
-
-[[patch.unused]]
-name = "qubit-task"
-version = "0.11.0"
-
-[[patch.unused]]
-name = "qubit-validation-rules"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "qubit-validator"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "qubit-web"
-version = "0.3.0"
-
-[[patch.unused]]
-name = "qubit-websocket"
-version = "0.2.0"
