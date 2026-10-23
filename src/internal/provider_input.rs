@@ -84,6 +84,7 @@ pub(crate) fn validate_request(
 /// Builds a provider range request starting at `offset` for `length` bytes.
 ///
 /// When `version` is present, the provider must match that resource version.
+#[inline]
 pub(crate) fn read_options(offset: u64, length: usize, version: Option<&ResourceVersion>) -> ReadOptions {
     ReadOptions::default()
         .with_offset(Some(offset))
@@ -104,6 +105,7 @@ pub(crate) fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> 
 }
 
 /// Constructs an invalid-input error for a rejected provider request.
+#[inline]
 pub(crate) fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -124,86 +126,5 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
             MimeError::Io(error)
         }
         error => MimeError::detector_backend("magika", error.to_string()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use magika::Error;
-    use qubit_mime::MimeError;
-
-    use super::copy_exact;
-    use super::invalid_input;
-    use super::map_provider_magika_error;
-    use super::validate_request;
-    use crate::internal::budget_exceeded::BudgetExceeded;
-    use crate::internal::read_budget::ReadBudget;
-
-    #[test]
-    fn budget_counts_repeated_reads() {
-        let mut budget = ReadBudget::new(8_192);
-        assert!(budget.consume(4_096).is_ok());
-        assert!(budget.consume(4_096).is_ok());
-        let error = budget.consume(4_097).expect_err("third read must exceed budget");
-        assert_eq!(12_289, error.requested);
-        assert_eq!(8_192, error.limit);
-    }
-
-    #[test]
-    fn budget_reports_addition_overflow() {
-        let mut budget = ReadBudget::new(usize::MAX);
-        assert!(budget.consume(usize::MAX).is_ok());
-        let error = budget.consume(1).expect_err("overflow must be rejected");
-        assert_eq!(usize::MAX, error.requested);
-        assert_eq!(usize::MAX, error.limit);
-    }
-
-    #[test]
-    fn budget_rejects_second_window_when_limit_is_one_window() {
-        let mut budget = ReadBudget::new(4_096);
-        assert!(budget.consume(4_096).is_ok());
-        let error = budget
-            .consume(4_096)
-            .expect_err("second window must exceed the cumulative limit");
-        assert_eq!(8_192, error.requested);
-        assert_eq!(4_096, error.limit);
-    }
-
-    #[test]
-    fn helper_errors_are_displayable() {
-        assert_eq!(
-            "invalid provider input",
-            invalid_input("invalid provider input").to_string()
-        );
-        assert!(BudgetExceeded { requested: 9, limit: 8 }.to_string().contains("9 > 8"));
-    }
-
-    #[test]
-    fn request_validation_and_copy_errors_are_mapped() {
-        let mut budget = ReadBudget::new(8);
-        assert!(validate_request(8, &mut budget, 0, 99).is_ok());
-        assert!(validate_request(8, &mut budget, 2, 7).is_err());
-        assert!(validate_request(8, &mut budget, 2, u64::MAX).is_err());
-        let mut output = [0_u8; 2];
-        assert!(copy_exact(&mut output, vec![1]).is_err());
-        assert!(copy_exact(&mut output, vec![1, 2]).is_ok());
-        let mapped = map_provider_magika_error(Error::IOError(std::io::Error::other("provider failure")));
-        assert!(matches!(mapped, MimeError::Io(_)));
-
-        let error = BudgetExceeded {
-            requested: 16,
-            limit: 8,
-        };
-        let mapped = map_provider_magika_error(Error::IOError(std::io::Error::new(
-            std::io::ErrorKind::FileTooLarge,
-            error,
-        )));
-        assert!(matches!(
-            mapped,
-            MimeError::BufferLimitExceeded {
-                requested: 16,
-                limit: 8
-            }
-        ));
     }
 }

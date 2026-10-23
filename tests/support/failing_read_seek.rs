@@ -41,6 +41,7 @@ impl FailingReadSeek {
     /// # Returns
     ///
     /// A configured seekable test reader.
+    #[must_use]
     pub(crate) fn new(content: Vec<u8>, fail_reads: bool, fail_restore_to: Option<u64>) -> Self {
         Self {
             inner: Cursor::new(content),
@@ -56,6 +57,7 @@ impl FailingReadSeek {
     /// # Returns
     ///
     /// Current byte offset in the wrapped cursor.
+    #[must_use]
     #[inline(always)]
     pub(crate) fn position(&self) -> u64 {
         self.inner.position()
@@ -66,6 +68,7 @@ impl FailingReadSeek {
     /// # Returns
     ///
     /// The reader configured to panic on reads.
+    #[must_use]
     pub(crate) fn panic_on_read(mut self) -> Self {
         self.panic_on_read = true;
         self

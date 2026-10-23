@@ -38,6 +38,7 @@ impl<'a> AsyncProviderInput<'a> {
     ///
     /// The borrowed filesystem and path must remain valid through feature
     /// extraction. `version` constrains each range read when present.
+    #[must_use]
     pub(crate) fn new(
         file_system: &'a AsyncFileSystem,
         path: &'a Path,

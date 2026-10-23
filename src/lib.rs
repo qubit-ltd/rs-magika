@@ -15,6 +15,8 @@ mod inventory_submission;
 mod magika_mime_detector;
 mod magika_mime_detector_builder;
 mod magika_mime_detector_provider;
+#[cfg(test)]
+mod tests;
 
 pub use magika_mime_detector::MagikaMimeDetector;
 pub use magika_mime_detector_builder::MagikaMimeDetectorBuilder;

@@ -15,6 +15,7 @@ use qubit_magika::MagikaMimeDetector;
 /// # Returns
 ///
 /// A detector initialized once with the bundled ONNX Runtime.
+#[must_use]
 pub(crate) fn detector() -> &'static MagikaMimeDetector {
     static DETECTOR: OnceLock<MagikaMimeDetector> = OnceLock::new();
     DETECTOR.get_or_init(|| MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika"))

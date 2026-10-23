@@ -27,8 +27,10 @@ use qubit_mime::CONFIG_MIME_PRECISE_DETECTION_PATTERNS;
 use qubit_mime::ContentRequirement;
 use qubit_mime::MediaStreamType;
 use qubit_mime::MimeConfig;
+use qubit_mime::MimeContentBackend;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
 use tempfile::NamedTempFile;
 
@@ -62,10 +64,6 @@ const REAL_FILE_CASES: &[RealFileCase] = &[
 /// position.
 #[test]
 fn test_magika_content_backend_detects_complete_input() {
-    use qubit_mime::ContentRequirement;
-    use qubit_mime::MimeContentBackend;
-    use qubit_mime::MimeDetectorBackend;
-
     let detector = detector();
     let backend: &dyn MimeContentBackend = detector;
     assert_eq!(backend.content_requirement(), ContentRequirement::Complete);
@@ -88,9 +86,7 @@ fn test_magika_content_backend_detects_complete_input() {
 }
 
 #[test]
-fn reader_window_content_backend_uses_sparse_reads() {
-    use qubit_mime::MimeContentBackend;
-
+fn test_reader_window_content_backend_uses_sparse_reads() {
     let detector = detector();
     let backend: &dyn MimeContentBackend = detector;
     let fixture = include_bytes!("fixtures/real_files/script.py").to_vec();
@@ -107,9 +103,7 @@ fn reader_window_content_backend_uses_sparse_reads() {
 }
 
 #[test]
-fn reader_window_content_backend_starts_at_cursor() {
-    use qubit_mime::MimeContentBackend;
-
+fn test_reader_window_content_backend_starts_at_cursor() {
     let detector = detector();
     let backend: &dyn MimeContentBackend = detector;
     let fixture = include_bytes!("fixtures/real_files/script.py");
@@ -129,12 +123,10 @@ fn reader_window_content_backend_starts_at_cursor() {
 }
 
 #[test]
-fn reader_window_content_backend_restores_after_failure() {
-    use qubit_mime::MimeContentBackend as ContentBackend;
-
+fn test_reader_window_content_backend_restores_after_failure() {
     let mut reader = FailingReadSeek::new(b"script".to_vec(), true, None);
     let error =
-        ContentBackend::detect_reader(detector(), &mut reader).expect_err("forced reader failure should propagate");
+        MimeContentBackend::detect_reader(detector(), &mut reader).expect_err("forced reader failure should propagate");
     assert!(matches!(error, MimeError::Io { .. }));
     assert_eq!(0, reader.position());
 }
@@ -165,7 +157,7 @@ fn test_magika_detector_delegates_filename_detection_to_repository() {
 }
 
 #[test]
-fn unknown_content_uses_policy() {
+fn test_unknown_content_uses_policy() {
     let detector = detector();
     let unknown = [0xff_u8];
 

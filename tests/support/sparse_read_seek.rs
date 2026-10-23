@@ -23,6 +23,7 @@ pub(crate) struct SparseReadSeek {
 }
 
 impl SparseReadSeek {
+    #[must_use]
     pub(crate) fn new(length: u64, prefix: Vec<u8>) -> Self {
         Self {
             length,
@@ -32,6 +33,8 @@ impl SparseReadSeek {
         }
     }
 
+    #[must_use]
+    #[inline]
     pub(crate) fn bytes_read(&self) -> usize {
         self.bytes_read.load(Ordering::Relaxed)
     }

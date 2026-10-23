@@ -20,6 +20,11 @@ pub(crate) struct ReadBudget {
 
 impl ReadBudget {
     /// Creates an empty per-detection budget with `limit` available bytes.
+    ///
+    /// # Parameters
+    ///
+    /// - `limit`: Maximum cumulative number of bytes that may be reserved.
+    #[inline]
     pub(crate) const fn new(limit: usize) -> Self {
         Self { used: 0, limit }
     }
@@ -28,6 +33,15 @@ impl ReadBudget {
     ///
     /// Returns [`BudgetExceeded`] without changing the used total if this read
     /// would exceed the limit or overflow the cumulative count.
+    ///
+    /// # Parameters
+    ///
+    /// - `count`: Number of bytes to reserve for the provider range read.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the bytes fit within the remaining budget, or
+    /// [`BudgetExceeded`] when the cumulative request exceeds the limit.
     pub(crate) fn consume(&mut self, count: usize) -> Result<(), BudgetExceeded> {
         let Some(requested) = self.used.checked_add(count) else {
             return Err(BudgetExceeded {

@@ -39,20 +39,48 @@ pub struct MagikaMimeDetectorBuilder {
 
 impl MagikaMimeDetectorBuilder {
     /// Replaces the MIME policy and refinement configuration.
+    ///
+    /// # Parameters
+    ///
+    /// * `mime_config` - Policy and refinement settings to use when detecting
+    ///   MIME types.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the supplied configuration.
     #[must_use]
+    #[inline]
     pub fn mime_config(mut self, mime_config: MimeConfig) -> Self {
         self.mime_config = mime_config;
         self
     }
 
     /// Sets the optional classifier used for precise media refinement.
+    ///
+    /// # Parameters
+    ///
+    /// * `media_stream_classifier` - Classifier to use for media refinement, or
+    ///   `None` to disable it.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the supplied classifier setting.
     #[must_use]
+    #[inline]
     pub fn media_stream_classifier(mut self, media_stream_classifier: Option<Arc<dyn MediaStreamClassifier>>) -> Self {
         self.media_stream_classifier = media_stream_classifier;
         self
     }
 
     /// Initializes the Magika session and constructs the detector.
+    ///
+    /// # Returns
+    ///
+    /// A detector configured with the builder's MIME settings and classifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Magika cannot initialize its session.
     pub fn build(self) -> MimeResult<MagikaMimeDetector> {
         let session = Session::new().map_err(map_magika_error)?;
         let mut core = MimeDetectorCore::from_mime_config(self.mime_config.clone());

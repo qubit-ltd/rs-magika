@@ -30,6 +30,8 @@ fn path(value: &str) -> Path {
     Path::parse(value).expect("test path should be valid")
 }
 
+/// Polls a future until it completes, yielding the thread between pending
+/// polls.
 fn run_ready<F: Future>(future: F) -> F::Output {
     fn clone(_: *const ()) -> RawWaker {
         RawWaker::new(std::ptr::null(), &VTABLE)
@@ -57,7 +59,7 @@ fn large_provider(range: bool) -> ProviderFileSystemSpi {
 }
 
 #[test]
-fn provider_path_sync_range_reads_only_bounded_windows() {
+fn test_provider_path_sync_range_reads_only_bounded_windows() {
     let provider = large_provider(true);
     let observations = provider.observations();
     let result = detector().detect_path(
@@ -84,7 +86,7 @@ fn provider_path_sync_range_reads_only_bounded_windows() {
 }
 
 #[test]
-fn provider_path_async_range_reads_only_bounded_windows() {
+fn test_provider_path_async_range_reads_only_bounded_windows() {
     let provider = large_provider(true);
     let observations = provider.observations();
     let result = run_ready(detector().detect_async_path(
@@ -101,7 +103,7 @@ fn provider_path_async_range_reads_only_bounded_windows() {
 }
 
 #[test]
-fn provider_path_without_range_rejects_known_oversize() {
+fn test_provider_path_without_range_rejects_known_oversize() {
     let provider = large_provider(false);
     let error = detector()
         .detect_path(
@@ -121,7 +123,7 @@ fn provider_path_without_range_rejects_known_oversize() {
 }
 
 #[test]
-fn provider_path_without_range_reads_small_resources() {
+fn test_provider_path_without_range_reads_small_resources() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).without_range();
     let result = detector().detect_path(
         &provider.file_system(),
@@ -145,7 +147,7 @@ fn provider_path_without_range_reads_small_resources() {
 }
 
 #[test]
-fn provider_path_unknown_length_falls_back_without_stat() {
+fn test_provider_path_unknown_length_falls_back_without_stat() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .unknown_length()
         .without_stat();
@@ -164,7 +166,7 @@ fn provider_path_unknown_length_falls_back_without_stat() {
 }
 
 #[test]
-fn provider_path_prefer_filename_skips_provider_access() {
+fn test_provider_path_prefer_filename_skips_provider_access() {
     let provider = large_provider(true);
     let observations = provider.observations();
     let result = detector().detect_path(
@@ -182,7 +184,7 @@ fn provider_path_prefer_filename_skips_provider_access() {
 }
 
 #[test]
-fn provider_path_conditional_range_uses_etag() {
+fn test_provider_path_conditional_range_uses_etag() {
     let provider = large_provider(true).with_conditional();
     let result = detector().detect_path(
         &provider.file_system(),
@@ -206,7 +208,7 @@ fn provider_path_conditional_range_uses_etag() {
 }
 
 #[test]
-fn provider_path_short_read_is_an_io_error() {
+fn test_provider_path_short_read_is_an_io_error() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().short_reads();
     let error = detector()
         .detect_path(
@@ -220,7 +222,7 @@ fn provider_path_short_read_is_an_io_error() {
 }
 
 #[test]
-fn provider_path_async_short_read_is_an_io_error() {
+fn test_provider_path_async_short_read_is_an_io_error() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().short_reads();
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
@@ -233,7 +235,7 @@ fn provider_path_async_short_read_is_an_io_error() {
 }
 
 #[test]
-fn provider_path_sync_read_failure_is_an_io_error() {
+fn test_provider_path_sync_read_failure_is_an_io_error() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().fail_reads();
     let error = detector()
         .detect_path(
@@ -247,7 +249,7 @@ fn provider_path_sync_read_failure_is_an_io_error() {
 }
 
 #[test]
-fn provider_path_async_read_failure_is_an_io_error() {
+fn test_provider_path_async_read_failure_is_an_io_error() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().fail_reads();
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
@@ -260,7 +262,7 @@ fn provider_path_async_read_failure_is_an_io_error() {
 }
 
 #[test]
-fn provider_path_async_without_range_rejects_known_oversize() {
+fn test_provider_path_async_without_range_rejects_known_oversize() {
     let provider = large_provider(false);
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
@@ -279,7 +281,7 @@ fn provider_path_async_without_range_rejects_known_oversize() {
 }
 
 #[test]
-fn provider_path_rejects_requested_limit_above_detector_limit() {
+fn test_provider_path_rejects_requested_limit_above_detector_limit() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range();
     let error = detector()
         .detect_path(
@@ -293,7 +295,7 @@ fn provider_path_rejects_requested_limit_above_detector_limit() {
 }
 
 #[test]
-fn provider_async_path_rejects_requested_limit_above_detector_limit() {
+fn test_provider_async_path_rejects_requested_limit_above_detector_limit() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range();
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),

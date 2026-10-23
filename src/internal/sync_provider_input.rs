@@ -35,6 +35,19 @@ impl<'a> SyncProviderInput<'a> {
     ///
     /// The borrowed filesystem and path must remain valid through inference.
     /// `version` constrains each range read when present.
+    ///
+    /// # Parameters
+    ///
+    /// * `file_system` - Filesystem that supplies resource ranges.
+    /// * `path` - Logical path of the resource within the filesystem.
+    /// * `length` - Complete logical resource length reported to Magika.
+    /// * `version` - Optional resource version required for each range read.
+    /// * `limit` - Maximum cumulative bytes reserved across reads.
+    ///
+    /// # Returns
+    ///
+    /// A synchronous input adapter with a fresh cumulative read budget.
+    #[must_use]
     pub(crate) fn new(
         file_system: &'a FileSystem,
         path: &'a Path,

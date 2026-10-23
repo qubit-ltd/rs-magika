@@ -29,8 +29,15 @@ fn test_read_seek_input_restores_position_after_read_error() {
         .detect_reader(&mut reader, None, MimeDetectionPolicy::VerifyContent)
         .expect_err("reader read failure should be reported");
 
-    assert!(matches!(error, MimeError::Io(_)));
-    assert_eq!(2, reader.position());
+    assert!(
+        matches!(error, MimeError::Io(_)),
+        "read failure should be reported as an I/O error"
+    );
+    assert_eq!(
+        2,
+        reader.position(),
+        "reader position should be restored after a read error"
+    );
 }
 
 /// Verifies the reader adapter reports a failed restoration seek.
@@ -45,5 +52,8 @@ fn test_read_seek_input_reports_restore_error() {
         .detect_reader(&mut reader, None, MimeDetectionPolicy::VerifyContent)
         .expect_err("reader restore failure should be reported");
 
-    assert!(matches!(error, MimeError::Io(_)));
+    assert!(
+        matches!(error, MimeError::Io(_)),
+        "failed restoration seek should be reported as an I/O error"
+    );
 }

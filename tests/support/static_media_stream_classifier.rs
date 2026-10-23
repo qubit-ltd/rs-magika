@@ -34,6 +34,7 @@ impl StaticMediaStreamClassifier {
     /// # Returns
     ///
     /// A configured deterministic classifier.
+    #[inline]
     pub(crate) fn new(stream_type: MediaStreamType, expected_first_byte: Option<u8>) -> Self {
         Self {
             stream_type,
