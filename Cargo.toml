@@ -35,7 +35,7 @@ inventory = ["qubit-mime/inventory", "qubit-spi/inventory"]
 
 [dependencies]
 magika = "^1.1"
-qubit-io = { path = "../rs-io", version = "0.19" }
+qubit-io = "0.19"
 
 qubit-fs = { path = "../rs-fs", version = "0.3", default-features = false, features = ["async"] }
 
@@ -48,12 +48,11 @@ default-features = false
 optional = true
 
 [dev-dependencies]
-qubit-config = "0.15"
+qubit-config = { path = "../rs-config", version = "0.15" }
 qubit-fs-local = { path = "../rs-fs-local", version = "0.11" }
 tempfile = "^3.27"
 
 [patch.crates-io]
-qubit-budget = { path = "../rs-budget" }
 qubit-command = { path = "../rs-command" }
 qubit-config = { path = "../rs-config" }
 qubit-datatype = { path = "../rs-datatype" }

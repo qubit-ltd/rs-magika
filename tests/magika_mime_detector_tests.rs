@@ -72,14 +72,18 @@ fn test_magika_content_backend_detects_complete_input() {
         detector.max_buffer_size()
     );
     let content = include_bytes!("fixtures/real_files/script.py");
-    let candidates = backend.detect_bytes(content).expect("content backend inference");
+    let candidates = backend
+        .detect_bytes(content)
+        .expect("content backend inference");
     assert_eq!(candidates, vec!["text/x-python"]);
     let mut bytes = b"skip".to_vec();
     bytes.extend_from_slice(content);
     let mut reader = Cursor::new(bytes);
     reader.set_position(4);
     assert_eq!(
-        backend.detect_reader(&mut reader).expect("complete reader inference"),
+        backend
+            .detect_reader(&mut reader)
+            .expect("complete reader inference"),
         candidates
     );
     assert_eq!(reader.position(), 4);
@@ -91,7 +95,9 @@ fn test_reader_window_content_backend_uses_sparse_reads() {
     let backend: &dyn MimeContentBackend = detector;
     let fixture = include_bytes!("fixtures/real_files/script.py").to_vec();
     let mut reader = SparseReadSeek::new(32 * 1024 * 1024, fixture);
-    reader.seek(SeekFrom::Start(0)).expect("sparse reader should seek");
+    reader
+        .seek(SeekFrom::Start(0))
+        .expect("sparse reader should seek");
 
     let candidates = backend
         .detect_reader(&mut reader)
@@ -99,7 +105,12 @@ fn test_reader_window_content_backend_uses_sparse_reads() {
 
     assert_eq!(vec!["text/x-python".to_owned()], candidates);
     assert!(reader.bytes_read() <= 8 * 1024);
-    assert_eq!(0, reader.stream_position().expect("position should be readable"));
+    assert_eq!(
+        0,
+        reader
+            .stream_position()
+            .expect("position should be readable")
+    );
 }
 
 #[test]
@@ -109,7 +120,9 @@ fn test_reader_window_content_backend_starts_at_cursor() {
     let fixture = include_bytes!("fixtures/real_files/script.py");
     let mut bytes = b"skip".to_vec();
     bytes.extend_from_slice(fixture);
-    let expected = backend.detect_bytes(fixture).expect("fixture detection should succeed");
+    let expected = backend
+        .detect_bytes(fixture)
+        .expect("fixture detection should succeed");
     let mut reader = Cursor::new(bytes);
     reader.seek(SeekFrom::Start(4)).expect("reader should seek");
 
@@ -119,14 +132,19 @@ fn test_reader_window_content_backend_starts_at_cursor() {
             .detect_reader(&mut reader)
             .expect("window detection should succeed")
     );
-    assert_eq!(4, reader.stream_position().expect("position should be readable"));
+    assert_eq!(
+        4,
+        reader
+            .stream_position()
+            .expect("position should be readable")
+    );
 }
 
 #[test]
 fn test_reader_window_content_backend_restores_after_failure() {
     let mut reader = FailingReadSeek::new(b"script".to_vec(), true, None);
-    let error =
-        MimeContentBackend::detect_reader(detector(), &mut reader).expect_err("forced reader failure should propagate");
+    let error = MimeContentBackend::detect_reader(detector(), &mut reader)
+        .expect_err("forced reader failure should propagate");
     assert!(matches!(error, MimeError::Io { .. }));
     assert_eq!(0, reader.position());
 }
@@ -170,25 +188,41 @@ fn test_unknown_content_uses_policy() {
     assert_eq!(
         Some("application/pdf".to_owned()),
         detector
-            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::Freedesktop)
+            .detect(
+                &unknown,
+                Some("document.pdf"),
+                MimeDetectionPolicy::Freedesktop
+            )
             .expect("freedesktop policy should use filename fallback"),
     );
     assert_eq!(
         Some("application/pdf".to_owned()),
         detector
-            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::ContentFirst)
+            .detect(
+                &unknown,
+                Some("document.pdf"),
+                MimeDetectionPolicy::ContentFirst
+            )
             .expect("content-first policy should use filename fallback when content is absent"),
     );
     assert_eq!(
         None,
         detector
-            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::VerifyContent)
+            .detect(
+                &unknown,
+                Some("document.pdf"),
+                MimeDetectionPolicy::VerifyContent
+            )
             .expect("verify policy should reject absent content candidates"),
     );
     assert_eq!(
         Some("application/pdf".to_owned()),
         detector
-            .detect(&unknown, Some("document.pdf"), MimeDetectionPolicy::PreferFilename)
+            .detect(
+                &unknown,
+                Some("document.pdf"),
+                MimeDetectionPolicy::PreferFilename
+            )
             .expect("prefer-filename policy should skip content"),
     );
 }
@@ -217,7 +251,11 @@ fn test_magika_detector_detect_prefers_filename_without_content_detection() {
     assert_eq!(
         Some("application/pdf".to_owned()),
         detector
-            .detect(b"not a pdf", Some("document.pdf"), MimeDetectionPolicy::PreferFilename,)
+            .detect(
+                b"not a pdf",
+                Some("document.pdf"),
+                MimeDetectionPolicy::PreferFilename,
+            )
             .expect("combined detection should succeed")
     );
 }
@@ -245,9 +283,13 @@ fn test_magika_detector_reader_detection_prefers_filename_without_reading() {
     let detector = detector();
     let mut reader = FailingReadSeek::new(b"not a pdf".to_vec(), true, None);
 
-    let detected = detector
-        .detect_reader(&mut reader, Some("document.pdf"), MimeDetectionPolicy::PreferFilename)
-        .expect("filename-preferred reader detection should skip content reads");
+    let detected = MimeDetector::detect_reader(
+        detector,
+        &mut reader,
+        Some("document.pdf"),
+        MimeDetectionPolicy::PreferFilename,
+    )
+    .expect("filename-preferred reader detection should skip content reads");
 
     assert_eq!(Some("application/pdf".to_owned()), detected);
 }
@@ -258,9 +300,13 @@ fn test_magika_detector_reader_maps_magika_io_error() {
     let detector = detector();
     let mut reader = FailingReadSeek::new(b"not a pdf".to_vec(), true, None);
 
-    let error = detector
-        .detect_reader(&mut reader, None, MimeDetectionPolicy::VerifyContent)
-        .expect_err("Magika read failure should be reported");
+    let error = MimeDetector::detect_reader(
+        detector,
+        &mut reader,
+        None,
+        MimeDetectionPolicy::VerifyContent,
+    )
+    .expect_err("Magika read failure should be reported");
 
     assert!(matches!(error, MimeError::Io(_)));
 }
@@ -268,11 +314,17 @@ fn test_magika_detector_reader_maps_magika_io_error() {
 /// Verifies a poisoned Magika session lock is converted to a backend error.
 #[test]
 fn test_magika_detector_maps_poisoned_session_lock() {
-    let detector = MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
+    let detector =
+        MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
     let mut reader = FailingReadSeek::new(b"not a pdf".to_vec(), false, None).panic_on_read();
 
     let panic_result = catch_unwind(AssertUnwindSafe(|| {
-        let _ = detector.detect_reader(&mut reader, None, MimeDetectionPolicy::VerifyContent);
+        let _ = MimeDetector::detect_reader(
+            &detector,
+            &mut reader,
+            None,
+            MimeDetectionPolicy::VerifyContent,
+        );
     }));
     assert!(panic_result.is_err());
 
@@ -290,9 +342,13 @@ fn test_magika_detector_restores_reader_position() {
     let mut reader = Cursor::new(b"#!/bin/sh\necho hello\n".to_vec());
     reader.set_position(2);
 
-    let detected = detector
-        .detect_reader(&mut reader, Some("script.sh"), MimeDetectionPolicy::VerifyContent)
-        .expect("reader detection should not fail");
+    let detected = MimeDetector::detect_reader(
+        detector,
+        &mut reader,
+        Some("script.sh"),
+        MimeDetectionPolicy::VerifyContent,
+    )
+    .expect("reader detection should not fail");
 
     assert_eq!(Some("text/x-shellscript".to_owned()), detected);
     assert_eq!(2, reader.position());
@@ -318,7 +374,8 @@ fn test_magika_detector_reader_detection_refines_media_type() {
             "sh:text/x-shellscript,audio/x-shellscript",
         )
         .expect("ambiguous mapping should be configurable");
-    let config = MimeConfig::from_config(&raw_config).expect("precise detector config should parse");
+    let config =
+        MimeConfig::from_config(&raw_config).expect("precise detector config should parse");
     let detector = MagikaMimeDetector::builder()
         .mime_config(config)
         .media_stream_classifier(Some(Arc::new(StaticMediaStreamClassifier::new(
@@ -330,9 +387,13 @@ fn test_magika_detector_reader_detection_refines_media_type() {
     let mut reader = Cursor::new(b"#!/bin/sh\necho hello\n".to_vec());
     reader.set_position(2);
 
-    let detected = detector
-        .detect_reader(&mut reader, Some("script.sh"), MimeDetectionPolicy::VerifyContent)
-        .expect("reader detection should refine the MIME type");
+    let detected = MimeDetector::detect_reader(
+        &detector,
+        &mut reader,
+        Some("script.sh"),
+        MimeDetectionPolicy::VerifyContent,
+    )
+    .expect("reader detection should refine the MIME type");
 
     assert_eq!(Some("audio/x-shellscript".to_owned()), detected);
     assert_eq!(2, reader.position());
@@ -359,7 +420,10 @@ fn test_magika_detector_detect_file_prefers_filename_without_reading() {
     let detector = detector();
 
     let detected = detector
-        .detect_file(Path::new("missing-document.pdf"), MimeDetectionPolicy::PreferFilename)
+        .detect_file(
+            Path::new("missing-document.pdf"),
+            MimeDetectionPolicy::PreferFilename,
+        )
         .expect("filename-preferred file detection should skip content reads");
 
     assert_eq!(Some("application/pdf".to_owned()), detected);
@@ -412,9 +476,13 @@ fn test_magika_reader_detects_real_fixtures_without_consuming_position() {
             .expect("real fixture file should be seekable");
 
         let filename = path.to_string_lossy();
-        let detected = detector
-            .detect_reader(&mut file, Some(&filename), MimeDetectionPolicy::VerifyContent)
-            .expect("real fixture reader detection should succeed");
+        let detected = MimeDetector::detect_reader(
+            detector,
+            &mut file,
+            Some(&filename),
+            MimeDetectionPolicy::VerifyContent,
+        )
+        .expect("real fixture reader detection should succeed");
 
         assert_eq!(
             Some(case.expected_mime.to_owned()),
