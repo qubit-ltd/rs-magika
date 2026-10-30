@@ -25,7 +25,7 @@ Linux CI 会用这套配置对 Python 内容实际执行一次推理；依赖和
 [dependencies]
 qubit-mime = "0.21"
 qubit-magika = "0.18"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 ```
 
 ## 快速开始

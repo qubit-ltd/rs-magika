@@ -28,7 +28,7 @@ see the [user guide](doc/user_guide.md) for the dependency and startup example.
 [dependencies]
 qubit-mime = "0.21"
 qubit-magika = "0.18"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 ```
 
 ## Quick Start

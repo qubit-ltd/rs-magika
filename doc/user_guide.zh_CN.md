@@ -42,7 +42,7 @@ inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默�
 [dependencies]
 qubit-mime = "0.20"
 qubit-magika = "0.17"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 qubit-fs = "0.2" # 直接调用 detect_path 时需要
 ```
 
@@ -159,7 +159,7 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 [dependencies]
 qubit-magika = { version = "0.17", default-features = false }
 qubit-mime = "0.20"
-qubit-spi = "0.13"
+qubit-spi = "0.14"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
@@ -208,7 +208,7 @@ Provider path 检测会累计限制范围读取的 `max_bytes`：支持范围读
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
-1. 将配套依赖升级到 `qubit-mime 0.18`、`qubit-spi 0.13`，并使用 Rust 1.94。
+1. 将配套依赖升级到 `qubit-mime 0.18`、`qubit-spi 0.14`，并使用 Rust 1.94。
 2. 保持 provider 注册和 detector 配置分离：注册
    `MagikaMimeDetectorProvider`，选择 `magika`，然后调用
    `create_configured(&MimeConfig)`。

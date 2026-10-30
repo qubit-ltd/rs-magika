@@ -39,7 +39,7 @@ qubit-io = "0.19"
 
 qubit-fs = { path = "../rs-fs", version = "0.3", default-features = false, features = ["async"] }
 
-qubit-spi = { version = "0.13" }
+qubit-spi = { version = "0.14" }
 qubit-mime = { path = "../rs-mime", version = "0.21" }
 
 [dependencies.ort]
