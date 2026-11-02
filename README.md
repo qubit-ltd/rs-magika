@@ -103,8 +103,13 @@ session. Create it once, share it (for example with `Arc`), and expect inference
 calls on a shared detector to be serialized internally.
 
 Provider-path detection uses `max_bytes` as the cumulative request budget for
-Magika's range reads. Range-capable filesystems use bounded windows and an ETag
-snapshot when conditional reads are available. Without range support,
+Magika's byte sampling. When the filesystem supports random-access sessions,
+Magika opens once and reads each sample from that same opened object into its
+caller buffer. The open-time length bounds readable offsets but is not a
+content snapshot. If opening returns `UnsupportedOperation` or
+`UnsupportedCapability`, detection uses the existing path-based route; other open failures and session read errors
+propagate without reopening by path. The legacy route uses bounded windows and
+an ETag condition when conditional reads are available. Without range support,
 `qubit-fs::read_all` may probe one byte beyond `max_bytes` to detect overflow;
 known oversized resources return `MimeError::BufferLimitExceeded`, while an
 overflow discovered during `read_all` returns `MimeError::FileSystem`. Unknown and
@@ -117,6 +122,8 @@ need isolation should move detection to a blocking worker or service boundary.
 
 ## Learn More
 
+- [Core random-access session guide](../rs-fs/doc/user_guide.md#sampling-the-same-opened-object-at-several-offsets)
+- [核心随机读取会话说明](../rs-fs/doc/user_guide.zh_CN.md#从同一已打开对象的多个位置采样)
 - [English user guide](doc/user_guide.md)
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API documentation](https://docs.rs/qubit-magika)

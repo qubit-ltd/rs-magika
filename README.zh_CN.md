@@ -94,9 +94,12 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建一次并
 共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
 
-Provider path 检测会把 `max_bytes` 作为 Magika 范围读取的累计请求预算。文件系统支持范围
-读取时，Magika 只请求受预算限制的窗口；如果同时支持条件读取，还会使用 ETag 快照。
-不支持范围读取时，`qubit-fs::read_all` 为判断是否超限，可能额外探测第
+Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求预算。文件系统支持随机
+读取会话时，Magika 只打开一次，并通过调用方缓冲区从同一已打开对象读取各个样本。打开时
+观察到的长度限定可读偏移，但不是内容快照。若打开返回 `UnsupportedOperation` 或
+`UnsupportedCapability`，则使用既有按路径路由；其他打开错误或会话读取错误都会直接返回，
+不按路径重新打开。旧路由会读取受限
+窗口，并在支持条件读取时附带 ETag 条件。不支持范围读取时，`qubit-fs::read_all` 为判断是否超限，可能额外探测第
 `max_bytes + 1` 个字节；已知长度超限时返回 `MimeError::BufferLimitExceeded`，
 在 `read_all` 中发现超限时返回 `MimeError::FileSystem`。Magika 返回
 `Unknown` 或 `Undefined` 时结果为
@@ -107,6 +110,8 @@ Provider path 检测会把 `max_bytes` 作为 Magika 范围读取的累计请求
 
 ## 延伸阅读
 
+- [Core random-access session guide](../rs-fs/doc/user_guide.md#sampling-the-same-opened-object-at-several-offsets)
+- [核心随机读取会话说明](../rs-fs/doc/user_guide.zh_CN.md#从同一已打开对象的多个位置采样)
 - [English user guide](doc/user_guide.md)
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-magika)
