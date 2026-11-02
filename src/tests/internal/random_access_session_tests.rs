@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use magika::{AsyncInput, SyncInput};
+use qubit_fs::error::FsEffectState;
 use qubit_fs::metadata::{
     FileKind, FileMetadata, FileSystemCapabilities, FileSystemCapability, FileSystemId,
     FileSystemInfo, FileSystemLimit, FileSystemLimits, OpenedFileInfo, SymlinkPolicy,
@@ -31,6 +32,8 @@ struct Fixture {
     reads: Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
     bytes: Arc<std::sync::RwLock<Arc<[u8]>>>,
     max_read: FileSystemLimit,
+    interrupt_effect: Option<Option<FsEffectState>>,
+    attempts: Arc<AtomicUsize>,
 }
 
 impl Fixture {
@@ -43,7 +46,13 @@ impl Fixture {
             reads: Arc::new(std::sync::Mutex::new(Vec::new())),
             bytes: Arc::new(std::sync::RwLock::new(Arc::from(bytes))),
             max_read,
+            interrupt_effect: None,
+            attempts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+    fn interrupt_once(mut self, effect: Option<FsEffectState>) -> Self {
+        self.interrupt_effect = Some(effect);
+        self
     }
     fn properties(&self) -> ProviderProperties {
         ProviderProperties::new(
@@ -73,6 +82,8 @@ impl Fixture {
             bytes: self.bytes.read().unwrap().clone(),
             reads: self.reads.clone(),
             drops: self.drops.clone(),
+            interrupt_effect: self.interrupt_effect,
+            attempts: self.attempts.clone(),
         }
     }
 }
@@ -144,6 +155,8 @@ struct Session {
     bytes: Arc<[u8]>,
     reads: Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
     drops: Arc<AtomicUsize>,
+    interrupt_effect: Option<Option<FsEffectState>>,
+    attempts: Arc<AtomicUsize>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -152,12 +165,26 @@ impl Drop for Session {
 }
 impl RandomAccessReadSession for Session {
     fn read_at(&mut self, offset: u64, output: &mut [u8]) -> FsResult<usize> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.reads.lock().unwrap().push((offset, output.len()));
+        if attempt == 0
+            && let Some(effect) = self.interrupt_effect
+        {
+            let error = FsError::new(
+                FsErrorKind::Interrupted,
+                FsOperation::Read,
+                "fixture interruption",
+            );
+            return Err(match effect {
+                Some(effect) => error.with_effect_state(effect),
+                None => error,
+            });
+        }
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         let count = output
             .len()
             .min(1)
             .min(self.bytes.len().saturating_sub(start));
-        self.reads.lock().unwrap().push((offset, output.len()));
         output[..count].copy_from_slice(&self.bytes[start..start + count]);
         Ok(count)
     }
@@ -245,4 +272,67 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
     );
     drop(input);
     assert_eq!(1, fixture.drops.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_sync_session_retries_unchanged_interruption_at_same_range() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown)
+        .interrupt_once(Some(FsEffectState::Unchanged));
+    let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
+    let reader = filesystem
+        .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
+        .unwrap();
+    let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 2];
+
+    input.read_at(&mut output, 3).unwrap();
+
+    assert_eq!(*b"de", output);
+    assert_eq!(2, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 2), (3, 2)], *fixture.reads.lock().unwrap());
+}
+
+#[test]
+fn test_sync_session_retries_interruption_without_effect_state() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_once(None);
+    let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
+    let reader = filesystem
+        .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
+        .unwrap();
+    let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 2];
+
+    input.read_at(&mut output, 3).unwrap();
+
+    assert_eq!(*b"de", output);
+    assert_eq!(2, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 2), (3, 2)], *fixture.reads.lock().unwrap());
+}
+
+#[test]
+fn test_sync_session_does_not_retry_indeterminate_interruption() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown)
+        .interrupt_once(Some(FsEffectState::Indeterminate));
+    let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
+    let reader = filesystem
+        .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
+        .unwrap();
+    let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 2];
+
+    let error = input
+        .read_at(&mut output, 3)
+        .expect_err("indeterminate interruption must propagate");
+
+    let magika::Error::IOError(io_error) = error else {
+        panic!("filesystem interruption must remain a Magika I/O error");
+    };
+    let source = io_error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<FsError>())
+        .expect("typed filesystem error should be retained as the I/O source");
+    assert_eq!(FsErrorKind::Interrupted, source.kind());
+    assert_eq!(Some(FsEffectState::Indeterminate), source.effect_state());
+    assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 2)], *fixture.reads.lock().unwrap());
 }
