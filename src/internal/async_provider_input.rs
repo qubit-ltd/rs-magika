@@ -17,19 +17,30 @@ use super::provider_input::copy_exact;
 use super::provider_input::read_options;
 use super::provider_input::validate_request;
 use super::read_budget::ReadBudget;
+use super::session_read::read_async_session;
+use qubit_fs::AsyncRandomAccessReader;
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput<'a> {
     /// Filesystem supplying the requested ranges.
-    file_system: &'a AsyncFileSystem,
-    /// Logical resource path within the filesystem.
-    path: &'a Path,
+    route: AsyncRoute<'a>,
     /// Complete logical resource length reported to Magika.
     length: u64,
     /// Optional version constraint applied to each range read.
     version: Option<ResourceVersion>,
     /// Cumulative limit shared by all reads in one detection.
     budget: ReadBudget,
+}
+
+enum AsyncRoute<'a> {
+    Legacy {
+        file_system: &'a AsyncFileSystem,
+        path: &'a Path,
+    },
+    Session {
+        reader: AsyncRandomAccessReader,
+        max_segment: Option<usize>,
+    },
 }
 
 impl<'a> AsyncProviderInput<'a> {
@@ -47,10 +58,35 @@ impl<'a> AsyncProviderInput<'a> {
         limit: usize,
     ) -> Self {
         Self {
-            file_system,
-            path,
+            route: AsyncRoute::Legacy { file_system, path },
             length,
             version,
+            budget: ReadBudget::new(limit),
+        }
+    }
+
+    /// Creates a session-backed input retaining the opened object through feature extraction.
+    ///
+    /// # Parameters
+    /// * `reader` - Random-access session opened for this provider path.
+    /// * `limit` - Maximum cumulative bytes reserved across reads.
+    /// * `max_segment` - Optional finite maximum for an individual provider read.
+    ///
+    /// # Returns
+    /// An asynchronous input using the session's open-time length.
+    pub(crate) fn from_session(
+        reader: AsyncRandomAccessReader,
+        limit: usize,
+        max_segment: Option<usize>,
+    ) -> Self {
+        let length = reader.len();
+        Self {
+            route: AsyncRoute::Session {
+                reader,
+                max_segment,
+            },
+            length,
+            version: None,
             budget: ReadBudget::new(limit),
         }
     }
@@ -68,14 +104,31 @@ impl AsyncInput for AsyncProviderInput<'_> {
     /// Reserves bytes before asynchronous I/O and rejects short ranges or
     /// provider failures as Magika I/O errors.
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
-        validate_request(self.length, &mut self.budget, buffer.len(), offset)?;
-        let options = read_options(offset, buffer.len(), self.version.as_ref());
-        let bytes = self
-            .file_system
-            .read_prefix(self.path, options, buffer.len())
-            .await
-            .map_err(|error| error.into_io_error())?
-            .into_bytes();
-        copy_exact(buffer, bytes)
+        match &mut self.route {
+            AsyncRoute::Legacy { file_system, path } => {
+                validate_request(self.length, &mut self.budget, buffer.len(), offset)?;
+                let options = read_options(offset, buffer.len(), self.version.as_ref());
+                let bytes = file_system
+                    .read_prefix(path, options, buffer.len())
+                    .await
+                    .map_err(|error| error.into_io_error())?
+                    .into_bytes();
+                copy_exact(buffer, bytes)
+            }
+            AsyncRoute::Session {
+                reader,
+                max_segment,
+            } => {
+                read_async_session(
+                    reader,
+                    self.length,
+                    &mut self.budget,
+                    buffer,
+                    offset,
+                    *max_segment,
+                )
+                .await
+            }
+        }
     }
 }

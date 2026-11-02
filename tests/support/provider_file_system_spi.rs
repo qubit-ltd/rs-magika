@@ -36,10 +36,12 @@ use qubit_fs::spi::AsyncFileSystemSpi;
 use qubit_fs::spi::FileSystemSpi;
 use qubit_fs::spi::OpenReaderRequest;
 use qubit_fs::spi::OpenedAsyncReader;
+use qubit_fs::spi::OpenedRandomAccessReader;
 use qubit_fs::spi::OpenedReader;
 use qubit_fs::spi::ProviderOperation;
 use qubit_fs::spi::ProviderOperations;
 use qubit_fs::spi::ProviderProperties;
+use qubit_fs::spi::RandomAccessReadSession;
 use qubit_fs::spi::SpiFuture;
 use qubit_fs::spi::StatRequest;
 use qubit_fs::spi::StatResponse;
@@ -55,6 +57,8 @@ pub(crate) struct ProviderFileSystemSpi {
     stat_supported: bool,
     short_read: bool,
     fail_reads: bool,
+    random_access: bool,
+    random_open_error: Option<FsErrorKind>,
     observations: Arc<ProviderObservations>,
 }
 
@@ -62,6 +66,9 @@ pub(crate) struct ProviderFileSystemSpi {
 pub(crate) struct ProviderObservations {
     pub(crate) stats: AtomicUsize,
     pub(crate) opens: AtomicUsize,
+    pub(crate) random_opens: AtomicUsize,
+    pub(crate) random_reads: AtomicUsize,
+    pub(crate) session_drops: AtomicUsize,
     pub(crate) read_bytes: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
 }
@@ -76,6 +83,8 @@ impl ProviderFileSystemSpi {
             stat_supported: true,
             short_read: false,
             fail_reads: false,
+            random_access: false,
+            random_open_error: None,
             observations: Arc::new(ProviderObservations::default()),
         }
     }
@@ -121,6 +130,17 @@ impl ProviderFileSystemSpi {
         self
     }
 
+    pub(crate) fn with_random_access(mut self) -> Self {
+        self.random_access = true;
+        self
+    }
+
+    pub(crate) fn random_open_error(mut self, kind: FsErrorKind) -> Self {
+        self.random_access = true;
+        self.random_open_error = Some(kind);
+        self
+    }
+
     pub(crate) fn observations(&self) -> Arc<ProviderObservations> {
         Arc::clone(&self.observations)
     }
@@ -142,6 +162,9 @@ impl ProviderFileSystemSpi {
             capabilities = capabilities.with_guaranteed(FileSystemCapability::ConditionalRead);
         }
         let mut operations = ProviderOperations::new().with(ProviderOperation::OpenReader);
+        if self.random_access {
+            operations = operations.with(ProviderOperation::OpenRandomAccessReader);
+        }
         if self.stat_supported {
             operations = operations.with(ProviderOperation::Stat);
         }
@@ -223,6 +246,25 @@ impl FileSystemSpi for ProviderFileSystemSpi {
             }),
         ))
     }
+
+    fn open_random_access_reader(
+        &self,
+        request: OpenReaderRequest<'_>,
+    ) -> FsResult<OpenedRandomAccessReader> {
+        self.observations.random_opens.fetch_add(1, Ordering::SeqCst);
+        if let Some(kind) = self.random_open_error {
+            return Err(FsError::new(kind, FsOperation::OpenReader, "configured random-access open failure"));
+        }
+        let info = OpenedFileInfo::new(FileSystemId::new("magika-test").unwrap(), request.path().clone())
+            .with_metadata(self.metadata(request.path()));
+        Ok(OpenedRandomAccessReader::new(info, Box::new(ProviderSession {
+            content: Arc::clone(&self.content),
+            length: self.length.unwrap_or(self.content.len() as u64),
+            short_read: self.short_read,
+            fail_reads: self.fail_reads,
+            observations: Arc::clone(&self.observations),
+        })))
+    }
 }
 
 impl AsyncFileSystemSpi for ProviderFileSystemSpi {
@@ -247,6 +289,67 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                 }),
             ))
         })
+    }
+
+    fn open_random_access_reader<'a>(
+        &'a self,
+        request: OpenReaderRequest<'a>,
+    ) -> SpiFuture<'a, FsResult<qubit_fs::spi::OpenedAsyncRandomAccessReader>> {
+        Box::pin(async move {
+            self.observations.random_opens.fetch_add(1, Ordering::SeqCst);
+            if let Some(kind) = self.random_open_error {
+                return Err(FsError::new(kind, FsOperation::OpenReader, "configured random-access open failure"));
+            }
+            let info = OpenedFileInfo::new(FileSystemId::new("magika-test").unwrap(), request.path().clone())
+                .with_metadata(self.metadata(request.path()));
+            Ok(qubit_fs::spi::OpenedAsyncRandomAccessReader::new(info, Box::new(ProviderSession {
+                content: Arc::clone(&self.content),
+                length: self.length.unwrap_or(self.content.len() as u64),
+                short_read: self.short_read,
+                fail_reads: self.fail_reads,
+                observations: Arc::clone(&self.observations),
+            })))
+        })
+    }
+}
+
+struct ProviderSession {
+    content: Arc<Vec<u8>>,
+    length: u64,
+    short_read: bool,
+    fail_reads: bool,
+    observations: Arc<ProviderObservations>,
+}
+
+impl Drop for ProviderSession {
+    fn drop(&mut self) {
+        self.observations.session_drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl RandomAccessReadSession for ProviderSession {
+    fn read_at(&mut self, offset: u64, output: &mut [u8]) -> FsResult<usize> {
+        if self.fail_reads {
+            return Err(FsError::from_io(io::Error::other("configured provider read failure"), FsOperation::Read));
+        }
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let available = usize::try_from(self.length.saturating_sub(offset)).unwrap_or(usize::MAX);
+        let count = output.len().min(available).min(if self.short_read { 1 } else { usize::MAX });
+        for (index, byte) in output[..count].iter_mut().enumerate() {
+            *byte = self.content[start.saturating_add(index) % self.content.len()];
+        }
+        self.observations.random_reads.fetch_add(count, Ordering::SeqCst);
+        Ok(count)
+    }
+}
+
+impl qubit_fs::spi::AsyncRandomAccessReadSession for ProviderSession {
+    fn read_at_async<'a>(
+        self: std::pin::Pin<&'a mut Self>,
+        offset: u64,
+        output: &'a mut [u8],
+    ) -> SpiFuture<'a, FsResult<usize>> {
+        Box::pin(async move { self.get_mut().read_at(offset, output) })
     }
 }
 

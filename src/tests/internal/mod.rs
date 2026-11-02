@@ -7,5 +7,6 @@
 // =============================================================================
 
 mod provider_input_tests;
+mod random_access_session_tests;
 mod read_budget_tests;
 mod read_seek_input_tests;

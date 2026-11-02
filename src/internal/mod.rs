@@ -13,6 +13,7 @@ mod provider_input;
 mod read_budget;
 mod read_seek_input;
 mod reader_scope;
+mod session_read;
 mod sync_provider_input;
 
 pub(crate) use async_provider_input::AsyncProviderInput;

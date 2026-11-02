@@ -349,6 +349,19 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 limit,
             });
         }
+        match file_system.open_random_access_reader(path, ReadOptions::default()) {
+            Ok(reader) => {
+                let max_segment = file_system.properties().limits().max_read_range_bytes().maximum()
+                    .and_then(|value| usize::try_from(value).ok());
+                let input = SyncProviderInput::from_session(reader, max_bytes, max_segment);
+                let mut session = self.session.lock().map_err(map_session_lock_error)?;
+                let file_type = session.identify_content_sync(input).map_err(map_provider_magika_error)?;
+                let candidates = file_type.content_type().and_then(content_type_to_mime).into_iter().collect();
+                return Ok((candidates, None));
+            }
+            Err(error) if matches!(error.kind(), FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability) => {}
+            Err(error) => return Err(error.into()),
+        }
         let metadata = match file_system.stat(path) {
             Ok(metadata) => Some(metadata),
             Err(error)
@@ -420,6 +433,17 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     requested: max_bytes,
                     limit,
                 });
+            }
+            match file_system.open_random_access_reader(path, ReadOptions::default()).await {
+                Ok(reader) => {
+                    let max_segment = file_system.properties().limits().max_read_range_bytes().maximum()
+                        .and_then(|value| usize::try_from(value).ok());
+                    let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
+                    let candidates = guess_from_async_input(self, input).await?;
+                    return Ok((candidates, None));
+                }
+                Err(error) if matches!(error.kind(), FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability) => {}
+                Err(error) => return Err(error.into()),
             }
             let metadata = match file_system.stat(path).await {
                 Ok(metadata) => Some(metadata),
