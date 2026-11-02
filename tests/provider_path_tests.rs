@@ -17,6 +17,8 @@ use std::task::RawWakerVTable;
 use std::task::Waker;
 
 use qubit_fs::Path;
+use qubit_fs_local::LocalFileSystems;
+use qubit_fs_local::LocalResourcePolicy;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeError;
@@ -112,7 +114,10 @@ fn test_provider_path_sync_uses_one_random_access_session_without_stat() {
         8192,
         MimeDetectionPolicy::VerifyContent,
     );
-    assert_eq!(result.expect("session detection should succeed"), Some("text/x-python".to_owned()));
+    assert_eq!(
+        result.expect("session detection should succeed"),
+        Some("text/x-python".to_owned())
+    );
     assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
@@ -129,11 +134,34 @@ fn test_provider_path_async_uses_one_random_access_session_without_stat() {
         8192,
         MimeDetectionPolicy::VerifyContent,
     ));
-    assert_eq!(result.expect("async session detection should succeed"), Some("text/x-python".to_owned()));
+    assert_eq!(
+        result.expect("async session detection should succeed"),
+        Some("text/x-python".to_owned())
+    );
     assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(1, observations.session_drops.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn test_rooted_local_filesystem_path_detection_uses_random_access() {
+    let root = tempfile::tempdir().expect("temporary root should be created");
+    std::fs::write(root.path().join("script.py"), PYTHON).expect("fixture should be written");
+    let file_system = LocalFileSystems::rooted(root.path(), LocalResourcePolicy::unbounded())
+        .expect("rooted local filesystem should open");
+
+    let result = detector().detect_path(
+        &file_system,
+        &path("/script.py"),
+        8192,
+        MimeDetectionPolicy::VerifyContent,
+    );
+
+    assert_eq!(
+        result.expect("local filesystem detection should succeed"),
+        Some("text/x-python".to_owned())
+    );
 }
 
 #[test]
@@ -148,7 +176,10 @@ fn test_provider_path_unsupported_session_open_falls_back_to_legacy_route() {
         8192,
         MimeDetectionPolicy::VerifyContent,
     );
-    assert_eq!(result.expect("unsupported session should use legacy route"), Some("text/x-python".to_owned()));
+    assert_eq!(
+        result.expect("unsupported session should use legacy route"),
+        Some("text/x-python".to_owned())
+    );
     assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(1, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert!(observations.opens.load(std::sync::atomic::Ordering::SeqCst) > 0);
@@ -166,7 +197,10 @@ fn test_provider_path_async_unsupported_session_open_falls_back_to_legacy_route(
         8192,
         MimeDetectionPolicy::VerifyContent,
     ));
-    assert_eq!(result.expect("unsupported async session should use legacy route"), Some("text/x-python".to_owned()));
+    assert_eq!(
+        result.expect("unsupported async session should use legacy route"),
+        Some("text/x-python".to_owned())
+    );
     assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(1, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert!(observations.opens.load(std::sync::atomic::Ordering::SeqCst) > 0);
@@ -178,13 +212,17 @@ fn test_provider_path_non_unsupported_session_open_error_propagates() {
         .with_range()
         .random_open_error(qubit_fs::error::FsErrorKind::PermissionDenied);
     let observations = provider.observations();
-    let error = detector().detect_path(
-        &provider.file_system(),
-        &path("/script.py"),
-        8192,
-        MimeDetectionPolicy::VerifyContent,
-    ).expect_err("permission failures should propagate");
-    assert!(matches!(error, MimeError::FileSystem(ref error) if error.kind() == qubit_fs::error::FsErrorKind::PermissionDenied));
+    let error = detector()
+        .detect_path(
+            &provider.file_system(),
+            &path("/script.py"),
+            8192,
+            MimeDetectionPolicy::VerifyContent,
+        )
+        .expect_err("permission failures should propagate");
+    assert!(
+        matches!(error, MimeError::FileSystem(ref error) if error.kind() == qubit_fs::error::FsErrorKind::PermissionDenied)
+    );
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
 }
@@ -200,22 +238,29 @@ fn test_provider_path_async_non_unsupported_session_open_error_propagates() {
         &path("/script.py"),
         8192,
         MimeDetectionPolicy::VerifyContent,
-    )).expect_err("async permission failures should propagate");
-    assert!(matches!(error, MimeError::FileSystem(ref error) if error.kind() == qubit_fs::error::FsErrorKind::PermissionDenied));
+    ))
+    .expect_err("async permission failures should propagate");
+    assert!(
+        matches!(error, MimeError::FileSystem(ref error) if error.kind() == qubit_fs::error::FsErrorKind::PermissionDenied)
+    );
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]
 fn test_provider_path_session_read_error_does_not_fall_back_to_path() {
-    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access().fail_reads();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .fail_reads();
     let observations = provider.observations();
-    let error = detector().detect_path(
-        &provider.file_system(),
-        &path("/script.py"),
-        8192,
-        MimeDetectionPolicy::VerifyContent,
-    ).expect_err("session read failure should propagate");
+    let error = detector()
+        .detect_path(
+            &provider.file_system(),
+            &path("/script.py"),
+            8192,
+            MimeDetectionPolicy::VerifyContent,
+        )
+        .expect_err("session read failure should propagate");
     assert!(matches!(error, MimeError::Io { .. }));
     assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
@@ -224,14 +269,17 @@ fn test_provider_path_session_read_error_does_not_fall_back_to_path() {
 
 #[test]
 fn test_provider_path_async_session_read_error_does_not_fall_back_to_path() {
-    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access().fail_reads();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .fail_reads();
     let observations = provider.observations();
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
         &path("/script.py"),
         8192,
         MimeDetectionPolicy::VerifyContent,
-    )).expect_err("async session read failure should propagate");
+    ))
+    .expect_err("async session read failure should propagate");
     assert!(matches!(error, MimeError::Io(_)));
     assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));

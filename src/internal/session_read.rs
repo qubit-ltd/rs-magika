@@ -1,3 +1,11 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+
 //! Exact reads from Magika's opened random-access sessions.
 
 use std::io;
@@ -37,23 +45,16 @@ pub(crate) fn read_sync_session(
         let count = read_sync_at_retry(reader, read_offset, &mut buffer[filled..filled + step])
             .map_err(FsError::into_io_error)?;
         if count == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "provider returned a short range",
-            )
-            .into());
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
         }
         filled += count;
     }
     Ok(())
 }
 
-/// Retries only interruptions known not to have changed the session's effect state.
-fn read_sync_at_retry(
-    reader: &mut RandomAccessReader,
-    offset: u64,
-    output: &mut [u8],
-) -> qubit_fs::FsResult<usize> {
+/// Retries only interruptions known not to have changed the session's effect
+/// state.
+fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut [u8]) -> qubit_fs::FsResult<usize> {
     loop {
         match reader.read_at(offset, output) {
             Err(error)
@@ -92,11 +93,7 @@ pub(crate) async fn read_async_session(
             .await
             .map_err(|error| error.into_io_error())?;
         if count == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "provider returned a short range",
-            )
-            .into());
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
         }
         filled += count;
     }

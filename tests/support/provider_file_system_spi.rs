@@ -247,23 +247,27 @@ impl FileSystemSpi for ProviderFileSystemSpi {
         ))
     }
 
-    fn open_random_access_reader(
-        &self,
-        request: OpenReaderRequest<'_>,
-    ) -> FsResult<OpenedRandomAccessReader> {
+    fn open_random_access_reader(&self, request: OpenReaderRequest<'_>) -> FsResult<OpenedRandomAccessReader> {
         self.observations.random_opens.fetch_add(1, Ordering::SeqCst);
         if let Some(kind) = self.random_open_error {
-            return Err(FsError::new(kind, FsOperation::OpenReader, "configured random-access open failure"));
+            return Err(FsError::new(
+                kind,
+                FsOperation::OpenReader,
+                "configured random-access open failure",
+            ));
         }
         let info = OpenedFileInfo::new(FileSystemId::new("magika-test").unwrap(), request.path().clone())
             .with_metadata(self.metadata(request.path()));
-        Ok(OpenedRandomAccessReader::new(info, Box::new(ProviderSession {
-            content: Arc::clone(&self.content),
-            length: self.length.unwrap_or(self.content.len() as u64),
-            short_read: self.short_read,
-            fail_reads: self.fail_reads,
-            observations: Arc::clone(&self.observations),
-        })))
+        Ok(OpenedRandomAccessReader::new(
+            info,
+            Box::new(ProviderSession {
+                content: Arc::clone(&self.content),
+                length: self.length.unwrap_or(self.content.len() as u64),
+                short_read: self.short_read,
+                fail_reads: self.fail_reads,
+                observations: Arc::clone(&self.observations),
+            }),
+        ))
     }
 }
 
@@ -298,17 +302,24 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
         Box::pin(async move {
             self.observations.random_opens.fetch_add(1, Ordering::SeqCst);
             if let Some(kind) = self.random_open_error {
-                return Err(FsError::new(kind, FsOperation::OpenReader, "configured random-access open failure"));
+                return Err(FsError::new(
+                    kind,
+                    FsOperation::OpenReader,
+                    "configured random-access open failure",
+                ));
             }
             let info = OpenedFileInfo::new(FileSystemId::new("magika-test").unwrap(), request.path().clone())
                 .with_metadata(self.metadata(request.path()));
-            Ok(qubit_fs::spi::OpenedAsyncRandomAccessReader::new(info, Box::new(ProviderSession {
-                content: Arc::clone(&self.content),
-                length: self.length.unwrap_or(self.content.len() as u64),
-                short_read: self.short_read,
-                fail_reads: self.fail_reads,
-                observations: Arc::clone(&self.observations),
-            })))
+            Ok(qubit_fs::spi::OpenedAsyncRandomAccessReader::new(
+                info,
+                Box::new(ProviderSession {
+                    content: Arc::clone(&self.content),
+                    length: self.length.unwrap_or(self.content.len() as u64),
+                    short_read: self.short_read,
+                    fail_reads: self.fail_reads,
+                    observations: Arc::clone(&self.observations),
+                }),
+            ))
         })
     }
 }
@@ -330,11 +341,17 @@ impl Drop for ProviderSession {
 impl RandomAccessReadSession for ProviderSession {
     fn read_at(&mut self, offset: u64, output: &mut [u8]) -> FsResult<usize> {
         if self.fail_reads {
-            return Err(FsError::from_io(io::Error::other("configured provider read failure"), FsOperation::Read));
+            return Err(FsError::from_io(
+                io::Error::other("configured provider read failure"),
+                FsOperation::Read,
+            ));
         }
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         let available = usize::try_from(self.length.saturating_sub(offset)).unwrap_or(usize::MAX);
-        let count = output.len().min(available).min(if self.short_read { 1 } else { usize::MAX });
+        let count = output
+            .len()
+            .min(available)
+            .min(if self.short_read { 1 } else { usize::MAX });
         for (index, byte) in output[..count].iter_mut().enumerate() {
             *byte = self.content[start.saturating_add(index) % self.content.len()];
         }

@@ -7,19 +7,20 @@
 // =============================================================================
 //! Asynchronous provider-backed input for Magika feature extraction.
 
+use std::future::Future;
+
 use magika::AsyncInput;
 use magika::Result as MagikaResult;
 use qubit_fs::AsyncFileSystem;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
-use std::future::Future;
+use qubit_fs::read::AsyncRandomAccessReader;
 
 use super::provider_input::copy_exact;
 use super::provider_input::read_options;
 use super::provider_input::validate_request;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
-use qubit_fs::read::AsyncRandomAccessReader;
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput<'a> {
@@ -66,26 +67,21 @@ impl<'a> AsyncProviderInput<'a> {
         }
     }
 
-    /// Creates a session-backed input retaining the opened object through feature extraction.
+    /// Creates a session-backed input retaining the opened object through
+    /// feature extraction.
     ///
     /// # Parameters
     /// * `reader` - Random-access session opened for this provider path.
     /// * `limit` - Maximum cumulative bytes reserved across reads.
-    /// * `max_segment` - Optional finite maximum for an individual provider read.
+    /// * `max_segment` - Optional finite maximum for an individual provider
+    ///   read.
     ///
     /// # Returns
     /// An asynchronous input using the session's open-time length.
-    pub(crate) fn from_session(
-        reader: AsyncRandomAccessReader,
-        limit: usize,
-        max_segment: Option<usize>,
-    ) -> Self {
+    pub(crate) fn from_session(reader: AsyncRandomAccessReader, limit: usize, max_segment: Option<usize>) -> Self {
         let length = reader.len();
         Self {
-            route: AsyncRoute::Session {
-                reader,
-                max_segment,
-            },
+            route: AsyncRoute::Session { reader, max_segment },
             length,
             version: None,
             budget: ReadBudget::new(limit),
@@ -116,19 +112,8 @@ impl AsyncInput for AsyncProviderInput<'_> {
                     .into_bytes();
                 copy_exact(buffer, bytes)
             }
-            AsyncRoute::Session {
-                reader,
-                max_segment,
-            } => {
-                read_async_session(
-                    reader,
-                    self.length,
-                    &mut self.budget,
-                    buffer,
-                    offset,
-                    *max_segment,
-                )
-                .await
+            AsyncRoute::Session { reader, max_segment } => {
+                read_async_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment).await
             }
         }
     }

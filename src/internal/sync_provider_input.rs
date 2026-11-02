@@ -12,11 +12,11 @@ use magika::SyncInput;
 use qubit_fs::FileSystem;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
+use qubit_fs::read::RandomAccessReader;
 
 use super::provider_input::read_sync;
 use super::read_budget::ReadBudget;
 use super::session_read::read_sync_session;
-use qubit_fs::read::RandomAccessReader;
 
 /// Adapts synchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct SyncProviderInput<'a> {
@@ -74,26 +74,21 @@ impl<'a> SyncProviderInput<'a> {
         }
     }
 
-    /// Creates a session-backed input retaining the opened object through inference.
+    /// Creates a session-backed input retaining the opened object through
+    /// inference.
     ///
     /// # Parameters
     /// * `reader` - Random-access session opened for this provider path.
     /// * `limit` - Maximum cumulative bytes reserved across reads.
-    /// * `max_segment` - Optional finite maximum for an individual provider read.
+    /// * `max_segment` - Optional finite maximum for an individual provider
+    ///   read.
     ///
     /// # Returns
     /// A synchronous input using the session's open-time length.
-    pub(crate) fn from_session(
-        reader: RandomAccessReader,
-        limit: usize,
-        max_segment: Option<usize>,
-    ) -> Self {
+    pub(crate) fn from_session(reader: RandomAccessReader, limit: usize, max_segment: Option<usize>) -> Self {
         let length = reader.len();
         Self {
-            route: SyncRoute::Session {
-                reader,
-                max_segment,
-            },
+            route: SyncRoute::Session { reader, max_segment },
             length,
             version: None,
             budget: ReadBudget::new(limit),
@@ -123,17 +118,9 @@ impl SyncInput for SyncProviderInput<'_> {
                 buffer,
                 offset,
             ),
-            SyncRoute::Session {
-                reader,
-                max_segment,
-            } => read_sync_session(
-                reader,
-                self.length,
-                &mut self.budget,
-                buffer,
-                offset,
-                *max_segment,
-            ),
+            SyncRoute::Session { reader, max_segment } => {
+                read_sync_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment)
+            }
         }
     }
 }
