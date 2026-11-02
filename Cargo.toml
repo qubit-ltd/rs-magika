@@ -55,7 +55,6 @@ tempfile = "^3.27"
 [patch.crates-io]
 qubit-command = { path = "../rs-command" }
 qubit-config = { path = "../rs-config" }
-qubit-datatype = { path = "../rs-datatype" }
 qubit-local-files = { path = "../rs-local-files" }
 qubit-redact = { path = "../rs-redact" }
 qubit-json = { path = "../rs-json" }
