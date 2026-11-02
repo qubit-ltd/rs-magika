@@ -8,9 +8,9 @@
 //! Private implementation details for the Magika detector.
 
 mod async_provider_input;
-mod budget_exceeded;
-mod provider_input;
-mod read_budget;
+pub(crate) mod budget_exceeded;
+pub(crate) mod provider_input;
+pub(crate) mod read_budget;
 mod read_seek_input;
 mod reader_scope;
 mod session_read;

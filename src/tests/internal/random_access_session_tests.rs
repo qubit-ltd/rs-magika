@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use magika::{AsyncInput, SyncInput};
-use qubit_fs::error::FsEffectState;
+use qubit_fs::error::{FsEffectState, FsError, FsErrorKind, FsOperation};
 use qubit_fs::metadata::{
     FileKind, FileMetadata, FileSystemCapabilities, FileSystemCapability, FileSystemId,
     FileSystemInfo, FileSystemLimit, FileSystemLimits, OpenedFileInfo, SymlinkPolicy,
@@ -15,11 +15,11 @@ use qubit_fs::path::{PathConstraints, PathSemantics};
 use qubit_fs::read::ReadOptions;
 use qubit_fs::spi::{
     AsyncFileSystemSpi, AsyncRandomAccessReadSession, FileSystemSpi, OpenReaderRequest,
-    OpenedAsyncRandomAccessReader, OpenedRandomAccessReader, OpenedReader, ProviderOperation,
-    ProviderOperations, ProviderProperties, RandomAccessReadSession, SpiFuture, StatRequest,
-    StatResponse,
+    OpenedAsyncRandomAccessReader, OpenedAsyncReader, OpenedRandomAccessReader, OpenedReader,
+    ProviderOperation, ProviderOperations, ProviderProperties, RandomAccessReadSession, SpiFuture,
+    StatRequest, StatResponse,
 };
-use qubit_fs::{AsyncFileSystem, FileSystem, FsError, FsErrorKind, FsOperation, FsResult, Path};
+use qubit_fs::{AsyncFileSystem, FileSystem, FsResult, Path};
 
 const ID: &str = "magika-session-adapter-test";
 
@@ -129,7 +129,7 @@ impl AsyncFileSystemSpi for Fixture {
     fn open_reader<'a>(
         &'a self,
         _request: OpenReaderRequest<'a>,
-    ) -> SpiFuture<'a, FsResult<OpenedReader>> {
+    ) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
         Box::pin(async {
             Err(FsError::new(
                 FsErrorKind::UnsupportedOperation,
@@ -220,21 +220,21 @@ fn test_sync_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit(
     *fixture.bytes.write().unwrap() = Arc::from(&b"BBBBBB"[..]);
     let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, Some(2));
     let mut output = [0; 4];
-    input.read_at(&mut output, 2).unwrap();
+    SyncInput::read_at(&mut input, &mut output, 2).unwrap();
     assert_eq!(
         *b"cdef", output,
         "session reads must remain bound to the opened object"
     );
-    assert_eq!(6, input.length().unwrap());
+    assert_eq!(6, SyncInput::length(&input).unwrap());
     assert!(
-        input.read_at(&mut [0; 3], 0).is_err(),
+        SyncInput::read_at(&mut input, &mut [0; 3], 0).is_err(),
         "segmented reads must reserve the budget once per Magika request"
     );
     assert_eq!(1, fixture.opens.load(Ordering::SeqCst));
     assert_eq!(0, fixture.stats.load(Ordering::SeqCst));
     assert_eq!(0, fixture.path_opens.load(Ordering::SeqCst));
     assert_eq!(
-        vec![(2, 2), (3, 1), (4, 2), (5, 1)],
+        vec![(2, 2), (3, 2), (4, 2), (5, 1)],
         *fixture.reads.lock().unwrap()
     );
     drop(input);
@@ -253,21 +253,21 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
     *fixture.bytes.write().unwrap() = Arc::from(&b"BBBBBB"[..]);
     let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, Some(2));
     let mut output = [0; 4];
-    block_on(input.read_at(&mut output, 2)).unwrap();
+    block_on(AsyncInput::read_at(&mut input, &mut output, 2)).unwrap();
     assert_eq!(
         *b"cdef", output,
         "session reads must remain bound to the opened object"
     );
-    assert_eq!(6, block_on(input.length()).unwrap());
+    assert_eq!(6, block_on(AsyncInput::length(&input)).unwrap());
     assert!(
-        block_on(input.read_at(&mut [0; 3], 0)).is_err(),
+        block_on(AsyncInput::read_at(&mut input, &mut [0; 3], 0)).is_err(),
         "segmented reads must reserve the budget once per Magika request"
     );
     assert_eq!(1, fixture.opens.load(Ordering::SeqCst));
     assert_eq!(0, fixture.stats.load(Ordering::SeqCst));
     assert_eq!(0, fixture.path_opens.load(Ordering::SeqCst));
     assert_eq!(
-        vec![(2, 2), (3, 1), (4, 2), (5, 1)],
+        vec![(2, 2), (3, 2), (4, 2), (5, 1)],
         *fixture.reads.lock().unwrap()
     );
     drop(input);
@@ -283,13 +283,13 @@ fn test_sync_session_retries_unchanged_interruption_at_same_range() {
         .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
         .unwrap();
     let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
-    let mut output = [0; 2];
+    let mut output = [0; 1];
 
-    input.read_at(&mut output, 3).unwrap();
+    SyncInput::read_at(&mut input, &mut output, 3).unwrap();
 
-    assert_eq!(*b"de", output);
+    assert_eq!(*b"d", output);
     assert_eq!(2, fixture.attempts.load(Ordering::SeqCst));
-    assert_eq!(vec![(3, 2), (3, 2)], *fixture.reads.lock().unwrap());
+    assert_eq!(vec![(3, 1), (3, 1)], *fixture.reads.lock().unwrap());
 }
 
 #[test]
@@ -300,13 +300,13 @@ fn test_sync_session_retries_interruption_without_effect_state() {
         .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
         .unwrap();
     let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
-    let mut output = [0; 2];
+    let mut output = [0; 1];
 
-    input.read_at(&mut output, 3).unwrap();
+    SyncInput::read_at(&mut input, &mut output, 3).unwrap();
 
-    assert_eq!(*b"de", output);
+    assert_eq!(*b"d", output);
     assert_eq!(2, fixture.attempts.load(Ordering::SeqCst));
-    assert_eq!(vec![(3, 2), (3, 2)], *fixture.reads.lock().unwrap());
+    assert_eq!(vec![(3, 1), (3, 1)], *fixture.reads.lock().unwrap());
 }
 
 #[test]
@@ -318,10 +318,9 @@ fn test_sync_session_does_not_retry_indeterminate_interruption() {
         .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
         .unwrap();
     let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
-    let mut output = [0; 2];
+    let mut output = [0; 1];
 
-    let error = input
-        .read_at(&mut output, 3)
+    let error = SyncInput::read_at(&mut input, &mut output, 3)
         .expect_err("indeterminate interruption must propagate");
 
     let magika::Error::IOError(io_error) = error else {
@@ -334,5 +333,5 @@ fn test_sync_session_does_not_retry_indeterminate_interruption() {
     assert_eq!(FsErrorKind::Interrupted, source.kind());
     assert_eq!(Some(FsEffectState::Indeterminate), source.effect_state());
     assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
-    assert_eq!(vec![(3, 2)], *fixture.reads.lock().unwrap());
+    assert_eq!(vec![(3, 1)], *fixture.reads.lock().unwrap());
 }

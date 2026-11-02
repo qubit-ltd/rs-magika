@@ -9,7 +9,7 @@
 //!
 //! Magika-backed MIME detector integration for `qubit-mime`.
 
-mod internal;
+pub(crate) mod internal;
 #[cfg(feature = "inventory")]
 mod inventory_submission;
 mod magika_mime_detector;

@@ -3,10 +3,10 @@
 use std::io;
 
 use magika::Result as MagikaResult;
-use qubit_fs::AsyncRandomAccessReader;
 use qubit_fs::error::FsEffectState;
 use qubit_fs::error::FsError;
 use qubit_fs::error::FsErrorKind;
+use qubit_fs::read::AsyncRandomAccessReader;
 use qubit_fs::read::RandomAccessReader;
 
 use super::provider_input::invalid_input;

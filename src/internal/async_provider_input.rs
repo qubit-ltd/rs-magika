@@ -12,13 +12,14 @@ use magika::Result as MagikaResult;
 use qubit_fs::AsyncFileSystem;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
+use std::future::Future;
 
 use super::provider_input::copy_exact;
 use super::provider_input::read_options;
 use super::provider_input::validate_request;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
-use qubit_fs::AsyncRandomAccessReader;
+use qubit_fs::read::AsyncRandomAccessReader;
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput<'a> {
@@ -95,8 +96,8 @@ impl<'a> AsyncProviderInput<'a> {
 impl AsyncInput for AsyncProviderInput<'_> {
     /// Returns the total input length.
     #[inline]
-    async fn length(&self) -> MagikaResult<u64> {
-        Ok(self.length)
+    fn length(&self) -> impl Future<Output = MagikaResult<u64>> {
+        std::future::ready(Ok(self.length))
     }
 
     /// Reads one validated range from the provider.
