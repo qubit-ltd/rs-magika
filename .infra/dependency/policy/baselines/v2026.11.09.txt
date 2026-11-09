@@ -9,6 +9,7 @@ axum ^0.8
 axum-server ^0.8
 base64 ^0.23
 bigdecimal ^0.4
+bitflags ^2.10
 bytes ^1.11
 camino ^1.1
 cap-std ^4.0
@@ -20,6 +21,7 @@ criterion ^0.8
 crossbeam-channel ^0.5
 crossbeam-deque ^0.8
 crossbeam-queue ^0.3
+csv ^1.4
 digest ^0.11
 dotenvy ^0.15
 fastrand ^2.5
@@ -37,6 +39,7 @@ futures-util ^0.3
 getrandom ^0.4
 h2 ^0.4
 hashbrown ^0.17
+heck ^0.5
 http ^1.5
 http-body-util ^0.1
 httpdate ^1.0
@@ -52,6 +55,7 @@ log ^0.4
 loom ^0.7
 magika ^1.1
 matchit ^0.8
+mockito ^1.7
 nix ^0.31
 num-bigint ^0.4
 num-rational ^0.4
@@ -91,6 +95,7 @@ serde_json_canonicalizer ^0.4
 serde_norway ^0.9
 serde_path_to_error ^0.1
 serde_test ^1.0
+serde_yaml ^0.9
 sha2 ^0.11
 stacker ^0.1
 strum ^0.28
