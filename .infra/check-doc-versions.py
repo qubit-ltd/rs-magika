@@ -104,7 +104,7 @@ def self_test(root: Path) -> list[str]:
         if check(fixture_root):
             return ["self-test baseline fixture unexpectedly failed"]
         expected = expected_versions(fixture_root)
-        for name in ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi"):
+        for name in ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi", "ort"):
             path = fixture_root / "doc/user_guide.md"
             original = path.read_text()
             pattern = rf'({re.escape(name)}\s*=\s*(?:\{{\s*version\s*=\s*)?\")({re.escape(expected[name])})(\")'

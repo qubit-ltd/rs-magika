@@ -165,7 +165,7 @@ qubit-magika = { version = "0.18", default-features = false }
 qubit-mime = "0.21"
 qubit-spi = "0.14"
 qubit-fs = "0.3"
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
+ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
 创建 detector 前先初始化 runtime。Windows 使用 `onnxruntime.dll`，macOS 使用
