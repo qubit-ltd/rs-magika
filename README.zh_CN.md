@@ -98,20 +98,22 @@ Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求
 读取会话时，Magika 只打开一次，并通过调用方缓冲区从同一已打开对象读取各个样本。打开时
 观察到的长度限定可读偏移，但不是内容快照。若打开返回 `UnsupportedOperation` 或
 `UnsupportedCapability`，则使用既有按路径路由；其他打开错误或会话读取错误都会直接返回，
-不按路径重新打开。旧路由会读取受限
-窗口，并在支持条件读取时附带 ETag 条件。不支持范围读取时，`qubit-fs::read_all` 为判断是否超限，可能额外探测第
+不按路径重新打开。旧路由逐段按路径打开，并在支持条件读取时为每一段附带相同的 ETag
+条件；没有条件读取时无法保证
+多段读取期间内容一致。不支持范围读取时，`qubit-fs::read_all` 为判断是否超限，可能额外探测第
 `max_bytes + 1` 个字节；已知长度超限时返回 `MimeError::BufferLimitExceeded`，
 在 `read_all` 中发现超限时返回 `MimeError::FileSystem`。Magika 返回
 `Unknown` 或 `Undefined` 时结果为
 `Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
-异步路径先等待文件系统完成特征提取，再持有共享 Session 锁同步执行 Magika 推理。
+同步特征采样在模型 Session mutex 之外执行；只有推理会获取该锁，因此推理仍然串行。
+异步路径先等待文件系统完成特征提取，再持有共享 Session mutex 同步执行 Magika 推理。
 推理和等待锁都可能占用异步执行器线程；需要隔离时，应由应用把检测放到阻塞工作线程
 或服务边界中。
 
 ## 延伸阅读
 
-- [Core random-access session guide](../rs-fs/doc/user_guide.md#sampling-the-same-opened-object-at-several-offsets)
-- [核心随机读取会话说明](../rs-fs/doc/user_guide.zh_CN.md#从同一已打开对象的多个位置采样)
+- [Core random-access session guide](https://github.com/qubit-ltd/rs-fs/blob/main/doc/user_guide.md#sampling-the-same-opened-object-at-several-offsets)
+- [核心随机读取会话说明](https://github.com/qubit-ltd/rs-fs/blob/main/doc/user_guide.zh_CN.md#从同一已打开对象的多个位置采样)
 - [English user guide](doc/user_guide.md)
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-magika)

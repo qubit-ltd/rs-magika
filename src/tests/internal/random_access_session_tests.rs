@@ -67,6 +67,7 @@ struct Fixture {
     bytes: Arc<std::sync::RwLock<Arc<[u8]>>>,
     max_read: FileSystemLimit,
     interrupt_effect: Option<Option<FsEffectState>>,
+    interrupt_kind: FsErrorKind,
     attempts: Arc<AtomicUsize>,
 }
 
@@ -81,11 +82,17 @@ impl Fixture {
             bytes: Arc::new(std::sync::RwLock::new(Arc::from(bytes))),
             max_read,
             interrupt_effect: None,
+            interrupt_kind: FsErrorKind::Interrupted,
             attempts: Arc::new(AtomicUsize::new(0)),
         }
     }
     fn interrupt_once(mut self, effect: Option<FsEffectState>) -> Self {
         self.interrupt_effect = Some(effect);
+        self
+    }
+    fn fail_once(mut self, kind: FsErrorKind, effect: Option<FsEffectState>) -> Self {
+        self.interrupt_effect = Some(effect);
+        self.interrupt_kind = kind;
         self
     }
     fn properties(&self) -> ProviderProperties {
@@ -113,6 +120,7 @@ impl Fixture {
             reads: self.reads.clone(),
             drops: self.drops.clone(),
             interrupt_effect: self.interrupt_effect,
+            interrupt_kind: self.interrupt_kind,
             attempts: self.attempts.clone(),
         }
     }
@@ -179,6 +187,7 @@ struct Session {
     reads: Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
     drops: Arc<AtomicUsize>,
     interrupt_effect: Option<Option<FsEffectState>>,
+    interrupt_kind: FsErrorKind,
     attempts: Arc<AtomicUsize>,
 }
 impl Drop for Session {
@@ -193,7 +202,7 @@ impl RandomAccessReadSession for Session {
         if attempt == 0
             && let Some(effect) = self.interrupt_effect
         {
-            let error = FsError::new(FsErrorKind::Interrupted, FsOperation::Read, "fixture interruption");
+            let error = FsError::new(self.interrupt_kind, FsOperation::Read, "fixture interruption");
             return Err(match effect {
                 Some(effect) => error.with_effect_state(effect),
                 None => error,
@@ -328,4 +337,84 @@ fn test_sync_session_does_not_retry_indeterminate_interruption() {
     assert_eq!(Some(FsEffectState::Indeterminate), source.effect_state());
     assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
     assert_eq!(vec![(3, 1)], *fixture.reads.lock().unwrap());
+}
+
+#[test]
+fn test_async_session_retries_interruption_without_effect_state() {
+    assert_async_session_retries_safe_interruption(None);
+}
+
+#[test]
+fn test_async_session_retries_unchanged_interruption_at_same_range() {
+    assert_async_session_retries_safe_interruption(Some(FsEffectState::Unchanged));
+}
+
+fn assert_async_session_retries_safe_interruption(effect: Option<FsEffectState>) {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_once(effect);
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 1];
+
+    block_on(AsyncInput::read_at(&mut input, &mut output, 3)).unwrap();
+
+    assert_eq!(*b"d", output);
+    assert_eq!(2, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 1), (3, 1)], *fixture.reads.lock().unwrap());
+    assert!(block_on(AsyncInput::read_at(&mut input, &mut [0; 6], 0)).is_err());
+    assert_eq!(
+        2,
+        fixture.attempts.load(Ordering::SeqCst),
+        "budget rejection must happen before I/O"
+    );
+}
+
+#[test]
+fn test_async_session_preserves_indeterminate_interruption_without_retry() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_once(Some(FsEffectState::Indeterminate));
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, None);
+    let error = block_on(AsyncInput::read_at(&mut input, &mut [0; 1], 3))
+        .expect_err("indeterminate interruption must propagate");
+    let magika::Error::IOError(io_error) = error else {
+        panic!("expected I/O error")
+    };
+    let source = io_error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<FsError>())
+        .expect("typed filesystem error should be retained");
+    assert_eq!(FsErrorKind::Interrupted, source.kind());
+    assert_eq!(Some(FsEffectState::Indeterminate), source.effect_state());
+    assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 1)], *fixture.reads.lock().unwrap());
+    drop(input);
+    assert_eq!(1, fixture.drops.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_async_session_preserves_ordinary_error_without_retry() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown)
+        .fail_once(FsErrorKind::PermissionDenied, Some(FsEffectState::Unchanged));
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, None);
+    let error = block_on(AsyncInput::read_at(&mut input, &mut [0; 1], 3))
+        .expect_err("ordinary filesystem error must propagate");
+    let magika::Error::IOError(io_error) = error else {
+        panic!("expected I/O error")
+    };
+    let source = io_error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<FsError>())
+        .expect("typed filesystem error should be retained");
+    assert_eq!(FsErrorKind::PermissionDenied, source.kind());
+    assert_eq!(Some(FsEffectState::Unchanged), source.effect_state());
+    assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 1)], *fixture.reads.lock().unwrap());
+    drop(input);
+    assert_eq!(1, fixture.drops.load(Ordering::SeqCst));
 }

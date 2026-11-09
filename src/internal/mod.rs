@@ -8,6 +8,7 @@
 //! Private implementation details for the Magika detector.
 
 mod async_provider_input;
+mod async_route;
 pub(crate) mod budget_exceeded;
 pub(crate) mod provider_input;
 pub(crate) mod read_budget;
@@ -15,6 +16,7 @@ mod read_seek_input;
 mod reader_scope;
 mod session_read;
 mod sync_provider_input;
+mod sync_route;
 
 pub(crate) use async_provider_input::AsyncProviderInput;
 pub(crate) use provider_input::map_provider_magika_error;

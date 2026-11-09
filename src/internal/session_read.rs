@@ -23,6 +23,20 @@ use super::read_budget::ReadBudget;
 
 /// Fills one Magika request directly from the opened object, accounting for
 /// its cumulative byte budget once and splitting only at the provider limit.
+///
+/// # Parameters
+///
+/// * `reader` - Random-access reader retaining the opened resource.
+/// * `length` - Logical resource length captured when the reader was opened.
+/// * `budget` - Per-detection cumulative byte budget.
+/// * `buffer` - Destination for the requested resource bytes.
+/// * `offset` - Start offset of the requested range.
+/// * `max_segment` - Optional maximum byte count for one session read.
+///
+/// # Errors
+///
+/// Returns an I/O error when validation or budget reservation fails, the
+/// provider returns a short range, or a session read fails.
 pub(crate) fn read_sync_session(
     reader: &mut RandomAccessReader,
     length: u64,
@@ -54,6 +68,20 @@ pub(crate) fn read_sync_session(
 
 /// Retries only interruptions known not to have changed the session's effect
 /// state.
+///
+/// # Parameters
+///
+/// * `reader` - Open session used for the read attempts.
+/// * `offset` - Fixed resource offset used for every attempt.
+/// * `output` - Buffer filled by a successful attempt.
+///
+/// # Returns
+///
+/// The byte count returned by the first non-retry result.
+///
+/// # Errors
+///
+/// Returns the first error that is not a safe, unchanged interruption.
 fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut [u8]) -> qubit_fs::FsResult<usize> {
     loop {
         match reader.read_at(offset, output) {
@@ -68,7 +96,55 @@ fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut
     }
 }
 
+/// Retries only asynchronous interruptions known not to have changed the
+/// session's effect state.
+///
+/// # Parameters
+///
+/// * `reader` - Open asynchronous session used for the read attempts.
+/// * `offset` - Fixed resource offset used for every attempt.
+/// * `output` - Buffer filled by a successful attempt.
+///
+/// # Returns
+///
+/// The byte count returned by the first non-retry result.
+///
+/// # Errors
+///
+/// Returns the first error that is not a safe, unchanged interruption.
+async fn read_async_at_retry(
+    reader: &mut AsyncRandomAccessReader,
+    offset: u64,
+    output: &mut [u8],
+) -> qubit_fs::FsResult<usize> {
+    loop {
+        match reader.read_at(offset, output).await {
+            Err(error)
+                if error.kind() == FsErrorKind::Interrupted
+                    && matches!(error.effect_state(), None | Some(FsEffectState::Unchanged)) =>
+            {
+                continue;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Asynchronous counterpart to [`read_sync_session`].
+///
+/// # Parameters
+///
+/// * `reader` - Asynchronous reader retaining the opened resource.
+/// * `length` - Logical resource length captured when the reader was opened.
+/// * `budget` - Per-detection cumulative byte budget.
+/// * `buffer` - Destination for the requested resource bytes.
+/// * `offset` - Start offset of the requested range.
+/// * `max_segment` - Optional maximum byte count for one session read.
+///
+/// # Errors
+///
+/// Returns an I/O error when validation or budget reservation fails, the
+/// provider returns a short range, or a session read fails.
 pub(crate) async fn read_async_session(
     reader: &mut AsyncRandomAccessReader,
     length: u64,
@@ -88,8 +164,7 @@ pub(crate) async fn read_async_session(
         let read_offset = offset
             .checked_add(filled as u64)
             .ok_or_else(|| invalid_input("provider input offset overflow"))?;
-        let count = reader
-            .read_at(read_offset, &mut buffer[filled..filled + step])
+        let count = read_async_at_retry(reader, read_offset, &mut buffer[filled..filled + step])
             .await
             .map_err(|error| error.into_io_error())?;
         if count == 0 {

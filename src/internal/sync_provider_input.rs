@@ -17,6 +17,7 @@ use qubit_fs::read::RandomAccessReader;
 use super::provider_input::read_sync;
 use super::read_budget::ReadBudget;
 use super::session_read::read_sync_session;
+use super::sync_route::SyncRoute;
 
 /// Adapts synchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct SyncProviderInput<'a> {
@@ -28,17 +29,6 @@ pub(crate) struct SyncProviderInput<'a> {
     version: Option<ResourceVersion>,
     /// Cumulative limit shared by all reads in one detection.
     budget: ReadBudget,
-}
-
-enum SyncRoute<'a> {
-    Legacy {
-        file_system: &'a FileSystem,
-        path: &'a Path,
-    },
-    Session {
-        reader: RandomAccessReader,
-        max_segment: Option<usize>,
-    },
 }
 
 impl<'a> SyncProviderInput<'a> {
@@ -78,6 +68,7 @@ impl<'a> SyncProviderInput<'a> {
     /// inference.
     ///
     /// # Parameters
+    ///
     /// * `reader` - Random-access session opened for this provider path.
     /// * `limit` - Maximum cumulative bytes reserved across reads.
     /// * `max_segment` - Optional finite maximum for an individual provider
@@ -97,7 +88,11 @@ impl<'a> SyncProviderInput<'a> {
 }
 
 impl SyncInput for SyncProviderInput<'_> {
-    /// Returns the total input length.
+    /// Returns the complete logical resource length captured at construction.
+    ///
+    /// # Returns
+    ///
+    /// The length of the provider resource.
     #[inline]
     fn length(&self) -> MagikaResult<u64> {
         Ok(self.length)
@@ -107,6 +102,16 @@ impl SyncInput for SyncProviderInput<'_> {
     ///
     /// Reserves bytes before blocking I/O and rejects short ranges or provider
     /// failures as Magika I/O errors.
+    ///
+    /// # Parameters
+    ///
+    /// * `buffer` - Destination for the requested range.
+    /// * `offset` - Start offset of the requested range in the resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the range is invalid, exceeds the cumulative
+    /// budget, or cannot be read exactly from the provider.
     fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         match &mut self.route {
             SyncRoute::Legacy { file_system, path } => read_sync(

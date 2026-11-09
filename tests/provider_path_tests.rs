@@ -105,6 +105,54 @@ fn test_provider_path_async_range_reads_only_bounded_windows() {
 }
 
 #[test]
+fn test_provider_path_sync_legacy_ranges_respect_provider_limit() {
+    let provider = large_provider(true).with_max_read_range_bytes(2);
+    let observations = provider.observations();
+    let result = detector().detect_path(
+        &provider.file_system(),
+        &path("/script.py"),
+        8192,
+        MimeDetectionPolicy::VerifyContent,
+    );
+    assert_eq!(
+        result.expect("bounded legacy ranges should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert!(
+        observations
+            .options
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|options| { options.length().is_some_and(|length| length <= 2) })
+    );
+}
+
+#[test]
+fn test_provider_path_async_legacy_ranges_respect_provider_limit() {
+    let provider = large_provider(true).with_max_read_range_bytes(2);
+    let observations = provider.observations();
+    let result = run_ready(detector().detect_async_path(
+        &provider.async_file_system(),
+        &path("/script.py"),
+        8192,
+        MimeDetectionPolicy::VerifyContent,
+    ));
+    assert_eq!(
+        result.expect("bounded async legacy ranges should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert!(
+        observations
+            .options
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|options| { options.length().is_some_and(|length| length <= 2) })
+    );
+}
+
+#[test]
 fn test_provider_path_sync_uses_one_random_access_session_without_stat() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();
@@ -142,6 +190,61 @@ fn test_provider_path_async_uses_one_random_access_session_without_stat() {
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(1, observations.session_drops.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn test_provider_path_sync_session_respects_finite_range_limit() {
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_max_read_range_bytes(2);
+    let observations = provider.observations();
+
+    assert_eq!(
+        detector()
+            .detect_path(
+                &provider.file_system(),
+                &path("/script.py"),
+                8192,
+                MimeDetectionPolicy::VerifyContent,
+            )
+            .expect("bounded session detection should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert!(
+        observations
+            .session_read_lengths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|length| *length <= 2)
+    );
+}
+
+#[test]
+fn test_provider_path_async_session_respects_finite_range_limit() {
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_max_read_range_bytes(2);
+    let observations = provider.observations();
+
+    assert_eq!(
+        run_ready(detector().detect_async_path(
+            &provider.async_file_system(),
+            &path("/script.py"),
+            8192,
+            MimeDetectionPolicy::VerifyContent,
+        ))
+        .expect("bounded async session detection should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert!(
+        observations
+            .session_read_lengths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|length| *length <= 2)
+    );
 }
 
 #[test]
@@ -388,6 +491,30 @@ fn test_provider_path_conditional_range_uses_etag() {
             .unwrap()
             .iter()
             .all(|options| options.if_match().is_some())
+    );
+}
+
+#[test]
+fn test_provider_path_async_conditional_ranges_reuse_exact_etag() {
+    let provider = large_provider(true).with_conditional().with_max_read_range_bytes(2);
+    let result = run_ready(detector().detect_async_path(
+        &provider.async_file_system(),
+        &path("/script.py"),
+        8192,
+        MimeDetectionPolicy::VerifyContent,
+    ));
+    assert_eq!(
+        result.expect("conditional async range detection should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert!(
+        provider
+            .observations()
+            .options
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|options| options.if_match().is_some_and(|etag| etag.as_str() == "v1"))
     );
 }
 

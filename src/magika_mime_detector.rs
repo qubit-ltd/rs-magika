@@ -17,6 +17,7 @@ use std::sync::PoisonError;
 use magika::ContentType;
 use magika::Error;
 use magika::FeaturesOrRuled;
+use magika::FileType;
 use magika::Session;
 use magika::SyncInput;
 use qubit_fs::AsyncFileSystem;
@@ -47,7 +48,9 @@ use crate::internal::map_provider_magika_error;
 /// so applications should create the detector once and share it, for example
 /// through [`std::sync::Arc`]. Inference methods are blocking. Because Magika
 /// requires mutable access to its session, concurrent inference calls on one
-/// detector are serialized by an internal mutex.
+/// detector are serialized by an internal mutex. Input sampling and feature
+/// extraction happen outside that mutex; rule-classified inputs do not need
+/// the session. Sampling and waiting for inference are blocking operations.
 ///
 /// # Examples
 ///
@@ -139,8 +142,14 @@ impl MagikaMimeDetector {
 
     /// Gets content candidates from a Magika-compatible synchronous input.
     ///
-    /// `I` is any input implementing [`SyncInput`]. This blocking operation
-    /// serializes access to the shared Magika session.
+    /// `I` is any input implementing [`SyncInput`]. Sampling and feature
+    /// extraction do not hold the shared Magika session lock; model inference
+    /// is serialized. Rule-classified inputs do not require the session.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `I` - Synchronous Magika input used for sampling and feature
+    ///   extraction.
     ///
     /// # Parameters
     ///
@@ -159,13 +168,47 @@ impl MagikaMimeDetector {
     where
         I: SyncInput,
     {
-        let mut session = self.session.lock().map_err(map_session_lock_error)?;
-        let file_type = session.identify_content_sync(input).map_err(map_magika_error)?;
-        Ok(file_type
-            .content_type()
-            .and_then(content_type_to_mime)
-            .into_iter()
-            .collect())
+        let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_magika_error)?;
+        self.guess_from_extracted(extracted, map_magika_error)
+    }
+
+    /// Maps ruled classifications directly and serializes only model inference.
+    ///
+    /// The supplied mapper preserves the error contract of the input route that
+    /// extracted the features. Ruled results do not acquire the session lock.
+    ///
+    /// # Parameters
+    ///
+    /// * `extracted` - Rules result or features extracted without holding the
+    ///   session lock.
+    /// * `map_error` - Converts upstream inference errors for the originating
+    ///   route.
+    ///
+    /// # Returns
+    ///
+    /// Zero or one MIME type candidates.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error if the session lock is poisoned or inference
+    /// fails.
+    fn guess_from_extracted(
+        &self,
+        extracted: FeaturesOrRuled,
+        map_error: fn(Error) -> MimeError,
+    ) -> MimeResult<Vec<String>> {
+        match extracted {
+            FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type).into_iter().collect()),
+            FeaturesOrRuled::Features(features) => {
+                let mut session = self.session.lock().map_err(map_session_lock_error)?;
+                let file_type = session.identify_features_sync(&features).map_err(map_error)?;
+                Ok(file_type
+                    .content_type()
+                    .and_then(content_type_to_mime)
+                    .into_iter()
+                    .collect())
+            }
+        }
     }
 
     /// Gets content candidates from a local file using Magika.
@@ -184,8 +227,14 @@ impl MagikaMimeDetector {
     /// [`MimeError::DetectorBackend`] when inference fails or the session lock
     /// is poisoned.
     fn guess_from_magika_file(&self, file: &Path) -> MimeResult<Vec<String>> {
-        let mut session = self.session.lock().map_err(map_session_lock_error)?;
-        let file_type = session.identify_file_sync(file).map_err(map_magika_error)?;
+        let metadata = std::fs::symlink_metadata(file)?;
+        let file_type = if metadata.file_type().is_symlink() {
+            FileType::Symlink
+        } else if metadata.is_dir() {
+            FileType::Directory
+        } else {
+            return self.guess_from_magika_input(std::fs::File::open(file)?);
+        };
         Ok(file_type
             .content_type()
             .and_then(content_type_to_mime)
@@ -358,15 +407,8 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     .maximum()
                     .and_then(|value| usize::try_from(value).ok());
                 let input = SyncProviderInput::from_session(reader, max_bytes, max_segment);
-                let mut session = self.session.lock().map_err(map_session_lock_error)?;
-                let file_type = session
-                    .identify_content_sync(input)
-                    .map_err(map_provider_magika_error)?;
-                let candidates = file_type
-                    .content_type()
-                    .and_then(content_type_to_mime)
-                    .into_iter()
-                    .collect();
+                let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
+                let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
             Err(error)
@@ -398,15 +440,8 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     .then(|| metadata.etag().cloned())
                     .flatten();
                 let input = SyncProviderInput::new(file_system, path, length, version, max_bytes);
-                let mut session = self.session.lock().map_err(map_session_lock_error)?;
-                let file_type = session
-                    .identify_content_sync(input)
-                    .map_err(map_provider_magika_error)?;
-                let candidates = file_type
-                    .content_type()
-                    .and_then(content_type_to_mime)
-                    .into_iter()
-                    .collect();
+                let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
+                let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
             let requested = usize::try_from(length).unwrap_or(usize::MAX);
@@ -514,6 +549,20 @@ impl MimeDetectorBackend for MagikaMimeDetector {
 ///
 /// Session locking and inference remain synchronous after feature extraction;
 /// provider errors and poisoned locks are returned as `MimeError`.
+///
+/// # Parameters
+///
+/// * `detector` - Detector whose session performs model inference.
+/// * `input` - Asynchronous provider input to sample.
+///
+/// # Returns
+///
+/// Zero or one MIME type candidates.
+///
+/// # Errors
+///
+/// Returns I/O, budget, backend, or poisoned-session errors from sampling and
+/// inference.
 async fn guess_from_async_input(
     detector: &MagikaMimeDetector,
     input: AsyncProviderInput<'_>,
@@ -521,20 +570,7 @@ async fn guess_from_async_input(
     let file_type = FeaturesOrRuled::extract_async(input)
         .await
         .map_err(map_provider_magika_error)?;
-    match file_type {
-        FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type).into_iter().collect()),
-        FeaturesOrRuled::Features(features) => {
-            let mut session = detector.session.lock().map_err(map_session_lock_error)?;
-            let file_type = session
-                .identify_features_sync(&features)
-                .map_err(map_provider_magika_error)?;
-            Ok(file_type
-                .content_type()
-                .and_then(content_type_to_mime)
-                .into_iter()
-                .collect())
-        }
-    }
+    detector.guess_from_extracted(file_type, map_provider_magika_error)
 }
 
 /// Converts a Magika content type to a MIME type name.
@@ -554,6 +590,15 @@ fn content_type_to_mime(content_type: ContentType) -> Option<String> {
 /// Returns Magika's MIME name, excluding unknown and undefined classifications.
 ///
 /// A known content type yields `Some`; sentinel types yield `None`.
+///
+/// # Parameters
+///
+/// * `content_type` - Magika classification whose canonical MIME name is
+///   requested.
+///
+/// # Returns
+///
+/// The static MIME name, or `None` for unknown and undefined classifications.
 fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
     match content_type {
         ContentType::Unknown | ContentType::Undefined => None,
@@ -564,6 +609,14 @@ fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
 /// Copies a nonempty MIME name into an owned result.
 ///
 /// Empty or absent names remain `None`, so policy fallback can handle them.
+///
+/// # Parameters
+///
+/// * `mime_type` - Optional MIME name to copy.
+///
+/// # Returns
+///
+/// An owned, nonempty MIME name, or `None` when the name is absent or empty.
 fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
     mime_type.filter(|mime_type| !mime_type.is_empty()).map(str::to_owned)
 }
@@ -573,6 +626,10 @@ fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
 /// # Parameters
 ///
 /// * `error` - Poisoned lock error returned by [`Mutex::lock`].
+///
+/// # Type Parameters
+///
+/// * `T` - Guard type stored inside the poisoned lock error.
 ///
 /// # Returns
 ///
@@ -601,17 +658,37 @@ pub(crate) fn map_magika_error(error: Error) -> MimeError {
 
 impl MimeContentBackend for MagikaMimeDetector {
     /// Reports that Magika requires complete content.
+    ///
+    /// # Returns
+    ///
+    /// The complete-content requirement.
     fn content_requirement(&self) -> ContentRequirement {
         ContentRequirement::Complete
     }
 
     /// Detects MIME candidates from complete content bytes.
+    ///
+    /// # Parameters
+    ///
+    /// * `bytes` - Complete content to classify.
+    ///
+    /// # Returns
+    ///
+    /// MIME candidates inferred from `bytes`.
     fn detect_bytes(&self, bytes: &[u8]) -> MimeResult<Vec<String>> {
         self.guess_from_magika_input(bytes)
     }
 
     /// Detects the logical content window from the current reader position to
     /// EOF.
+    ///
+    /// # Parameters
+    ///
+    /// * `reader` - Seekable reader whose remaining content is classified.
+    ///
+    /// # Returns
+    ///
+    /// MIME candidates inferred from the remaining content.
     fn detect_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<Vec<String>> {
         self.guess_from_reader_with_scope(reader, ReaderScope::Remaining)
     }
@@ -619,11 +696,14 @@ impl MimeContentBackend for MagikaMimeDetector {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::io::Cursor;
     use std::io::Write;
+    use std::sync::Arc;
 
     use magika::ContentType;
     use magika::Error;
+    use magika::SyncInput;
     use qubit_io::std_io::ReadSeek;
     use qubit_mime::ContentRequirement;
     use qubit_mime::MimeConfig;
@@ -636,13 +716,40 @@ mod tests {
     use super::MagikaMimeDetector;
     use super::content_type_to_mime;
 
+    struct LockCheckingInput {
+        detector: Arc<MagikaMimeDetector>,
+        bytes: &'static [u8],
+    }
+
+    impl SyncInput for LockCheckingInput {
+        fn length(&self) -> magika::Result<u64> {
+            let _guard = self
+                .detector
+                .session
+                .try_lock()
+                .map_err(|_| magika::Error::IOError(io::Error::other("session lock held during input length")))?;
+            Ok(self.bytes.len() as u64)
+        }
+
+        fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> magika::Result<()> {
+            let _guard = self
+                .detector
+                .session
+                .try_lock()
+                .map_err(|_| magika::Error::IOError(io::Error::other("session lock held during input read")))?;
+            let start = usize::try_from(offset).expect("test offset fits usize");
+            buffer.copy_from_slice(&self.bytes[start..start + buffer.len()]);
+            Ok(())
+        }
+    }
+
     #[test]
-    fn undefined_content_is_not_a_candidate() {
+    fn test_undefined_content_is_not_a_candidate() {
         assert_eq!(None, content_type_to_mime(ContentType::Undefined));
     }
 
     #[test]
-    fn constructor_and_builder_paths_are_covered() {
+    fn test_constructor_and_builder_detect_python_content() {
         let detector = MagikaMimeDetector::new().expect("detector should initialize");
         assert_eq!(
             Some("application/pdf".to_owned()),
@@ -717,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn private_file_and_reader_paths_are_covered() {
+    fn test_local_file_and_reader_detect_python_content() {
         let detector = MagikaMimeDetector::new().expect("detector should initialize");
         let mut file = NamedTempFile::new().expect("temporary file should be created");
         file.write_all(b"#!/usr/bin/env python3\nprint('ok')\n")
@@ -747,13 +854,13 @@ mod tests {
     }
 
     #[test]
-    fn magika_errors_map_to_mime_errors() {
+    fn test_magika_io_errors_map_to_mime_io_errors() {
         let error = super::map_magika_error(Error::IOError(std::io::Error::other("io")));
         assert!(matches!(error, MimeError::Io(_)));
     }
 
     #[test]
-    fn poisoned_session_errors_are_mapped() {
+    fn test_poisoned_session_errors_map_to_backend_errors() {
         let detector =
             std::sync::Arc::new(MagikaMimeDetector::new().expect("detector should initialize for lock test"));
         let poisoned = std::sync::Arc::clone(&detector);
@@ -764,8 +871,55 @@ mod tests {
         .join()
         .expect_err("thread should poison the lock");
         let mapped = detector
-            .guess_from_magika_input(&b"content"[..])
+            .guess_from_magika_input(&include_bytes!("../tests/fixtures/real_files/script.py")[..])
             .expect_err("poisoned session should fail detection");
         assert!(matches!(mapped, MimeError::DetectorBackend { .. }));
+    }
+
+    #[test]
+    fn test_sync_sampling_leaves_session_lock_available() {
+        let detector = Arc::new(MagikaMimeDetector::new().expect("detector should initialize"));
+        let input = LockCheckingInput {
+            detector: Arc::clone(&detector),
+            bytes: b"#!/usr/bin/env python3\nprint('ok')\n",
+        };
+        assert_eq!(vec!["text/x-python"], detector.guess_from_magika_input(input).unwrap());
+    }
+
+    #[test]
+    fn test_ruled_sync_input_succeeds_with_poisoned_session() {
+        let detector = Arc::new(MagikaMimeDetector::new().expect("detector should initialize"));
+        let poisoned = Arc::clone(&detector);
+        std::thread::spawn(move || {
+            let _guard = poisoned.session.lock().unwrap();
+            panic!("poison session lock");
+        })
+        .join()
+        .expect_err("thread should poison the lock");
+        assert_eq!(
+            content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
+            detector.guess_from_magika_input(&b""[..]).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_local_directory_returns_no_mime_candidate() {
+        let detector = MagikaMimeDetector::new().expect("detector should initialize");
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        assert!(detector.guess_from_magika_file(directory.path()).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_symlink_does_not_follow_target() {
+        use std::os::unix::fs::symlink;
+
+        let detector = MagikaMimeDetector::new().expect("detector should initialize");
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let target = directory.path().join("target.py");
+        let link = directory.path().join("link.py");
+        std::fs::write(&target, b"#!/usr/bin/env python3\nprint('ok')\n").unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(detector.guess_from_magika_file(&link).unwrap().is_empty());
     }
 }

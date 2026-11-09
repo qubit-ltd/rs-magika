@@ -16,9 +16,8 @@ use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::AsyncRandomAccessReader;
 
-use super::provider_input::copy_exact;
-use super::provider_input::read_options;
-use super::provider_input::validate_request;
+use super::async_route::AsyncRoute;
+use super::provider_input::read_async;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
 
@@ -34,23 +33,24 @@ pub(crate) struct AsyncProviderInput<'a> {
     budget: ReadBudget,
 }
 
-enum AsyncRoute<'a> {
-    Legacy {
-        file_system: &'a AsyncFileSystem,
-        path: &'a Path,
-    },
-    Session {
-        reader: AsyncRandomAccessReader,
-        max_segment: Option<usize>,
-    },
-}
-
 impl<'a> AsyncProviderInput<'a> {
-    /// Creates an asynchronous input for one resource and cumulative byte
-    /// limit.
+    /// Creates an asynchronous input for one provider resource.
     ///
-    /// The borrowed filesystem and path must remain valid through feature
-    /// extraction. `version` constrains each range read when present.
+    /// The filesystem and path are borrowed until feature extraction
+    /// completes. When supplied, `version` is required for every legacy range.
+    ///
+    /// # Parameters
+    ///
+    /// * `file_system` - Asynchronous filesystem that supplies resource ranges.
+    /// * `path` - Path of the resource within the filesystem.
+    /// * `length` - Complete logical resource length reported to Magika.
+    /// * `version` - Optional resource version required for each legacy range.
+    /// * `limit` - Maximum cumulative bytes reserved across all reads.
+    ///
+    /// # Returns
+    ///
+    /// An asynchronous input using the legacy path route and a fresh byte
+    /// budget.
     #[must_use]
     pub(crate) fn new(
         file_system: &'a AsyncFileSystem,
@@ -71,6 +71,7 @@ impl<'a> AsyncProviderInput<'a> {
     /// feature extraction.
     ///
     /// # Parameters
+    ///
     /// * `reader` - Random-access session opened for this provider path.
     /// * `limit` - Maximum cumulative bytes reserved across reads.
     /// * `max_segment` - Optional finite maximum for an individual provider
@@ -90,7 +91,11 @@ impl<'a> AsyncProviderInput<'a> {
 }
 
 impl AsyncInput for AsyncProviderInput<'_> {
-    /// Returns the total input length.
+    /// Returns the complete logical resource length captured at construction.
+    ///
+    /// # Returns
+    ///
+    /// The length of the provider resource.
     #[inline]
     fn length(&self) -> impl Future<Output = MagikaResult<u64>> {
         std::future::ready(Ok(self.length))
@@ -100,17 +105,29 @@ impl AsyncInput for AsyncProviderInput<'_> {
     ///
     /// Reserves bytes before asynchronous I/O and rejects short ranges or
     /// provider failures as Magika I/O errors.
+    ///
+    /// # Parameters
+    ///
+    /// * `buffer` - Destination for the requested range.
+    /// * `offset` - Start offset of the requested range in the resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the range is invalid, exceeds the cumulative
+    /// budget, or cannot be read exactly from the provider.
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         match &mut self.route {
             AsyncRoute::Legacy { file_system, path } => {
-                validate_request(self.length, &mut self.budget, buffer.len(), offset)?;
-                let options = read_options(offset, buffer.len(), self.version.as_ref());
-                let bytes = file_system
-                    .read_prefix(path, options, buffer.len())
-                    .await
-                    .map_err(|error| error.into_io_error())?
-                    .into_bytes();
-                copy_exact(buffer, bytes)
+                read_async(
+                    file_system,
+                    path,
+                    self.length,
+                    self.version.as_ref(),
+                    &mut self.budget,
+                    buffer,
+                    offset,
+                )
+                .await
             }
             AsyncRoute::Session { reader, max_segment } => {
                 read_async_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment).await

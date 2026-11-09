@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 
+mod provider_input_fixture;
 mod provider_input_tests;
 mod random_access_session_tests;
 mod read_budget_tests;

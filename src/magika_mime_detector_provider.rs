@@ -41,6 +41,10 @@ pub struct MagikaMimeDetectorProvider {
 
 impl std::fmt::Debug for MagikaMimeDetectorProvider {
     /// Formats the provider without exposing classifier internals.
+    ///
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination for the formatted provider description.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MagikaMimeDetectorProvider")
@@ -54,12 +58,25 @@ impl std::fmt::Debug for MagikaMimeDetectorProvider {
 
 impl MagikaMimeDetectorProvider {
     /// Creates a provider with the default configuration.
+    ///
+    /// # Returns
+    ///
+    /// A provider that uses default MIME stream refinement behavior.
     #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates a provider with a classifier for precise media refinement.
+    ///
+    /// # Parameters
+    ///
+    /// * `classifier` - Shared classifier used to refine detected media
+    ///   streams.
+    ///
+    /// # Returns
+    ///
+    /// A provider that uses `classifier` for precise media refinement.
     #[inline]
     pub fn with_media_stream_classifier(classifier: Arc<dyn MediaStreamClassifier>) -> Self {
         Self {

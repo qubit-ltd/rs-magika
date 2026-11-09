@@ -22,9 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let detector = MagikaMimeDetector::new()?;
     let actual = detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n")?;
     if actual.as_deref() != Some("text/x-python") {
-        return Err(
-            format!("dynamic ONNX Runtime returned unexpected MIME type: {actual:?}").into(),
-        );
+        return Err(format!("dynamic ONNX Runtime returned unexpected MIME type: {actual:?}").into());
     }
     Ok(())
 }

@@ -268,9 +268,9 @@ fn test_magika_detector_reader_maps_magika_io_error() {
     assert!(matches!(error, MimeError::Io(_)));
 }
 
-/// Verifies a poisoned Magika session lock is converted to a backend error.
+/// Verifies a panic during sampling does not poison the model session lock.
 #[test]
-fn test_magika_detector_maps_poisoned_session_lock() {
+fn test_magika_detector_sampling_panic_does_not_poison_session_lock() {
     let detector = MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
     let mut reader = FailingReadSeek::new(b"not a pdf".to_vec(), false, None).panic_on_read();
 
@@ -279,11 +279,12 @@ fn test_magika_detector_maps_poisoned_session_lock() {
     }));
     assert!(panic_result.is_err());
 
-    let error = detector
-        .detect_by_content(b"not a pdf")
-        .expect_err("poisoned session lock should be reported");
-
-    assert!(matches!(error, MimeError::DetectorBackend { .. }));
+    assert_eq!(
+        Some("text/x-python".to_owned()),
+        detector
+            .detect_by_content(b"#!/usr/bin/env python3\nprint('ok')\n")
+            .unwrap()
+    );
 }
 
 /// Verifies successful reader detection restores the original position.

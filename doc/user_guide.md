@@ -5,7 +5,7 @@
 ## Purpose and Audience
 
 This guide is for Rust applications that use `qubit-mime` and need Magika to
-classify file content. It covers `qubit-magika` 0.15, which requires Rust 1.94.
+classify file content. It covers `qubit-magika` 0.18, which requires Rust 1.94.
 The crate supplies the `MagikaMimeDetector` implementation and an optional
 `MagikaMimeDetectorProvider`; it does not replace `qubit-mime`'s detector
 selection or MIME policy.
@@ -25,7 +25,7 @@ detector initializes Magika's embedded model and the ONNX Runtime session.
 Inference calls made through one detector are serialized internally, so one
 initialized detector can be shared with `Arc`.
 
-For link-time discovery, enable `qubit-magika = { version = "0.17", features =
+For link-time discovery, enable `qubit-magika = { version = "0.18", features =
 ["inventory"] }`. This submits `MagikaMimeDetectorProvider::new()` to the MIME
 detector inventory; `MimeDetectorRegistry::builtin()` then includes `magika`
 while retaining `repository` as its default. A provider configured with a
@@ -47,10 +47,10 @@ Add the crate versions used by this release:
 
 ```toml
 [dependencies]
-qubit-mime = "0.20"
-qubit-magika = "0.17"
+qubit-mime = "0.21"
+qubit-magika = "0.18"
 qubit-spi = "0.14"
-qubit-fs = "0.2" # needed when calling detect_path directly
+qubit-fs = "0.3" # needed when calling detect_path directly
 ```
 
 The default feature, `bundled-onnxruntime`, downloads and links the ONNX Runtime
@@ -131,8 +131,18 @@ fn detect_uploaded_path(
 }
 ```
 
-For a filesystem that advertises range reads, Magika requests bounded windows
-and can use a conditional ETag read. Without range support, a known resource
+When random-access sessions are supported, Magika opens the path once and
+samples several offsets from that same opened object. The length reported when
+opening bounds readable offsets; it is not a snapshot of the object's contents.
+Session routing is preferred, and only `UnsupportedOperation` or
+`UnsupportedCapability` returned while opening the session triggers the
+path-based fallback. Other open errors and all session read errors propagate
+without reopening by path. For a filesystem that advertises range reads,
+Magika requests bounded windows and can use a conditional ETag read. The legacy
+route opens by path separately for each segment, so the ETag condition is what
+can detect changes between segments; without conditional reads it does not
+provide a cross-segment content snapshot. The cumulative `max_bytes` budget
+applies across all Magika sampling reads. Without range support, a known resource
 larger than the budget is rejected before the full content is loaded;
 `qubit-fs::read_all` may probe one byte beyond `max_bytes` to detect an oversized
 resource. Known oversized lengths return `MimeError::BufferLimitExceeded`;
@@ -168,13 +178,14 @@ uses registry-based construction. Classifier failures are reported as
 
 To use an ONNX Runtime library supplied by the application, disable the bundled
 binary and enable `ort`'s dynamic loader. These declarations are copy-pasteable
-and keep the versions aligned with `qubit-magika` 0.15:
+and keep the versions aligned with `qubit-magika` 0.18:
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.17", default-features = false }
-qubit-mime = "0.20"
+qubit-magika = { version = "0.18", default-features = false }
+qubit-mime = "0.21"
 qubit-spi = "0.14"
+qubit-fs = "0.3"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
@@ -218,22 +229,26 @@ seekable readers, local files, and synchronous or asynchronous provider paths.
 Reader detection restores the original reader position. Content-backend reader
 detection classifies the remaining resource from the current cursor, while the
 generic detector API keeps whole-resource semantics. Provider-path detection
-enforces `max_bytes` cumulatively across range requests. Range-capable providers use
-bounded windows and conditional ETag reads when available; providers without
-range support may probe one extra byte to detect overflow and reject oversized
-resources. Unknown and undefined Magika types become `Ok(None)` so filename
-fallback follows the selected `MimeDetectionPolicy`.
-The asynchronous path awaits feature extraction before synchronously running
-inference while holding the shared session lock. Inference and lock waiting can
-occupy the async executor thread; move detection to a blocking worker or service
-boundary when that isolation is required.
+enforces `max_bytes` cumulatively across all sampling reads. The legacy route
+opens by path for each segment and applies the same conditional ETag to every
+segment when available; without that condition, it cannot guarantee a
+consistent cross-segment snapshot. Providers without range support may probe one extra byte to
+detect overflow and reject oversized resources. Unknown and undefined Magika
+types become `Ok(None)` so filename fallback follows the selected
+`MimeDetectionPolicy`.
+Synchronous feature sampling happens outside the model session mutex; only
+inference uses that mutex and remains serialized. Async path detection awaits
+feature extraction before synchronously running inference under the shared
+session mutex. Inference and waiting for that mutex can occupy the async
+executor thread; move detection to a blocking worker or service boundary when
+that isolation is required.
 
 ## Migration Guide
 
 When upgrading a pre-0.14 integration, apply these changes in order:
 
-1. Upgrade the coordinated dependencies to `qubit-mime 0.18`, `qubit-spi
-   0.13`, and Rust 1.94.
+1. Upgrade to `qubit-magika 0.18`, `qubit-mime 0.21`, `qubit-fs 0.3`,
+   `qubit-spi 0.14`, and Rust 1.94.
 2. Keep provider registration and detector configuration separate: register
    `MagikaMimeDetectorProvider`, select `magika`, then call
    `create_configured(&MimeConfig)`.

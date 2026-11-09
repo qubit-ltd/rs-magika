@@ -25,6 +25,7 @@ use qubit_fs::metadata::FileSystemCapabilities;
 use qubit_fs::metadata::FileSystemCapability;
 use qubit_fs::metadata::FileSystemId;
 use qubit_fs::metadata::FileSystemInfo;
+use qubit_fs::metadata::FileSystemLimit;
 use qubit_fs::metadata::FileSystemLimits;
 use qubit_fs::metadata::OpenedFileInfo;
 use qubit_fs::metadata::ResourceVersion;
@@ -59,6 +60,7 @@ pub(crate) struct ProviderFileSystemSpi {
     fail_reads: bool,
     random_access: bool,
     random_open_error: Option<FsErrorKind>,
+    max_read_range_bytes: Option<u64>,
     observations: Arc<ProviderObservations>,
 }
 
@@ -68,6 +70,7 @@ pub(crate) struct ProviderObservations {
     pub(crate) opens: AtomicUsize,
     pub(crate) random_opens: AtomicUsize,
     pub(crate) random_reads: AtomicUsize,
+    pub(crate) session_read_lengths: Mutex<Vec<usize>>,
     pub(crate) session_drops: AtomicUsize,
     pub(crate) read_bytes: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
@@ -85,6 +88,7 @@ impl ProviderFileSystemSpi {
             fail_reads: false,
             random_access: false,
             random_open_error: None,
+            max_read_range_bytes: None,
             observations: Arc::new(ProviderObservations::default()),
         }
     }
@@ -101,6 +105,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn with_range(mut self) -> Self {
         self.range = true;
+        self
+    }
+
+    pub(crate) fn with_max_read_range_bytes(mut self, maximum: u64) -> Self {
+        self.max_read_range_bytes = Some(maximum);
         self
     }
 
@@ -176,7 +185,10 @@ impl ProviderFileSystemSpi {
             ),
             operations,
             capabilities,
-            FileSystemLimits::unknown(),
+            self.max_read_range_bytes
+                .map_or_else(FileSystemLimits::unknown, |maximum| {
+                    FileSystemLimits::unknown().with_max_read_range_bytes(FileSystemLimit::Maximum(maximum))
+                }),
             PathConstraints::absolute(),
             SymlinkPolicy::Reject,
         )
@@ -340,6 +352,11 @@ impl Drop for ProviderSession {
 
 impl RandomAccessReadSession for ProviderSession {
     fn read_at(&mut self, offset: u64, output: &mut [u8]) -> FsResult<usize> {
+        self.observations
+            .session_read_lengths
+            .lock()
+            .unwrap()
+            .push(output.len());
         if self.fail_reads {
             return Err(FsError::from_io(
                 io::Error::other("configured provider read failure"),

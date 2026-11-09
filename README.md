@@ -115,15 +115,17 @@ known oversized resources return `MimeError::BufferLimitExceeded`, while an
 overflow discovered during `read_all` returns `MimeError::FileSystem`. Unknown and
 undefined Magika types return `Ok(None)`, allowing the selected
 `MimeDetectionPolicy` to apply filename fallback consistently.
-The asynchronous path awaits filesystem feature extraction first, then performs
-Magika inference synchronously while holding the shared session lock. The
-inference and lock wait can occupy the async executor thread; applications that
-need isolation should move detection to a blocking worker or service boundary.
+Synchronous feature sampling runs outside the model session mutex; only model
+inference takes that mutex, so inference stays serialized. The asynchronous
+path awaits filesystem feature extraction first, then performs Magika inference
+synchronously while holding the shared session lock. Inference and waiting for
+the lock can occupy the async executor thread; applications that need isolation
+should move detection to a blocking worker or service boundary.
 
 ## Learn More
 
-- [Core random-access session guide](../rs-fs/doc/user_guide.md#sampling-the-same-opened-object-at-several-offsets)
-- [核心随机读取会话说明](../rs-fs/doc/user_guide.zh_CN.md#从同一已打开对象的多个位置采样)
+- [Core random-access session guide](https://github.com/qubit-ltd/rs-fs/blob/main/doc/user_guide.md#sampling-the-same-opened-object-at-several-offsets)
+- [核心随机读取会话说明](https://github.com/qubit-ltd/rs-fs/blob/main/doc/user_guide.zh_CN.md#从同一已打开对象的多个位置采样)
 - [English user guide](doc/user_guide.md)
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API documentation](https://docs.rs/qubit-magika)

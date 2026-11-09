@@ -5,7 +5,7 @@
 ## 手册目标与读者
 
 本手册面向使用 `qubit-mime`、需要通过 Magika 判断文件内容的 Rust 应用。内容对应
-`qubit-magika` 0.15，最低 Rust 版本为 1.94。crate 提供
+`qubit-magika` 0.18，最低 Rust 版本为 1.94。crate 提供
 `MagikaMimeDetector` 及可选的 `MagikaMimeDetectorProvider`，但不会替代
 `qubit-mime` 的 detector 选择机制和 MIME 策略。
 
@@ -22,7 +22,7 @@
 Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runtime session。
 同一个 detector 内部会串行化推理调用，因此可以用 `Arc` 在应用中共享它。
 
-需要链接时自动发现时，可启用 `qubit-magika = { version = "0.17", features =
+需要链接时自动发现时，可启用 `qubit-magika = { version = "0.18", features =
 ["inventory"] }`。这会将 `MagikaMimeDetectorProvider::new()` 提交给 MIME detector
 inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默认选择仍为
 `repository`。配置媒体流分类器的 Provider 仍需显式构造和注册。
@@ -40,10 +40,10 @@ inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默�
 
 ```toml
 [dependencies]
-qubit-mime = "0.20"
-qubit-magika = "0.17"
+qubit-mime = "0.21"
+qubit-magika = "0.18"
 qubit-spi = "0.14"
-qubit-fs = "0.2" # 直接调用 detect_path 时需要
+qubit-fs = "0.3" # 直接调用 detect_path 时需要
 ```
 
 默认 feature `bundled-onnxruntime` 会下载并链接默认 Magika session 所需的 ONNX
@@ -120,8 +120,12 @@ fn detect_uploaded_path(
 }
 ```
 
-如果文件系统声明支持范围读取，Magika 会请求受预算限制的窗口，并在可用时使用条件
-ETag 读取；不支持范围读取时，已知资源超过预算会在完整加载前被拒绝。
+如果支持随机读取 session，Magika 会优先打开一次，并从同一个已打开对象的多个位置采样。
+打开时报告的长度只限定可读取的偏移，并不代表内容快照。只有打开 session 时返回
+`UnsupportedOperation` 或 `UnsupportedCapability` 才会回退到旧的按路径读取路由；其他打开错误
+以及 session 读取错误都会直接传播，不会重新按路径打开。旧路由按路径逐段读取，并在支持时
+对每一段使用相同的条件 ETag；没有条件读取时，无法保证多段读取期间内容一致。`max_bytes`
+是所有采样读取共享的累计预算。不支持范围读取时，已知资源超过预算会在完整加载前被拒绝。
 `qubit-fs::read_all` 为判断是否超限，可能额外探测第 `max_bytes + 1` 个字节；
 已知长度超限时返回 `MimeError::BufferLimitExceeded`，在 `read_all` 中发现超限时
 返回 `MimeError::FileSystem`。异步版本是在
@@ -153,13 +157,14 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 ## 自定义 ONNX Runtime 配置
 
 如果应用自行提供 ONNX Runtime，可以关闭 bundled binary，并启用 `ort` 的动态加载器。
-下面的声明可以直接复制，并与 `qubit-magika 0.15` 版本保持一致：
+下面的声明可以直接复制，并与 `qubit-magika 0.18` 版本保持一致：
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.17", default-features = false }
-qubit-mime = "0.20"
+qubit-magika = { version = "0.18", default-features = false }
+qubit-mime = "0.21"
 qubit-spi = "0.14"
+qubit-fs = "0.3"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 
@@ -197,18 +202,23 @@ provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
 `MagikaMimeDetector` 还实现了 `qubit-mime` 针对 seekable reader、本地文件以及同步或
 异步 provider path 的后端操作。reader 检测结束后会恢复原来的位置；content backend
 从当前 cursor 对应的剩余资源开始检测，而通用 detector API 仍保持整份资源语义。
-Provider path 检测会累计限制范围读取的 `max_bytes`：支持范围读取时只请求受预算限制的
-窗口，并在可用时使用条件 ETag 读取；不支持范围读取时可能额外探测 1 字节以判断超限，
-并对超限资源返回错误。Magika 的 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的
-`MimeDetectionPolicy` 统一处理文件名回退。
-异步路径会先等待特征提取，再持有共享 Session 锁同步执行推理。推理和等待锁都可能占用
-异步执行器线程；需要隔离时，应由应用把检测放到阻塞工作线程或服务边界中。
+Provider path 检测优先使用随机读取 session：只打开一次，并从同一个对象的多个位置采样。
+打开时报告的长度只限定可读取偏移，不是内容快照。只有打开 session 返回
+`UnsupportedOperation` 或 `UnsupportedCapability` 才回退到旧的按路径读取；其他打开错误和
+session 读取错误直接传播，不会重新按路径打开。旧路由逐段按路径打开，并在支持时为每一段
+附带相同的条件 ETag；没有该条件就不能保证多段期间内容一致。`max_bytes` 是所有采样读取的
+累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
+`Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
+同步特征采样在模型 Session mutex 之外执行；只有推理会获取该锁，并且推理仍然串行。异步路径
+会先等待特征提取，再持有共享 Session mutex 同步执行推理。推理和等待锁都可能占用异步执行器
+线程；需要隔离时，应由应用把检测放到阻塞工作线程或服务边界中。
 
 ## 迁移指南
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
-1. 将配套依赖升级到 `qubit-mime 0.18`、`qubit-spi 0.14`，并使用 Rust 1.94。
+1. 将配套依赖升级到 `qubit-magika 0.18`、`qubit-mime 0.21`、`qubit-fs 0.3`、
+   `qubit-spi 0.14`，并使用 Rust 1.94。
 2. 保持 provider 注册和 detector 配置分离：注册
    `MagikaMimeDetectorProvider`，选择 `magika`，然后调用
    `create_configured(&MimeConfig)`。
