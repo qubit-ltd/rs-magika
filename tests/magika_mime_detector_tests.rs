@@ -30,6 +30,7 @@ use qubit_mime::MimeConfig;
 use qubit_mime::MimeContentBackend;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorAdapter;
 use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
 use tempfile::NamedTempFile;
@@ -83,6 +84,60 @@ fn test_magika_content_backend_detects_complete_input() {
         candidates
     );
     assert_eq!(reader.position(), 4);
+}
+
+#[test]
+fn test_magika_content_backend_adapter_uses_remaining_reader_window() {
+    let detector = detector();
+    let backend: &dyn MimeContentBackend = detector;
+    let adapter =
+        MimeDetectorAdapter::new(MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika"));
+    let fixture = include_bytes!("fixtures/real_files/script.py");
+    let mut bytes = b"skip".to_vec();
+    bytes.extend_from_slice(fixture);
+
+    let mut native_reader = Cursor::new(bytes.clone());
+    native_reader.set_position(4);
+    let native = backend
+        .detect_reader(&mut native_reader)
+        .expect("native content backend should detect the remaining window");
+    assert_eq!(4, native_reader.position());
+
+    let mut adapter_reader = Cursor::new(bytes);
+    adapter_reader.set_position(4);
+    let adapted = adapter
+        .detect_reader(&mut adapter_reader)
+        .expect("adapter should detect the remaining window");
+    assert_eq!(native, adapted);
+    assert_eq!(4, adapter_reader.position());
+
+    let sparse_prefix = [b"skip".as_slice(), fixture].concat();
+    let mut native_sparse = SparseReadSeek::new(1024 * 1024, sparse_prefix.clone());
+    native_sparse
+        .seek(SeekFrom::Start(4))
+        .expect("sparse reader should seek");
+    let native_sparse_result = backend
+        .detect_reader(&mut native_sparse)
+        .expect("native backend should detect sparse content");
+    assert_eq!(native_sparse_result, native);
+    assert_eq!(4, native_sparse.stream_position().expect("position should be readable"));
+
+    let mut adapter_sparse = SparseReadSeek::new(1024 * 1024, sparse_prefix);
+    adapter_sparse
+        .seek(SeekFrom::Start(4))
+        .expect("sparse reader should seek");
+    let adapted_sparse = adapter
+        .detect_reader(&mut adapter_sparse)
+        .expect("adapter hook should detect sparse content");
+    assert_eq!(native_sparse_result, adapted_sparse);
+    assert!(
+        adapter_sparse.bytes_read() <= 8 * 1024,
+        "adapter should delegate to the sampling reader hook"
+    );
+    assert_eq!(
+        4,
+        adapter_sparse.stream_position().expect("position should be readable")
+    );
 }
 
 #[test]
