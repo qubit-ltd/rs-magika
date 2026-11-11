@@ -378,7 +378,7 @@ fn test_magika_detector_reader_detection_refines_media_type() {
     raw_config
         .set(
             CONFIG_MIME_AMBIGUOUS_MIME_MAPPING,
-            "sh:text/x-shellscript,audio/x-shellscript",
+            "sh:Text/X-ShellScript,Audio/X-ShellScript",
         )
         .expect("ambiguous mapping should be configurable");
     let config = MimeConfig::from_config(&raw_config).expect("precise detector config should parse");
@@ -401,7 +401,7 @@ fn test_magika_detector_reader_detection_refines_media_type() {
     )
     .expect("reader detection should refine the MIME type");
 
-    assert_eq!(Some("audio/x-shellscript".to_owned()), detected);
+    assert_eq!(Some("Audio/X-ShellScript".to_owned()), detected);
     assert_eq!(2, reader.position());
 }
 
