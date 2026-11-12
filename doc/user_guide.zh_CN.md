@@ -154,6 +154,23 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 `MagikaMimeDetectorProvider::with_media_stream_classifier`。classifier 失败时返回
 `MimeError`；只有 classifier 成功时才会进行 refinement。
 
+## Media refinement 支持范围
+
+已配置的媒体流分类器只用于符合条件的高层输入。必须启用 precise detection，且检测到的
+MIME type 或文件名须匹配已配置的 ambiguous MIME mapping。
+
+| 检测入口 | 分类器行为 |
+| --- | --- |
+| 完整内容（`detect_by_content` / `detect`） | 可以分类完整内容 |
+| 可 seek 的 reader | 可以分类完整 reader，并恢复原游标 |
+| 本地文件 | 可以分类文件 |
+| Provider path（`detect_path` / `detect_async_path`） | 不调用分类器，包括 session、旧范围读取和 `read_all` 回退 |
+| 直接调用 `MimeContentBackend` | 返回 MIME 候选；高层选择和细化彼此独立 |
+
+在 `MagikaMimeDetectorBuilder` 或 `MagikaMimeDetectorProvider` 上配置分类器，不会使
+provider-path 检测调用它。path backend 将候选 MIME type 返回给高层 detector 选择；当前
+细化路由不会从 path backend 接收完整内容源。
+
 ## 自定义 ONNX Runtime 配置
 
 如果应用自行提供 ONNX Runtime，可以关闭 bundled binary，并启用 `ort` 的动态加载器。

@@ -21,6 +21,12 @@ use crate::magika_mime_detector::map_magika_error;
 
 /// Builder for a [`MagikaMimeDetector`].
 ///
+/// The configured media-stream classifier refines eligible high-level
+/// complete-content, reader, and local-file detections. It is not invoked by
+/// `detect_path` or `detect_async_path`, including their full-read fallback;
+/// those provider routes return Magika candidates to `qubit-mime` without
+/// media refinement.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -56,6 +62,10 @@ impl MagikaMimeDetectorBuilder {
     }
 
     /// Sets the optional classifier used for precise media refinement.
+    ///
+    /// This setting applies to eligible high-level complete-content, reader,
+    /// and local-file detections. Provider-path detection does not invoke the
+    /// classifier, even when its filesystem fallback reads the whole file.
     ///
     /// # Parameters
     ///

@@ -24,6 +24,10 @@ use crate::MagikaMimeDetector;
 
 /// Provider for [`MagikaMimeDetector`].
 ///
+/// A configured classifier is used by eligible high-level complete-content,
+/// reader, and local-file detections. `detect_path` and `detect_async_path`
+/// do not invoke it, including when those paths use a full-read fallback.
+///
 /// # Examples
 ///
 /// ```
@@ -68,6 +72,10 @@ impl MagikaMimeDetectorProvider {
     }
 
     /// Creates a provider with a classifier for precise media refinement.
+    ///
+    /// The classifier applies to eligible high-level complete-content,
+    /// reader, and local-file detections. It is not called for synchronous or
+    /// asynchronous provider-path detection.
     ///
     /// # Parameters
     ///

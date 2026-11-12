@@ -106,6 +106,26 @@ For direct construction, `MagikaMimeDetector::new()` uses
 `MagikaMimeDetector::from_mime_config` are available when the application needs
 to supply MIME configuration or a media-stream classifier.
 
+## Media Refinement Support
+
+A configured media-stream classifier is used only for eligible high-level
+inputs. Precise detection must be enabled and the detected MIME type or
+filename must match a configured ambiguous MIME mapping.
+
+| Detection entry point | Classifier behavior |
+| --- | --- |
+| Complete content (`detect_by_content` / `detect`) | May classify the complete bytes |
+| Seekable reader | May classify the full reader and restore its position |
+| Local file | May classify the file |
+| Provider path (`detect_path` / `detect_async_path`) | Not called, including session, legacy range, and `read_all` fallback routes |
+| Direct `MimeContentBackend` call | Returns MIME candidates; high-level selection and refinement are separate |
+
+Configuring a classifier on `MagikaMimeDetectorBuilder` or
+`MagikaMimeDetectorProvider` does not make provider-path detection invoke it.
+The path backend returns candidate MIME types for the higher-level detector to
+select; it does not provide the complete content source used by the current
+refinement route.
+
 ## Provider-Path Example
 
 Use `detect_path` when the bytes live behind a `qubit-fs` provider rather than a

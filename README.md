@@ -102,6 +102,22 @@ Creating a detector initializes the embedded Magika model and ONNX Runtime
 session. Create it once, share it (for example with `Arc`), and expect inference
 calls on a shared detector to be serialized internally.
 
+### Media refinement support
+
+A configured media-stream classifier refines eligible high-level inputs only:
+
+| Detection entry point | Classifier behavior |
+| --- | --- |
+| Complete content (`detect_by_content` / `detect`) | May classify the complete bytes when precise detection and a matching MIME mapping are configured |
+| Seekable reader | May classify the full reader under the same configuration |
+| Local file | May classify the file under the same configuration |
+| Provider path (`detect_path` / `detect_async_path`) | Not called, including random-access sessions, legacy range reads, and `read_all` fallback |
+| Direct `MimeContentBackend` call | Returns MIME candidates; high-level selection and refinement are not part of this backend result |
+
+Setting a classifier on the builder or provider does not enable provider-path
+media refinement. The MIME mapping and precise-detection settings must also
+match for a high-level input to be refined.
+
 Provider-path detection uses `max_bytes` as the cumulative request budget for
 Magika's byte sampling. When the filesystem supports random-access sessions,
 Magika opens once and reads each sample from that same opened object into its

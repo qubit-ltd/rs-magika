@@ -336,7 +336,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// The returned vector contains zero or more MIME candidates.
+    /// Returns zero or more MIME candidates and an empty additional-content
+    /// buffer. The higher-level detector selects a MIME type and may apply
+    /// media refinement.
     ///
     /// # Errors
     ///
@@ -358,8 +360,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// The selected MIME type, or `None` when neither source yields a
-    /// candidate.
+    /// Zero or more MIME candidates and an empty additional-content buffer.
+    /// The higher-level detector selects a MIME type and may apply media
+    /// refinement.
     ///
     /// # Errors
     ///

@@ -94,6 +94,21 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建一次并
 共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
 
+### Media refinement 支持范围
+
+已配置的媒体流分类器只会细化符合条件的高层输入：
+
+| 检测入口 | 分类器行为 |
+| --- | --- |
+| 完整内容（`detect_by_content` / `detect`） | 启用 precise detection 且 MIME 映射匹配时，可以分类完整内容 |
+| 可 seek 的 reader | 满足相同配置条件时，可以分类完整 reader |
+| 本地文件 | 满足相同配置条件时，可以分类文件 |
+| Provider path（`detect_path` / `detect_async_path`） | 不调用分类器，包括随机读取会话、旧范围读取和 `read_all` 回退 |
+| 直接调用 `MimeContentBackend` | 返回 MIME 候选；高层选择和细化不属于 backend 返回结果 |
+
+在 builder 或 Provider 上设置分类器不会启用 provider-path media refinement。高层输入还须
+匹配已配置的 MIME 映射和 precise-detection 设置，才会进行细化。
+
 Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求预算。文件系统支持随机
 读取会话时，Magika 只打开一次，并通过调用方缓冲区从同一已打开对象读取各个样本。打开时
 观察到的长度限定可读偏移，但不是内容快照。若打开返回 `UnsupportedOperation` 或
