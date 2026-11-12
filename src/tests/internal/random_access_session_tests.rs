@@ -57,6 +57,11 @@ use qubit_fs::spi::RandomAccessReadSession;
 use qubit_fs::spi::SpiFuture;
 use qubit_fs::spi::StatRequest;
 use qubit_fs::spi::StatResponse;
+use qubit_mime::MimeConfig;
+use qubit_mime::MimeDetectorBackend;
+use qubit_operation::report::SupervisorLimits;
+use qubit_operation::scope::ScopeOptions;
+use qubit_operation::supervisor::OperationSupervisor;
 
 const ID: &str = "magika-session-adapter-test";
 
@@ -73,6 +78,7 @@ struct Fixture {
     interrupt_kind: FsErrorKind,
     interrupt_pattern: Option<Vec<bool>>,
     attempts: Arc<AtomicUsize>,
+    async_read_gate: Option<Arc<TestAsyncReadGate>>,
 }
 
 impl Fixture {
@@ -89,7 +95,12 @@ impl Fixture {
             interrupt_kind: FsErrorKind::Interrupted,
             interrupt_pattern: None,
             attempts: Arc::new(AtomicUsize::new(0)),
+            async_read_gate: None,
         }
+    }
+    fn with_async_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+        self.async_read_gate = Some(gate);
+        self
     }
     fn interrupt_once(mut self, effect: Option<FsEffectState>) -> Self {
         self.interrupt_effect = Some(effect);
@@ -133,6 +144,7 @@ impl Fixture {
             interrupt_kind: self.interrupt_kind,
             interrupt_pattern: self.interrupt_pattern.clone(),
             attempts: self.attempts.clone(),
+            async_read_gate: self.async_read_gate.clone(),
         }
     }
 }
@@ -201,6 +213,37 @@ struct Session {
     interrupt_kind: FsErrorKind,
     interrupt_pattern: Option<Vec<bool>>,
     attempts: Arc<AtomicUsize>,
+    async_read_gate: Option<Arc<TestAsyncReadGate>>,
+}
+
+struct TestAsyncReadGate {
+    state: std::sync::Mutex<(bool, bool, Option<std::task::Waker>)>,
+}
+
+impl TestAsyncReadGate {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new((false, false, None)),
+        }
+    }
+
+    fn started(&self) -> bool {
+        self.state.lock().unwrap().1
+    }
+
+    async fn wait(&self) {
+        std::future::poll_fn(|cx| {
+            let mut state = self.state.lock().unwrap();
+            state.1 = true;
+            if state.0 {
+                Poll::Ready(())
+            } else {
+                state.2 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -233,7 +276,13 @@ impl RandomAccessReadSession for Session {
 }
 impl AsyncRandomAccessReadSession for Session {
     fn read_at_async<'a>(self: Pin<&'a mut Self>, offset: u64, output: &'a mut [u8]) -> SpiFuture<'a, FsResult<usize>> {
-        Box::pin(async move { self.get_mut().read_at(offset, output) })
+        Box::pin(async move {
+            let this = self.get_mut();
+            if let Some(gate) = this.async_read_gate.clone() {
+                gate.wait().await;
+            }
+            this.read_at(offset, output)
+        })
     }
 }
 
@@ -245,7 +294,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
     let waker = std::task::Waker::from(Arc::clone(&wake));
     let mut context = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(value) => return value,
@@ -325,6 +374,191 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
 }
 
 #[test]
+fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2));
+    let expected = b"sample".to_vec();
+    let engine = Box::new(move |bytes: Vec<u8>| {
+        assert_eq!(expected, bytes);
+        Ok(Some("application/x-fixture".to_owned()))
+    });
+    let max_in_flight = MimeConfig::default().max_buffer_size();
+    let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        max_in_flight,
+        engine,
+        Box::new(|| {}),
+    ));
+    let detector = Arc::new(
+        crate::MagikaMimeDetector::builder()
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .unwrap(),
+    );
+    let heartbeats = Arc::new(AtomicUsize::new(0));
+    let body_detector = Arc::clone(&detector);
+    let body_heartbeats = Arc::clone(&heartbeats);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
+            let path = Path::parse("/bridge/sample").unwrap();
+            let mut detection =
+                Box::pin(body_detector.detect_async_provider_path_managed(&scope, &file_system, &path, 6));
+            let result = std::future::poll_fn(|cx| {
+                body_heartbeats.fetch_add(1, Ordering::SeqCst);
+                cx.waker().wake_by_ref();
+                detection.as_mut().poll(cx)
+            })
+            .await
+            .unwrap();
+            assert_eq!(Some("application/x-fixture".to_owned()), result);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+    assert!(matches!(
+        handle.result_blocking().unwrap(),
+        qubit_operation::report::OperationOutcome::Succeeded(())
+    ));
+    assert!(heartbeats.load(Ordering::SeqCst) > 1);
+    let report = detector.shutdown_blocking(
+        qubit_operation::supervisor::ShutdownMode::Drain,
+        Duration::from_secs(30),
+    );
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2));
+    let expected = b"sample".to_vec();
+    let engine_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let worker_gate = Arc::clone(&engine_gate);
+    let engine = Box::new(move |bytes: Vec<u8>| {
+        assert_eq!(expected, bytes);
+        let (released, changed) = &*worker_gate;
+        let mut released = released.lock().unwrap();
+        while !*released {
+            released = changed.wait(released).unwrap();
+        }
+        Ok(Some("application/x-fixture".to_owned()))
+    });
+    let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
+        supervisor,
+        MimeConfig::default().max_buffer_size(),
+        engine,
+        Box::new(|| {}),
+    ));
+    let detector = crate::MagikaMimeDetector::builder()
+        .managed_runtime(runtime)
+        .build()
+        .unwrap();
+    let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
+    let path = Path::parse("/bridge/legacy").unwrap();
+    let heartbeats = AtomicUsize::new(0);
+    let poll_gate = Arc::clone(&engine_gate);
+    let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
+        &detector,
+        &file_system,
+        &path,
+        6,
+    ));
+    let candidates = block_on(std::future::poll_fn(|cx| {
+        if heartbeats.fetch_add(1, Ordering::SeqCst) > 0 {
+            let (released, changed) = &*poll_gate;
+            *released.lock().unwrap() = true;
+            changed.notify_one();
+        }
+        cx.waker().wake_by_ref();
+        detection.as_mut().poll(cx)
+    }))
+    .unwrap()
+    .0;
+    assert_eq!(vec!["application/x-fixture"], candidates);
+    assert!(heartbeats.load(Ordering::SeqCst) > 1);
+}
+
+#[test]
+fn test_dropping_managed_provider_driver_wakes_worker_and_delays_release_until_exit() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let provider_gate = Arc::new(TestAsyncReadGate::new());
+    let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2)).with_async_read_gate(Arc::clone(&provider_gate));
+    let (worker_held_tx, worker_held_rx) = std::sync::mpsc::channel();
+    let release_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let after_business_gate = Arc::clone(&release_gate);
+    let engine = Box::new(|_bytes: Vec<u8>| Ok(Some("application/x-fixture".to_owned())));
+    let max_in_flight = MimeConfig::default().max_buffer_size();
+    let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        max_in_flight,
+        engine,
+        Box::new(move || {
+            worker_held_tx.send(()).unwrap();
+            let (lock, ready) = &*after_business_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }),
+    ));
+    let detector = Arc::new(
+        crate::MagikaMimeDetector::builder()
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .unwrap(),
+    );
+    let body_detector = Arc::clone(&detector);
+    let body_gate = Arc::clone(&provider_gate);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
+            let path = Path::parse("/bridge/cancel").unwrap();
+            let mut detection = Some(Box::pin(body_detector.detect_async_provider_path_managed(
+                &scope,
+                &file_system,
+                &path,
+                6,
+            )));
+            std::future::poll_fn(|cx| {
+                if let Some(future) = detection.as_mut()
+                    && future.as_mut().poll(cx).is_ready()
+                {
+                    panic!("provider gate should keep managed detection pending");
+                }
+                if body_gate.started() {
+                    detection.take();
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+    worker_held_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    let _terminal = handle.result_blocking().unwrap();
+    let observer = handle.observer();
+    let (released_tx, released_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        released_tx.send(observer.released_blocking().unwrap()).unwrap();
+    });
+    assert!(released_rx.recv_timeout(Duration::from_millis(30)).is_err());
+    let (lock, ready) = &*release_gate;
+    *lock.lock().unwrap() = true;
+    ready.notify_all();
+    assert!(released_rx.recv_timeout(Duration::from_secs(30)).unwrap().all_released);
+    let report = detector.shutdown_blocking(
+        qubit_operation::supervisor::ShutdownMode::Drain,
+        Duration::from_secs(30),
+    );
+    assert!(report.worker_stopped);
+}
+
+#[test]
 fn test_sync_session_retries_unchanged_interruption_at_same_range() {
     let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_once(Some(FsEffectState::Unchanged));
     let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
@@ -351,13 +585,19 @@ fn test_sync_session_allows_eight_consecutive_safe_interruptions() {
     let reader = filesystem
         .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
         .unwrap();
-    let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
+    let mut input = crate::internal::SyncProviderInput::from_session(reader, 1, None);
     let mut output = [0; 1];
 
     SyncInput::read_at(&mut input, &mut output, 3).unwrap();
 
     assert_eq!(*b"d", output);
     assert_eq!(9, fixture.attempts.load(Ordering::SeqCst));
+    assert!(SyncInput::read_at(&mut input, &mut [0; 1], 3).is_err());
+    assert_eq!(
+        9,
+        fixture.attempts.load(Ordering::SeqCst),
+        "overlapping logical request must reserve budget again before I/O"
+    );
 }
 
 #[test]
@@ -463,13 +703,19 @@ fn test_async_session_allows_eight_consecutive_safe_interruptions() {
     let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
     let reader =
         block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
-    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, None);
+    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 1, None);
     let mut output = [0; 1];
 
     block_on(AsyncInput::read_at(&mut input, &mut output, 3)).unwrap();
 
     assert_eq!(*b"d", output);
     assert_eq!(9, fixture.attempts.load(Ordering::SeqCst));
+    assert!(block_on(AsyncInput::read_at(&mut input, &mut [0; 1], 3)).is_err());
+    assert_eq!(
+        9,
+        fixture.attempts.load(Ordering::SeqCst),
+        "overlapping logical request must reserve budget again before I/O"
+    );
 }
 
 #[test]

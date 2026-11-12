@@ -139,7 +139,7 @@ Media refinement 是可选的。例如，内置的 ffprobe classifier 可以区�
 ```rust
 use std::sync::Arc;
 
-use qubit_magika::MagikaMimeDetector;
+use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};
 use qubit_mime::FfprobeCommandMediaStreamClassifier;
 
 fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
@@ -207,9 +207,10 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
 系统加载器找到。`ort::init_from` 必须早于第一个 detector（或其他 `ort` API）调用；
 该环境是进程级全局状态，只能 commit 一次。
 
-仓库的 Linux CI 使用 ONNX Runtime 1.24.2 验证这条动态加载路径：先初始化共享库，
-再创建 detector，并确认 Python 内容识别为 `text/x-python`。`ORT_LIBRARY_PATH` 必须
-指向共享库文件本身，而不是所在目录。
+仓库 Linux CI 的[`dynamic-loader` job](../.github/workflows/ci.yml)使用 ONNX Runtime
+1.24.2 验证这条动态加载路径：先初始化共享库，再创建 detector，并确认 Python 内容识别为
+`text/x-python`。该 job 还检查 Cargo feature 图，确认未启用 bundled runtime 下载。
+`ORT_LIBRARY_PATH` 必须指向共享库文件本身，而不是所在目录。
 
 ## 进阶用法
 
@@ -226,11 +227,77 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 附带相同的条件 ETag；没有该条件就不能保证多段期间内容一致。`max_bytes` 是所有采样读取的
 累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
-同步特征采样在模型 Session mutex 之外执行；只有推理会获取该锁，并且推理仍然串行。异步路径
-会先等待特征提取，再持有共享 Session mutex 同步执行推理。推理和等待锁都可能占用异步执行器
-线程；需要隔离时，应由应用把检测放到阻塞工作线程或服务边界中。
+一个 worker 独占 Magika Session，并串行执行采样和推理。异步 Provider route 通过容量为 1
+的范围读取 bridge 与 worker 协作：调用方 future 异步读取 Provider，Magika 采样和推理仍在
+worker 上完成。managed provider API 会把工作附加到显式 operation scope。旧 MIME trait hooks
+使用同一 worker bridge，但上游 hook 没有 scope 参数，因此不能附加 parent scope。
 
 ## 迁移指南
+
+### 带 Operation scope 的异步 Provider 请求
+
+如果应用需要把异步 Provider 采样纳入 `qubit-operation` 的取消和释放观察，可使用
+`detect_async_provider_path_managed`。启动时共享一个 supervisor 和 detector，再把每个
+请求的 scope 显式传入：
+
+```rust,no_run
+use std::sync::Arc;
+use std::time::Duration;
+
+use qubit_fs::{AsyncFileSystem, Path};
+use qubit_magika::MagikaMimeDetector;
+use qubit_operation::report::SupervisorLimits;
+use qubit_operation::scope::ScopeOptions;
+use qubit_operation::supervisor::{OperationSupervisor, ShutdownMode};
+
+fn prepare_detector() -> qubit_mime::MimeResult<(OperationSupervisor, Arc<MagikaMimeDetector>)> {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(ManagedInferenceRuntime::new(
+        supervisor.clone(),
+        config.max_buffer_size(),
+    )?);
+    let detector = Arc::new(
+        MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()?,
+    );
+    Ok((supervisor, detector))
+}
+
+async fn detect_request(
+    supervisor: &OperationSupervisor,
+    detector: Arc<MagikaMimeDetector>,
+    file_system: Arc<AsyncFileSystem>,
+    path: Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let service = supervisor.service_group(4)?;
+    let request_detector = Arc::clone(&detector);
+    let mut request = service.start(ScopeOptions::default(), move |scope| async move {
+        request_detector
+            .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
+            .await
+    })?;
+    let _outcome = request.result_blocking()?;
+    let _settlement = request.released_blocking()?;
+    let _request_group_shutdown = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+    let shutdown = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    assert!(shutdown.worker_stopped);
+    let _supervisor_shutdown = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    Ok(())
+}
+```
+
+真实应用应让 detector 和 supervisor 覆盖整个应用生命周期；只有在停止接收新请求后才
+调用 shutdown。`max_bytes` 是单次采样的累计读取预算，也会占用 runtime 共享的在途字节
+预算。运行时构造时会创建 session-owning worker 并等待 Magika Session 初始化完成，因此
+当前没有额外的 `prepare()` API；builder 的 `build()` 就是准备阶段。采样工作在 worker
+上运行，async operation future 负责服务范围读取，不会阻塞执行器线程。
+
+旧版 `MimeDetector` hooks 仍可供不管理 operation scope 的调用方使用。当前上游 trait 不
+传递 parent scope，因此旧 hooks 无法提供 parent-scope cancellation 或 release 观察。迁移时，
+需要该保证的 async provider 调用应改为显式调用 managed API。
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
@@ -275,8 +342,8 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 - 创建 detector 会初始化模型和 runtime；应创建一个 detector 并共享，不要为每个
   输入重复创建。
 - 同一个 detector 上的推理会在内部串行执行。
-- 异步 provider path 不会自动把模型推理转移到专用阻塞执行器；应用需要结合自己的
-  runtime 和 worker 配置评估线程占用。
+- 旧 `MimeDetector` provider hooks 不提供 parent-scope 生命周期观察；需要把取消和释放
+  跟踪关联到请求 scope 时，应使用 managed provider API。
 - `qubit-magika` 不保证每个输入都有 MIME 结果；调用方必须处理 `Ok(None)` 和
   `MimeError`。
 - 本 crate 暴露 Magika 映射后的 MIME 结果，不另行定义 MIME registry，也不替代

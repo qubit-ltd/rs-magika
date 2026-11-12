@@ -16,8 +16,8 @@
 本 crate 默认启用 `bundled-onnxruntime`，普通构建无需单独安装 ONNX Runtime 即可
 链接和运行。应用也可以关闭默认 feature，自行提供兼容的 ONNX Runtime 共享库。使用
 `ort` 动态加载器时，须先调用 `ort::init_from` 初始化共享库，再创建 detector。
-Linux CI 会用这套配置对 Python 内容实际执行一次推理；依赖和启动示例见
-[用户手册](doc/user_guide.zh_CN.md)。
+Linux CI 的 [`dynamic-loader` job](.github/workflows/ci.yml) 会用这套配置对
+Python 内容实际执行一次推理；依赖和启动示例见[用户手册](doc/user_guide.zh_CN.md)。
 
 ## 安装
 
@@ -82,6 +82,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 `MagikaMimeDetector` 的文件名检测委托给
 `qubit_mime::RepositoryMimeDetector`。内容、reader 和文件检测使用 Magika 推理，
 再返回 Magika 映射出的 MIME type。
+
+### 带 Operation scope 的异步 Provider 检测
+
+需要对异步 Provider 采样进行取消和资源释放跟踪的应用，可在 operation scope 中调用
+`MagikaMimeDetector::detect_async_provider_path_managed`。应用启动时创建并共享一个
+supervisor 和 detector；每个受管请求显式传入 scope；应用关闭前 drain detector。旧版
+`MimeDetector` hooks 不接收 operation scope，仍遵循原有契约。
 
 Provider 选择和 detector 配置是两个独立输入：`ProviderSelection` 决定允许哪个已注册
 Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的 detector 实例。

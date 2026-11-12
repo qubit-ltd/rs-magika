@@ -24,7 +24,12 @@ use qubit_fs_local::LocalFileSystems;
 use qubit_fs_local::LocalResourcePolicy;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
+use qubit_operation::report::SupervisorLimits;
+use qubit_operation::scope::ScopeOptions;
+use qubit_operation::supervisor::OperationSupervisor;
+use qubit_operation::supervisor::ShutdownMode;
 
 use crate::support::AsyncProviderGate;
 use crate::support::AsyncProviderGatePoint;
@@ -46,6 +51,75 @@ fn large_provider(range: bool) -> ProviderFileSystemSpi {
     } else {
         provider.without_range().logical(32 * 1024 * 1024)
     }
+}
+
+#[test]
+fn test_managed_provider_session_api_classifies_and_settles_worker() {
+    let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let file_system = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .async_file_system();
+    let fallback_file_system = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .without_stat()
+        .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation)
+        .async_file_system();
+    let body_detector = Arc::clone(&detector);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let rejected = body_detector
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &file_system,
+                    &path("/managed/oversize.py"),
+                    body_detector.max_buffer_size() + 1,
+                )
+                .await;
+            assert!(rejected.is_err());
+            let session_result = body_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/managed/python.py"), 4096)
+                .await
+                .map(|mime| mime.expect("Python sample should be classified"))?;
+            let fallback_result = body_detector
+                .detect_async_provider_path_managed(&scope, &fallback_file_system, &path("/managed/fallback.py"), 4096)
+                .await
+                .map(|mime| mime.expect("fallback Python sample should be classified"))?;
+            Ok::<_, MimeError>((session_result, fallback_result))
+        })
+        .unwrap();
+    assert!(matches!(
+        handle.result_blocking().unwrap(),
+        qubit_operation::report::OperationOutcome::Succeeded((session_mime, fallback_mime))
+            if session_mime == "text/x-python" && fallback_mime == "text/x-python"
+    ));
+    assert!(handle.observer().released_blocking().unwrap().all_released);
+    let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_sync_provider_backend_uses_session_range_and_full_read_routes() {
+    let detector = qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize");
+    let routes = [
+        ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation),
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .without_stat()
+            .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation),
+    ];
+    for provider in routes {
+        let file_system = provider.file_system();
+        let (candidates, returned_bytes) =
+            MimeDetectorBackend::guess_from_provider_path(&detector, &file_system, &path("/managed/sync.py"), 4096)
+                .expect("sync provider route should classify the Python sample");
+        assert_eq!(vec!["text/x-python"], candidates);
+        assert!(returned_bytes.is_none());
+    }
+    let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(report.worker_stopped);
 }
 
 #[test]

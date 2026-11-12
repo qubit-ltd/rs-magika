@@ -5,20 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Magika-backed MIME detector implementation.
+//! Magika-backed MIME detector implementation with a session-owning worker.
 
 use std::future::Future;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Mutex;
-use std::sync::PoisonError;
 
 use magika::ContentType;
 use magika::Error;
 use magika::FeaturesOrRuled;
 use magika::FileType;
-use magika::Session;
 use magika::SyncInput;
 use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
@@ -35,22 +32,26 @@ use qubit_mime::MimeDetectorCore;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
+use qubit_operation::scope::OperationScope;
+use qubit_operation::supervisor::ShutdownMode;
 
 use crate::internal::AsyncProviderInput;
 use crate::internal::ReadSeekInput;
 use crate::internal::ReaderScope;
 use crate::internal::SyncProviderInput;
 use crate::internal::map_provider_magika_error;
+use crate::managed_runtime::ManagedInferenceRuntime;
+use crate::managed_runtime::ManagedInferenceShutdownReport;
 
-/// Blocking MIME detector backed by Google's Magika model.
+/// MIME detector backed by Google's Magika model.
 ///
 /// Construction initializes Magika's embedded model and ONNX Runtime session,
 /// so applications should create the detector once and share it, for example
-/// through [`std::sync::Arc`]. Inference methods are blocking. Because Magika
-/// requires mutable access to its session, concurrent inference calls on one
-/// detector are serialized by an internal mutex. Input sampling and feature
-/// extraction happen outside that mutex; rule-classified inputs do not need
-/// the session. Sampling and waiting for inference are blocking operations.
+/// through [`std::sync::Arc`]. One worker owns the Magika session and
+/// serializes model inference. Synchronous MIME methods wait for worker
+/// results; async provider methods service bounded worker range requests
+/// without blocking their executor. The operation-aware provider method
+/// additionally registers sampling and inference in an explicit scope.
 ///
 /// # Examples
 ///
@@ -71,9 +72,8 @@ pub struct MagikaMimeDetector {
     pub(crate) core: MimeDetectorCore,
     /// Repository detector used for filename-only detection.
     pub(crate) filename_detector: RepositoryMimeDetector<'static>,
-    /// Magika session. The upstream API needs `&mut Session`, so access is
-    /// serialized.
-    pub(crate) session: Mutex<Session>,
+    /// Shared bounded runtime whose worker owns the Magika session.
+    pub(crate) runtime: std::sync::Arc<ManagedInferenceRuntime>,
 }
 
 impl MagikaMimeDetector {
@@ -126,6 +126,143 @@ impl MagikaMimeDetector {
         Self::builder().mime_config(config).build()
     }
 
+    /// Detect owned bytes as a child operation of `scope`.
+    ///
+    /// The scope observes result delivery and worker release separately. The
+    /// existing `MimeDetector` async hooks do not receive a scope and do not
+    /// carry this managed lifecycle guarantee.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Parent scope tracking result and worker release.
+    /// * `content` - Owned bytes retained until sampling and inference finish.
+    ///
+    /// # Returns
+    ///
+    /// A MIME mapping or `None` for an unmapped Magika type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an admission, size-limit, Magika, or worker error.
+    pub async fn detect_bytes_managed(&self, scope: &OperationScope, content: Vec<u8>) -> MimeResult<Option<String>> {
+        self.runtime.detect_bytes(scope, content).await
+    }
+
+    /// Detects an async provider path as a child of `scope`, extracting
+    /// Magika samples on the managed worker through bounded range requests.
+    ///
+    /// This explicit API owns an operation scope. The legacy MIME trait hook
+    /// remains scope-less because its upstream contract does not pass one.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Parent operation scope for cancellation and settlement.
+    /// * `file_system` - Async provider serving bounded range reads.
+    /// * `path` - Provider path used to open or read the resource.
+    /// * `max_bytes` - Cumulative sample and fallback read limit.
+    ///
+    /// # Returns
+    ///
+    /// A MIME mapping or `None` for an unmapped Magika type.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider, size-limit, admission, Magika, or worker errors.
+    pub async fn detect_async_provider_path_managed(
+        &self,
+        scope: &OperationScope,
+        file_system: &AsyncFileSystem,
+        path: &FsPath,
+        max_bytes: usize,
+    ) -> MimeResult<Option<String>> {
+        let limit = self.max_test_bytes();
+        if max_bytes > limit {
+            return Err(MimeError::BufferLimitExceeded {
+                requested: max_bytes,
+                limit,
+            });
+        }
+        match file_system
+            .open_random_access_reader(path, ReadOptions::default())
+            .await
+        {
+            Ok(reader) => {
+                let max_segment = file_system
+                    .properties()
+                    .limits()
+                    .max_read_range_bytes()
+                    .maximum()
+                    .and_then(|value| usize::try_from(value).ok());
+                let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
+                return self
+                    .runtime
+                    .detect_async_input_mapped(Some(scope), input, max_bytes, map_provider_magika_error)
+                    .await;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let metadata = match file_system.stat(path).await {
+            Ok(metadata) => Some(metadata),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
+                ) =>
+            {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let capabilities = file_system.properties().capabilities();
+        if let Some(metadata) = metadata.as_ref()
+            && let Some(length) = metadata.len()
+        {
+            if capabilities.supports(FileSystemCapability::RangeRead) {
+                let version = capabilities
+                    .supports(FileSystemCapability::ConditionalRead)
+                    .then(|| metadata.etag().cloned())
+                    .flatten();
+                let input = AsyncProviderInput::new(file_system, path, length, version, max_bytes);
+                return self
+                    .runtime
+                    .detect_async_input_mapped(Some(scope), input, max_bytes, map_provider_magika_error)
+                    .await;
+            }
+            if length > max_bytes as u64 {
+                return Err(MimeError::BufferLimitExceeded {
+                    requested: usize::try_from(length).unwrap_or(usize::MAX),
+                    limit: max_bytes,
+                });
+            }
+        }
+        let bytes = file_system.read_all(path, ReadOptions::default(), max_bytes).await?;
+        self.detect_bytes_managed(scope, bytes.as_slice().to_vec()).await
+    }
+
+    /// Stops managed inference admission and observes pending worker jobs.
+    ///
+    /// # Parameters
+    ///
+    /// * `mode` - Drain accepted requests or request cooperative cancellation.
+    /// * `timeout` - Maximum wait for child settlement and worker exit.
+    ///
+    /// # Returns
+    ///
+    /// Reports whether all admission and worker resources have stopped.
+    pub fn shutdown_blocking(
+        &self,
+        mode: ShutdownMode,
+        timeout: std::time::Duration,
+    ) -> ManagedInferenceShutdownReport {
+        self.runtime.shutdown_blocking(mode, timeout)
+    }
+
     /// Gets filename candidates from the repository detector.
     ///
     /// # Parameters
@@ -143,8 +280,8 @@ impl MagikaMimeDetector {
     /// Gets content candidates from a Magika-compatible synchronous input.
     ///
     /// `I` is any input implementing [`SyncInput`]. Sampling and feature
-    /// extraction do not hold the shared Magika session lock; model inference
-    /// is serialized. Rule-classified inputs do not require the session.
+    /// extraction run in the calling sync path; model inference is serialized
+    /// by the shared worker. Rule-classified inputs do not use the session.
     ///
     /// # Type Parameters
     ///
@@ -162,8 +299,7 @@ impl MagikaMimeDetector {
     /// # Errors
     ///
     /// Returns [`MimeError::Io`] for input I/O failures or
-    /// [`MimeError::DetectorBackend`] when inference fails or the session lock
-    /// is poisoned.
+    /// [`MimeError::DetectorBackend`] when inference fails.
     fn guess_from_magika_input<I>(&self, input: I) -> MimeResult<Vec<String>>
     where
         I: SyncInput,
@@ -175,12 +311,12 @@ impl MagikaMimeDetector {
     /// Maps ruled classifications directly and serializes only model inference.
     ///
     /// The supplied mapper preserves the error contract of the input route that
-    /// extracted the features. Ruled results do not acquire the session lock.
+    /// extracted the features. Ruled results do not acquire the worker session.
     ///
     /// # Parameters
     ///
     /// * `extracted` - Rules result or features extracted without holding the
-    ///   session lock.
+    ///   session worker.
     /// * `map_error` - Converts upstream inference errors for the originating
     ///   route.
     ///
@@ -190,8 +326,7 @@ impl MagikaMimeDetector {
     ///
     /// # Errors
     ///
-    /// Returns a backend error if the session lock is poisoned or inference
-    /// fails.
+    /// Returns a backend error if inference fails.
     fn guess_from_extracted(
         &self,
         extracted: FeaturesOrRuled,
@@ -199,15 +334,11 @@ impl MagikaMimeDetector {
     ) -> MimeResult<Vec<String>> {
         match extracted {
             FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type).into_iter().collect()),
-            FeaturesOrRuled::Features(features) => {
-                let mut session = self.session.lock().map_err(map_session_lock_error)?;
-                let file_type = session.identify_features_sync(&features).map_err(map_error)?;
-                Ok(file_type
-                    .content_type()
-                    .and_then(content_type_to_mime)
-                    .into_iter()
-                    .collect())
-            }
+            FeaturesOrRuled::Features(features) => Ok(self
+                .runtime
+                .identify_features_blocking(features, map_error)?
+                .into_iter()
+                .collect()),
         }
     }
 
@@ -224,8 +355,7 @@ impl MagikaMimeDetector {
     /// # Errors
     ///
     /// Returns [`MimeError::Io`] for file metadata/read failures, or
-    /// [`MimeError::DetectorBackend`] when inference fails or the session lock
-    /// is poisoned.
+    /// [`MimeError::DetectorBackend`] when inference fails.
     fn guess_from_magika_file(&self, file: &Path) -> MimeResult<Vec<String>> {
         let metadata = std::fs::symlink_metadata(file)?;
         let file_type = if metadata.file_type().is_symlink() {
@@ -257,7 +387,7 @@ impl MagikaMimeDetector {
     ///
     /// Returns [`MimeError::Io`] when seeking or reading fails, or
     /// [`MimeError::DetectorBackend`] when Magika inference fails or the
-    /// session lock is poisoned.
+    /// worker inference fails.
     fn guess_from_reader_with_scope(&self, reader: &mut dyn ReadSeek, scope: ReaderScope) -> MimeResult<Vec<String>> {
         let original_position = reader.stream_position()?;
         let result = (|| {
@@ -344,7 +474,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// Returns [`MimeError::Io`] when reading, seeking, or restoring the reader
     /// fails, or [`MimeError::DetectorBackend`] when Magika inference fails or
-    /// the session lock is poisoned.
+    /// worker inference fails.
     fn guess_from_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<(Vec<String>, Vec<u8>)> {
         Ok((
             self.guess_from_reader_with_scope(reader, ReaderScope::WholeResource)?,
@@ -368,7 +498,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// Returns [`MimeError::Io`] when file metadata or content cannot be read,
     /// or [`MimeError::DetectorBackend`] when Magika inference fails or the
-    /// session lock is poisoned.
+    /// worker inference fails.
     fn guess_from_file(&self, file: &Path) -> MimeResult<(Vec<String>, Vec<u8>)> {
         Ok((self.guess_from_magika_file(file)?, Vec::new()))
     }
@@ -498,7 +628,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                         .maximum()
                         .and_then(|value| usize::try_from(value).ok());
                     let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
-                    let candidates = guess_from_async_input(self, input).await?;
+                    let candidates = guess_from_async_input(self, input, max_bytes).await?;
                     return Ok((candidates, None));
                 }
                 Err(error)
@@ -530,7 +660,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                         .then(|| metadata.etag().cloned())
                         .flatten();
                     let input = AsyncProviderInput::new(file_system, path, length, version, max_bytes);
-                    let candidates = guess_from_async_input(self, input).await?;
+                    let candidates = guess_from_async_input(self, input, max_bytes).await?;
                     return Ok((candidates, None));
                 }
                 let requested = usize::try_from(length).unwrap_or(usize::MAX);
@@ -542,7 +672,12 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 }
             }
             let bytes = file_system.read_all(path, ReadOptions::default(), max_bytes).await?;
-            let candidates = self.guess_from_magika_input(bytes.as_slice())?;
+            let candidates = self
+                .runtime
+                .detect_bytes_unmanaged(bytes.as_slice().to_vec())
+                .await?
+                .into_iter()
+                .collect();
             Ok((candidates, None))
         })
     }
@@ -550,12 +685,12 @@ impl MimeDetectorBackend for MagikaMimeDetector {
 
 /// Extracts features through asynchronous provider reads, then runs inference.
 ///
-/// Session locking and inference remain synchronous after feature extraction;
-/// provider errors and poisoned locks are returned as `MimeError`.
+/// Feature extraction is asynchronous; model inference is delegated to the
+/// detector's session-owning worker.
 ///
 /// # Parameters
 ///
-/// * `detector` - Detector whose session performs model inference.
+/// * `detector` - Detector whose managed runtime performs model inference.
 /// * `input` - Asynchronous provider input to sample.
 ///
 /// # Returns
@@ -564,16 +699,18 @@ impl MimeDetectorBackend for MagikaMimeDetector {
 ///
 /// # Errors
 ///
-/// Returns I/O, budget, backend, or poisoned-session errors from sampling and
-/// inference.
+/// Returns I/O, budget, or backend errors from sampling and inference.
 async fn guess_from_async_input(
     detector: &MagikaMimeDetector,
     input: AsyncProviderInput<'_>,
+    max_bytes: usize,
 ) -> MimeResult<Vec<String>> {
-    let file_type = FeaturesOrRuled::extract_async(input)
-        .await
-        .map_err(map_provider_magika_error)?;
-    detector.guess_from_extracted(file_type, map_provider_magika_error)
+    Ok(detector
+        .runtime
+        .detect_async_input_mapped(None, input, max_bytes, map_provider_magika_error)
+        .await?
+        .into_iter()
+        .collect())
 }
 
 /// Converts a Magika content type to a MIME type name.
@@ -586,7 +723,7 @@ async fn guess_from_async_input(
 ///
 /// MIME type name, or `None` for unknown, undefined, or empty MIME mappings.
 #[inline]
-fn content_type_to_mime(content_type: ContentType) -> Option<String> {
+pub(crate) fn content_type_to_mime(content_type: ContentType) -> Option<String> {
     owned_mime_type(content_type_mime_name(content_type))
 }
 
@@ -622,24 +759,6 @@ fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
 /// An owned, nonempty MIME name, or `None` when the name is absent or empty.
 fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
     mime_type.filter(|mime_type| !mime_type.is_empty()).map(str::to_owned)
-}
-
-/// Converts a poisoned Magika session lock to a MIME error.
-///
-/// # Parameters
-///
-/// * `error` - Poisoned lock error returned by [`Mutex::lock`].
-///
-/// # Type Parameters
-///
-/// * `T` - Guard type stored inside the poisoned lock error.
-///
-/// # Returns
-///
-/// MIME detector backend error carrying the lock poisoning context.
-#[inline]
-fn map_session_lock_error<T>(error: PoisonError<T>) -> MimeError {
-    MimeError::detector_backend("magika", format!("session lock poisoned: {error}"))
 }
 
 /// Converts a Magika error to a MIME error.
@@ -699,10 +818,8 @@ impl MimeContentBackend for MagikaMimeDetector {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
     use std::io::Cursor;
     use std::io::Write;
-    use std::sync::Arc;
 
     use magika::ContentType;
     use magika::Error;
@@ -719,27 +836,19 @@ mod tests {
     use super::MagikaMimeDetector;
     use super::content_type_to_mime;
 
-    struct LockCheckingInput {
-        detector: Arc<MagikaMimeDetector>,
+    struct CallerThreadInput {
+        caller_thread: std::thread::ThreadId,
         bytes: &'static [u8],
     }
 
-    impl SyncInput for LockCheckingInput {
+    impl SyncInput for CallerThreadInput {
         fn length(&self) -> magika::Result<u64> {
-            let _guard = self
-                .detector
-                .session
-                .try_lock()
-                .map_err(|_| magika::Error::IOError(io::Error::other("session lock held during input length")))?;
+            assert_eq!(self.caller_thread, std::thread::current().id());
             Ok(self.bytes.len() as u64)
         }
 
         fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> magika::Result<()> {
-            let _guard = self
-                .detector
-                .session
-                .try_lock()
-                .map_err(|_| magika::Error::IOError(io::Error::other("session lock held during input read")))?;
+            assert_eq!(self.caller_thread, std::thread::current().id());
             let start = usize::try_from(offset).expect("test offset fits usize");
             buffer.copy_from_slice(&self.bytes[start..start + buffer.len()]);
             Ok(())
@@ -863,42 +972,18 @@ mod tests {
     }
 
     #[test]
-    fn test_poisoned_session_errors_map_to_backend_errors() {
-        let detector =
-            std::sync::Arc::new(MagikaMimeDetector::new().expect("detector should initialize for lock test"));
-        let poisoned = std::sync::Arc::clone(&detector);
-        std::thread::spawn(move || {
-            let _guard = poisoned.session.lock().expect("session lock should be available");
-            panic!("poison session lock");
-        })
-        .join()
-        .expect_err("thread should poison the lock");
-        let mapped = detector
-            .guess_from_magika_input(&include_bytes!("../tests/fixtures/real_files/script.py")[..])
-            .expect_err("poisoned session should fail detection");
-        assert!(matches!(mapped, MimeError::DetectorBackend { .. }));
-    }
-
-    #[test]
-    fn test_sync_sampling_leaves_session_lock_available() {
-        let detector = Arc::new(MagikaMimeDetector::new().expect("detector should initialize"));
-        let input = LockCheckingInput {
-            detector: Arc::clone(&detector),
+    fn test_sync_sampling_runs_on_calling_thread_before_worker_inference() {
+        let detector = MagikaMimeDetector::new().expect("detector should initialize");
+        let input = CallerThreadInput {
+            caller_thread: std::thread::current().id(),
             bytes: b"#!/usr/bin/env python3\nprint('ok')\n",
         };
         assert_eq!(vec!["text/x-python"], detector.guess_from_magika_input(input).unwrap());
     }
 
     #[test]
-    fn test_ruled_sync_input_succeeds_with_poisoned_session() {
-        let detector = Arc::new(MagikaMimeDetector::new().expect("detector should initialize"));
-        let poisoned = Arc::clone(&detector);
-        std::thread::spawn(move || {
-            let _guard = poisoned.session.lock().unwrap();
-            panic!("poison session lock");
-        })
-        .join()
-        .expect_err("thread should poison the lock");
+    fn test_ruled_sync_input_bypasses_session_worker() {
+        let detector = MagikaMimeDetector::new().expect("detector should initialize");
         assert_eq!(
             content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
             detector.guess_from_magika_input(&b""[..]).unwrap()

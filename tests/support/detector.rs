@@ -10,13 +10,21 @@ use std::sync::OnceLock;
 
 use qubit_magika::MagikaMimeDetector;
 
-/// Returns the shared detector used by inference tests.
+/// Returns the thread-local detector used by inference tests.
 ///
 /// # Returns
 ///
-/// A detector initialized once with the bundled ONNX Runtime.
+/// A detector initialized once per test thread with the bundled ONNX Runtime.
 #[must_use]
 pub(crate) fn detector() -> &'static MagikaMimeDetector {
-    static DETECTOR: OnceLock<MagikaMimeDetector> = OnceLock::new();
-    DETECTOR.get_or_init(|| MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika"))
+    thread_local! {
+        static DETECTOR: OnceLock<&'static MagikaMimeDetector> = const { OnceLock::new() };
+    }
+    DETECTOR.with(|detector| {
+        *detector.get_or_init(|| {
+            Box::leak(Box::new(
+                MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika"),
+            ))
+        })
+    })
 }

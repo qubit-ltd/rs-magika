@@ -19,8 +19,9 @@ The crate enables `bundled-onnxruntime` by default so ordinary builds can link
 and run without a separately installed ONNX Runtime. Disable default features if
 your application provides a compatible ONNX Runtime shared library. With `ort`'s
 dynamic loader, initialize that library with `ort::init_from` before creating a
-detector. The Linux CI runs a real Python-content inference with this setup;
-see the [user guide](doc/user_guide.md) for the dependency and startup example.
+detector. The Linux CI runs a real Python-content inference with this setup in
+the [`dynamic-loader` job](.github/workflows/ci.yml); see the
+[user guide](doc/user_guide.md) for the dependency and startup example.
 
 ## Installation
 
@@ -85,6 +86,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 `MagikaMimeDetector` delegates filename-only detection to
 `qubit_mime::RepositoryMimeDetector`. Content, reader, and file detection use
 Magika inference, then return Magika's MIME type mapping.
+
+### Operation-aware async provider detection
+
+Applications that need cancellation and release accounting for async provider
+sampling can call `MagikaMimeDetector::detect_async_provider_path_managed` from
+an operation scope. Create one supervisor and detector at startup, pass the
+scope into each managed request, and drain the detector before shutting down
+the application. The legacy `MimeDetector` hooks do not accept an operation
+scope; they keep their existing contract.
 
 Provider selection and detector configuration are separate inputs. A
 `ProviderSelection` decides which registered provider may create the service;

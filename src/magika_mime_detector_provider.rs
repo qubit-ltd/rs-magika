@@ -138,3 +138,53 @@ impl ProviderMetadata for MagikaMimeDetectorProvider {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use qubit_mime::MediaStreamClassifier;
+    use qubit_mime::MediaStreamType;
+    use qubit_mime::MimeConfig;
+    use qubit_mime::MimeResult;
+    use qubit_spi::ProviderMetadata;
+    use qubit_spi::ServiceProvider;
+
+    use super::MagikaMimeDetectorProvider;
+
+    #[derive(Debug)]
+    struct NoopClassifier;
+
+    impl MediaStreamClassifier for NoopClassifier {
+        fn classify_file(&self, _file: &Path) -> MimeResult<MediaStreamType> {
+            Ok(MediaStreamType::None)
+        }
+
+        fn classify_reader(&self, _reader: &mut dyn Read) -> MimeResult<MediaStreamType> {
+            Ok(MediaStreamType::None)
+        }
+    }
+
+    #[test]
+    fn test_configured_provider_formats_and_creates_classifier_detector() {
+        let default_provider = MagikaMimeDetectorProvider::new();
+        assert_eq!("magika", default_provider.descriptor().id().as_str());
+        let classifier = NoopClassifier;
+        assert_eq!(
+            MediaStreamType::None,
+            classifier.classify_file(Path::new("/unused")).unwrap()
+        );
+        assert_eq!(
+            MediaStreamType::None,
+            classifier.classify_reader(&mut &b""[..]).unwrap()
+        );
+        let provider = MagikaMimeDetectorProvider::with_media_stream_classifier(Arc::new(NoopClassifier));
+        assert!(format!("{provider:?}").contains("configured"));
+        let detector = provider
+            .create_configured(&MimeConfig::default())
+            .expect("configured Magika provider should initialize");
+        drop(detector);
+    }
+}

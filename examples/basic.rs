@@ -11,11 +11,18 @@
 use std::error::Error;
 use std::sync::Arc;
 
+use qubit_fs::AsyncFileSystem;
+use qubit_fs::Path;
+use qubit_magika::MagikaMimeDetector;
 use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorRegistry;
 use qubit_mime::MimeResult;
+use qubit_operation::report::SupervisorLimits;
+use qubit_operation::scope::ScopeOptions;
+use qubit_operation::supervisor::OperationSupervisor;
+use qubit_operation::supervisor::ShutdownMode;
 use qubit_spi::ProviderSelection;
 
 /// Registers Magika and creates one detector for the application.
@@ -63,6 +70,55 @@ fn library_detect_content(detector: &dyn MimeDetector) -> MimeResult<Option<Stri
 /// The detected MIME type, or `None` when no repository rule matches.
 fn library_detect_filename(detector: &dyn MimeDetector) -> MimeResult<Option<String>> {
     detector.detect_by_filename("document.pdf")
+}
+
+/// Prepares one operation-aware detector and keeps its supervisor available
+/// for request scopes. Building the detector starts its shared worker/session.
+#[allow(dead_code)]
+fn prepare_managed_detector() -> Result<(Arc<MagikaMimeDetector>, OperationSupervisor), Box<dyn Error>> {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let config = MimeConfig::default();
+    let runtime = Arc::new(qubit_magika::ManagedInferenceRuntime::new(
+        supervisor.clone(),
+        config.max_buffer_size(),
+    )?);
+    let detector = Arc::new(
+        MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()?,
+    );
+    Ok((detector, supervisor))
+}
+
+/// Performs a scoped async provider-path detection and observes both result
+/// and worker release before closing the request group.
+#[allow(dead_code)]
+fn managed_provider_path(
+    detector: Arc<MagikaMimeDetector>,
+    supervisor: &OperationSupervisor,
+    file_system: Arc<AsyncFileSystem>,
+    path: Path,
+) -> Result<(), Box<dyn Error>> {
+    let requests = supervisor.service_group(4)?;
+    let request_detector = Arc::clone(&detector);
+    let mut request = requests.start(ScopeOptions::default(), move |scope| async move {
+        request_detector
+            .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
+            .await
+    })?;
+    let _business_result = request.result_blocking()?;
+    let _settlement = request.released_blocking()?;
+    let _request_shutdown = requests.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));
+    Ok(())
+}
+
+/// Drains inference before shutting down the application-owned supervisor.
+#[allow(dead_code)]
+fn shutdown_managed(detector: &MagikaMimeDetector, supervisor: &OperationSupervisor) {
+    let detector_report = detector.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));
+    assert!(detector_report.worker_stopped);
+    let _supervisor_report = supervisor.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));
 }
 
 /// Runs the shared-detector example.

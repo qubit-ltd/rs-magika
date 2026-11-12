@@ -233,10 +233,12 @@ execution-provider libraries are discoverable by the dynamic loader. The
 `ort`) API is used; the environment is process-global and can only be
 committed once.
 
-The repository's Linux CI checks this dynamic-loader setup with ONNX Runtime
-1.24.2: it initializes the shared library, constructs a detector, and verifies
-that Python content is classified as `text/x-python`. `ORT_LIBRARY_PATH` must
-name the shared-library file itself, rather than its containing directory.
+The [`dynamic-loader` job in the repository's Linux CI](../.github/workflows/ci.yml)
+checks this setup with ONNX Runtime 1.24.2: it initializes the shared library,
+constructs a detector, and verifies that Python content is classified as
+`text/x-python`. The job checks the Cargo feature graph to ensure bundled runtime
+downloads are disabled. `ORT_LIBRARY_PATH` must name the shared-library file
+itself, rather than its containing directory.
 
 ## Advanced Usage
 
@@ -256,14 +258,79 @@ consistent cross-segment snapshot. Providers without range support may probe one
 detect overflow and reject oversized resources. Unknown and undefined Magika
 types become `Ok(None)` so filename fallback follows the selected
 `MimeDetectionPolicy`.
-Synchronous feature sampling happens outside the model session mutex; only
-inference uses that mutex and remains serialized. Async path detection awaits
-feature extraction before synchronously running inference under the shared
-session mutex. Inference and waiting for that mutex can occupy the async
-executor thread; move detection to a blocking worker or service boundary when
-that isolation is required.
+One worker owns the Magika session and serializes both sampling and inference.
+Async provider routes cooperate with that worker through a capacity-one range
+bridge; provider reads are awaited by the calling future, while Magika sampling
+and inference stay on the worker. The managed provider API attaches the work to
+an explicit operation scope. Legacy MIME trait hooks use the same worker bridge
+but cannot attach a parent scope because the upstream hook has no scope
+parameter.
 
 ## Migration Guide
+
+### Operation-aware async provider requests
+
+Use the managed entry point when an application needs the provider sample reads
+to be children of a `qubit-operation` scope. Share one supervisor and detector
+for the application lifetime, then pass the request scope explicitly:
+
+```rust,no_run
+use std::sync::Arc;
+use std::time::Duration;
+
+use qubit_fs::{AsyncFileSystem, Path};
+use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};
+use qubit_operation::report::SupervisorLimits;
+use qubit_operation::scope::ScopeOptions;
+use qubit_operation::supervisor::{OperationSupervisor, ShutdownMode};
+
+fn managed_detector() -> qubit_mime::MimeResult<(OperationSupervisor, MagikaMimeDetector)> {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = std::sync::Arc::new(ManagedInferenceRuntime::new(
+        supervisor.clone(),
+        config.max_buffer_size(),
+    )?);
+    let detector = MagikaMimeDetector::builder()
+        .mime_config(config)
+        .managed_runtime(runtime)
+        .build()?;
+    Ok((supervisor, detector))
+}
+
+async fn detect_request(
+    detector: Arc<MagikaMimeDetector>,
+    supervisor: &OperationSupervisor,
+    file_system: Arc<AsyncFileSystem>,
+    path: Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let service = supervisor.service_group(4)?;
+    let request_detector = Arc::clone(&detector);
+    let mut request = service.start(ScopeOptions::default(), move |scope| async move {
+        request_detector
+            .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
+            .await
+    })?;
+    let _outcome = request.result_blocking()?;
+    let _settlement = request.released_blocking()?;
+    let _request_group_shutdown = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+    let shutdown = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    assert!(shutdown.worker_stopped);
+    let _supervisor_shutdown = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    Ok(())
+}
+```
+
+In a real application, keep the supervisor beside the detector so request
+scopes come from the same supervisor, and call detector shutdown after the
+application has stopped admitting requests. `max_bytes` bounds cumulative
+sample reads and the runtime accounts that request against its shared byte
+budget. Sampling and inference run on the session-owning worker; async provider
+reads are serviced by the operation future without blocking its executor.
+
+The old `MimeDetector` provider hooks remain useful for callers that do not
+manage operation scopes. They cannot provide parent-scope cancellation or
+release observation because the current upstream trait does not pass a scope.
 
 When upgrading a pre-0.14 integration, apply these changes in order:
 
@@ -312,9 +379,9 @@ startup and handle per-input errors at the boundary where the input is read.
 - Detector construction initializes the model and runtime; create one detector
   and share it instead of constructing one per input.
 - Inference on one detector is serialized internally.
-- Async provider-path detection does not move model inference to a dedicated
-  blocking executor. Account for this when choosing the application's runtime
-  and worker arrangement.
+- Legacy `MimeDetector` provider hooks do not provide parent-scope lifecycle
+  observation. Use the managed entry point when cancellation and release
+  tracking must be attached to a request scope.
 - `qubit-magika` does not promise a MIME result for every input; callers must
   handle `Ok(None)` and `MimeError`.
 - This crate exposes Magika's mapped MIME result; it does not define a separate
