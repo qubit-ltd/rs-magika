@@ -21,6 +21,8 @@ use super::provider_input::invalid_input;
 use super::provider_input::validate_request;
 use super::read_budget::ReadBudget;
 
+const MAX_CONSECUTIVE_INTERRUPTED_RETRIES: usize = 8;
+
 /// Fills one Magika request directly from the opened object, accounting for
 /// its cumulative byte budget once and splitting only at the provider limit.
 ///
@@ -83,12 +85,15 @@ pub(crate) fn read_sync_session(
 ///
 /// Returns the first error that is not a safe, unchanged interruption.
 fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut [u8]) -> qubit_fs::FsResult<usize> {
+    let mut retries = 0;
     loop {
         match reader.read_at(offset, output) {
             Err(error)
                 if error.kind() == FsErrorKind::Interrupted
-                    && matches!(error.effect_state(), None | Some(FsEffectState::Unchanged)) =>
+                    && matches!(error.effect_state(), None | Some(FsEffectState::Unchanged))
+                    && retries < MAX_CONSECUTIVE_INTERRUPTED_RETRIES =>
             {
+                retries += 1;
                 continue;
             }
             result => return result,
@@ -117,12 +122,15 @@ async fn read_async_at_retry(
     offset: u64,
     output: &mut [u8],
 ) -> qubit_fs::FsResult<usize> {
+    let mut retries = 0;
     loop {
         match reader.read_at(offset, output).await {
             Err(error)
                 if error.kind() == FsErrorKind::Interrupted
-                    && matches!(error.effect_state(), None | Some(FsEffectState::Unchanged)) =>
+                    && matches!(error.effect_state(), None | Some(FsEffectState::Unchanged))
+                    && retries < MAX_CONSECUTIVE_INTERRUPTED_RETRIES =>
             {
+                retries += 1;
                 continue;
             }
             result => return result,

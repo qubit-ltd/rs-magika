@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 
+mod async_test_driver;
 mod detector;
 mod failing_read_seek;
 mod provider_file_system_spi;
@@ -13,8 +14,12 @@ mod real_file_case;
 mod sparse_read_seek;
 mod static_media_stream_classifier;
 
+pub(crate) use async_test_driver::run_ready;
+pub(crate) use async_test_driver::run_until;
 pub(crate) use detector::detector;
 pub(crate) use failing_read_seek::FailingReadSeek;
+pub(crate) use provider_file_system_spi::AsyncProviderGate;
+pub(crate) use provider_file_system_spi::AsyncProviderGatePoint;
 pub(crate) use provider_file_system_spi::ProviderFileSystemSpi;
 pub(crate) use real_file_case::RealFileCase;
 pub(crate) use sparse_read_seek::SparseReadSeek;

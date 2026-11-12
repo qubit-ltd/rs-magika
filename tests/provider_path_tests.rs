@@ -10,11 +10,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
-use std::task::RawWaker;
-use std::task::RawWakerVTable;
-use std::task::Waker;
+use std::task::Wake;
+use std::time::Duration;
+use std::time::Instant;
 
 use qubit_fs::Path;
 use qubit_fs_local::LocalFileSystems;
@@ -23,32 +26,17 @@ use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeError;
 
+use crate::support::AsyncProviderGate;
+use crate::support::AsyncProviderGatePoint;
 use crate::support::ProviderFileSystemSpi;
 use crate::support::detector;
+use crate::support::run_ready;
+use crate::support::run_until;
 
 const PYTHON: &[u8] = b"#!/usr/bin/env python3\nprint('hello')\n";
 
 fn path(value: &str) -> Path {
     Path::parse(value).expect("test path should be valid")
-}
-
-/// Polls a future until it completes, yielding the thread between pending
-/// polls.
-fn run_ready<F: Future>(future: F) -> F::Output {
-    fn clone(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    fn wake(_: *const ()) {}
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake, |_: *const ()| {});
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-    let mut context = Context::from_waker(&waker);
-    let mut future = Box::pin(future);
-    loop {
-        match Future::poll(Pin::as_mut(&mut future), &mut context) {
-            Poll::Ready(value) => return value,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
 }
 
 fn large_provider(range: bool) -> ProviderFileSystemSpi {
@@ -58,6 +46,235 @@ fn large_provider(range: bool) -> ProviderFileSystemSpi {
     } else {
         provider.without_range().logical(32 * 1024 * 1024)
     }
+}
+
+#[test]
+fn test_wake_driver_waits_for_wake_and_times_out_without_repolling() {
+    struct PendingUntilWake {
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+        waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+        registered: Arc<std::sync::Condvar>,
+    }
+    impl Future for PendingUntilWake {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            *self.waker.lock().unwrap() = Some(cx.waker().clone());
+            self.registered.notify_all();
+            Poll::Pending
+        }
+    }
+
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let waker_slot = Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
+    let result = run_until(
+        PendingUntilWake {
+            polls: Arc::clone(&polls),
+            waker: Arc::clone(&waker_slot),
+            registered: Arc::new(std::sync::Condvar::new()),
+        },
+        Duration::from_millis(20),
+    );
+    assert!(result.is_err(), "a Pending future without a wake must time out");
+    assert_eq!(1, polls.load(Ordering::SeqCst), "the driver must not actively repoll");
+
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let waker_slot = Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
+    let released = Arc::new(AtomicBool::new(false));
+    let release_flag = Arc::clone(&released);
+    let release_waker = Arc::clone(&waker_slot);
+    let registered = Arc::new(std::sync::Condvar::new());
+    let release_registered = Arc::clone(&registered);
+    let releaser = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut slot = release_waker.lock().unwrap();
+        while slot.is_none() {
+            let now = Instant::now();
+            assert!(now < deadline, "future did not register its waker");
+            let (next, result) = release_registered
+                .wait_timeout(slot, deadline.saturating_duration_since(now))
+                .unwrap();
+            slot = next;
+            assert!(
+                !result.timed_out() || slot.is_some(),
+                "future did not register its waker"
+            );
+        }
+        let waker = slot.take().unwrap();
+        release_flag.store(true, Ordering::Release);
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+    });
+    struct Released {
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+        released: Arc<AtomicBool>,
+        slot: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+        registered: Arc<std::sync::Condvar>,
+    }
+    impl Future for Released {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if self.released.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                *self.slot.lock().unwrap() = Some(cx.waker().clone());
+                self.registered.notify_all();
+                Poll::Pending
+            }
+        }
+    }
+    run_ready(Released {
+        polls,
+        released,
+        slot: waker_slot,
+        registered,
+    });
+    releaser.join().unwrap();
+}
+
+#[test]
+fn test_wake_during_poll_is_not_lost_before_park() {
+    struct WakeDuringPoll(usize);
+    impl Future for WakeDuringPoll {
+        type Output = usize;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+            self.0 += 1;
+            if self.0 == 1 {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(self.0)
+            }
+        }
+    }
+    assert_eq!(2, run_ready(WakeDuringPoll(0)));
+}
+
+#[test]
+fn test_pending_future_replaces_stale_waker() {
+    struct CountWake(Arc<std::sync::atomic::AtomicUsize>);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct RegisterWaker(Option<std::task::Waker>);
+    impl Future for RegisterWaker {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            self.0 = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    let old_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let new_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let old_waker = std::task::Waker::from(Arc::new(CountWake(Arc::clone(&old_count))));
+    let new_waker = std::task::Waker::from(Arc::new(CountWake(Arc::clone(&new_count))));
+    let mut future = Box::pin(RegisterWaker(None));
+    assert!(future.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
+    assert!(future.as_mut().poll(&mut Context::from_waker(&new_waker)).is_pending());
+    future.0.take().unwrap().wake();
+    assert_eq!(0, old_count.load(Ordering::SeqCst));
+    assert_eq!(1, new_count.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_provider_stat_open_and_read_suspend_until_wake() {
+    for point in [
+        AsyncProviderGatePoint::Stat,
+        AsyncProviderGatePoint::Open,
+        AsyncProviderGatePoint::Read,
+    ] {
+        let gate = AsyncProviderGate::new(point);
+        let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .with_random_access()
+            .with_async_gate(Arc::clone(&gate));
+        let file_system = provider.async_file_system();
+        let request_path = path("/script.py");
+        let future: Pin<Box<dyn Future<Output = qubit_fs::FsResult<()>>>> = match point {
+            AsyncProviderGatePoint::Stat => Box::pin(async move { file_system.stat(&request_path).await.map(|_| ()) }),
+            AsyncProviderGatePoint::Open => Box::pin(async move {
+                file_system
+                    .open_reader(&request_path, qubit_fs::read::ReadOptions::default())
+                    .await
+                    .map(drop)
+            }),
+            AsyncProviderGatePoint::Read => Box::pin(async move {
+                let mut reader = file_system
+                    .open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default())
+                    .await?;
+                reader.read_at(0, &mut [0_u8; 1]).await.map(|_| ())
+            }),
+        };
+        let worker_gate = Arc::clone(&gate);
+        let releaser = std::thread::spawn(move || {
+            worker_gate.wait_until_entered(Duration::from_secs(1));
+            worker_gate.release();
+        });
+        let result = run_ready(future);
+        releaser.join().unwrap();
+        result.expect("gated provider operation should resume after wake");
+        if point == AsyncProviderGatePoint::Read {
+            assert_eq!(1, provider.observations().session_drops.load(Ordering::SeqCst));
+        }
+    }
+}
+
+#[test]
+fn test_dropping_pending_provider_read_releases_session() {
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let worker_gate = Arc::clone(&gate);
+    let observer = std::thread::spawn(move || worker_gate.wait_until_entered(Duration::from_secs(1)));
+    let file_system = provider.async_file_system();
+    let request_path = path("/script.py");
+    let mut reader =
+        run_ready(file_system.open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default()))
+            .expect("session should open before the read is gated");
+    let result = run_until(reader.read_at(0, &mut [0_u8; 1]), Duration::from_millis(20));
+    assert!(
+        result.is_err(),
+        "a gated provider read must remain Pending until released"
+    );
+    observer.join().unwrap();
+    drop(reader);
+    assert_eq!(
+        1,
+        provider.observations().session_drops.load(Ordering::SeqCst),
+        "dropping the pending detection must release its session"
+    );
+}
+
+#[test]
+fn test_gated_provider_read_error_resumes_after_wake() {
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .fail_reads()
+        .with_async_gate(Arc::clone(&gate));
+    let worker_gate = Arc::clone(&gate);
+    let releaser = std::thread::spawn(move || {
+        worker_gate.wait_until_entered(Duration::from_secs(1));
+        worker_gate.release();
+    });
+    let file_system = provider.async_file_system();
+    let request_path = path("/script.py");
+    let mut reader =
+        run_ready(file_system.open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default()))
+            .expect("session should open before the read is gated");
+    let result = run_ready(reader.read_at(0, &mut [0_u8; 1]));
+    releaser.join().unwrap();
+    assert!(result.is_err(), "the provider read error should propagate after wake");
+    drop(reader);
+    assert_eq!(1, provider.observations().session_drops.load(Ordering::SeqCst));
 }
 
 #[test]

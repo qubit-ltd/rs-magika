@@ -15,4 +15,6 @@ mod magika_mime_detector_tests;
 #[cfg(feature = "bundled-onnxruntime")]
 mod provider_path_tests;
 #[cfg(feature = "bundled-onnxruntime")]
+mod provider_refinement_tests;
+#[cfg(feature = "bundled-onnxruntime")]
 mod support;

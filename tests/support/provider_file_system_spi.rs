@@ -8,9 +8,11 @@
 
 use std::io;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::task::Waker;
 
 use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
@@ -62,6 +64,78 @@ pub(crate) struct ProviderFileSystemSpi {
     random_open_error: Option<FsErrorKind>,
     max_read_range_bytes: Option<u64>,
     observations: Arc<ProviderObservations>,
+    async_gate: Option<Arc<AsyncProviderGate>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AsyncProviderGatePoint {
+    Stat,
+    Open,
+    Read,
+}
+
+pub(crate) struct AsyncProviderGate {
+    point: AsyncProviderGatePoint,
+    entered: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    waker: Mutex<Option<Waker>>,
+    changed: Condvar,
+}
+
+impl AsyncProviderGate {
+    pub(crate) fn new(point: AsyncProviderGatePoint) -> Arc<Self> {
+        Arc::new(Self {
+            point,
+            entered: std::sync::atomic::AtomicBool::new(false),
+            released: std::sync::atomic::AtomicBool::new(false),
+            waker: Mutex::new(None),
+            changed: Condvar::new(),
+        })
+    }
+    async fn wait(self: &Arc<Self>) {
+        std::future::poll_fn(|cx| {
+            if self.released.load(Ordering::Acquire) {
+                return std::task::Poll::Ready(());
+            }
+            *self.waker.lock().unwrap() = Some(cx.waker().clone());
+            self.entered.store(true, Ordering::Release);
+            self.changed.notify_all();
+            if self.released.load(Ordering::Acquire) {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await
+    }
+    pub(crate) fn wait_until_entered(&self, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut waker = self.waker.lock().unwrap();
+        while !self.entered.load(Ordering::Acquire) {
+            let now = std::time::Instant::now();
+            assert!(
+                now < deadline,
+                "provider operation {:?} did not reach its gate",
+                self.point
+            );
+            let (next, result) = self
+                .changed
+                .wait_timeout(waker, deadline.saturating_duration_since(now))
+                .unwrap();
+            waker = next;
+            assert!(
+                !result.timed_out() || self.entered.load(Ordering::Acquire),
+                "provider operation {:?} did not reach its gate",
+                self.point
+            );
+        }
+    }
+    pub(crate) fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        if let Some(waker) = self.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -90,6 +164,7 @@ impl ProviderFileSystemSpi {
             random_open_error: None,
             max_read_range_bytes: None,
             observations: Arc::new(ProviderObservations::default()),
+            async_gate: None,
         }
     }
 
@@ -141,6 +216,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn with_random_access(mut self) -> Self {
         self.random_access = true;
+        self
+    }
+
+    pub(crate) fn with_async_gate(mut self, gate: Arc<AsyncProviderGate>) -> Self {
+        self.async_gate = Some(gate);
         self
     }
 
@@ -278,6 +358,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 short_read: self.short_read,
                 fail_reads: self.fail_reads,
                 observations: Arc::clone(&self.observations),
+                async_gate: self.async_gate.clone(),
             }),
         ))
     }
@@ -289,11 +370,27 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
     }
 
     fn stat<'a>(&'a self, request: StatRequest<'a>) -> SpiFuture<'a, FsResult<StatResponse>> {
-        Box::pin(async move { FileSystemSpi::stat(self, request) })
+        Box::pin(async move {
+            if let Some(gate) = self
+                .async_gate
+                .as_ref()
+                .filter(|g| g.point == AsyncProviderGatePoint::Stat)
+            {
+                gate.wait().await;
+            }
+            FileSystemSpi::stat(self, request)
+        })
     }
 
     fn open_reader<'a>(&'a self, request: OpenReaderRequest<'a>) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
         Box::pin(async move {
+            if let Some(gate) = self
+                .async_gate
+                .as_ref()
+                .filter(|g| g.point == AsyncProviderGatePoint::Open)
+            {
+                gate.wait().await;
+            }
             let (info, bytes) = self.open_reader_inner(request)?;
             Ok(OpenedAsyncReader::new(
                 info,
@@ -312,6 +409,13 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
         request: OpenReaderRequest<'a>,
     ) -> SpiFuture<'a, FsResult<qubit_fs::spi::OpenedAsyncRandomAccessReader>> {
         Box::pin(async move {
+            if let Some(gate) = self
+                .async_gate
+                .as_ref()
+                .filter(|g| g.point == AsyncProviderGatePoint::Open)
+            {
+                gate.wait().await;
+            }
             self.observations.random_opens.fetch_add(1, Ordering::SeqCst);
             if let Some(kind) = self.random_open_error {
                 return Err(FsError::new(
@@ -330,6 +434,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     short_read: self.short_read,
                     fail_reads: self.fail_reads,
                     observations: Arc::clone(&self.observations),
+                    async_gate: self.async_gate.clone(),
                 }),
             ))
         })
@@ -342,6 +447,7 @@ struct ProviderSession {
     short_read: bool,
     fail_reads: bool,
     observations: Arc<ProviderObservations>,
+    async_gate: Option<Arc<AsyncProviderGate>>,
 }
 
 impl Drop for ProviderSession {
@@ -383,7 +489,18 @@ impl qubit_fs::spi::AsyncRandomAccessReadSession for ProviderSession {
         offset: u64,
         output: &'a mut [u8],
     ) -> SpiFuture<'a, FsResult<usize>> {
-        Box::pin(async move { self.get_mut().read_at(offset, output) })
+        Box::pin(async move {
+            if let Some(gate) = self
+                .as_ref()
+                .get_ref()
+                .async_gate
+                .as_ref()
+                .filter(|g| g.point == AsyncProviderGatePoint::Read)
+            {
+                gate.wait().await;
+            }
+            self.get_mut().read_at(offset, output)
+        })
     }
 }
 

@@ -10,11 +10,14 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
-use std::task::Waker;
+use std::task::Wake;
+use std::time::Duration;
+use std::time::Instant;
 
 use magika::AsyncInput;
 use magika::SyncInput;
@@ -68,6 +71,7 @@ struct Fixture {
     max_read: FileSystemLimit,
     interrupt_effect: Option<Option<FsEffectState>>,
     interrupt_kind: FsErrorKind,
+    interrupt_pattern: Option<Vec<bool>>,
     attempts: Arc<AtomicUsize>,
 }
 
@@ -83,6 +87,7 @@ impl Fixture {
             max_read,
             interrupt_effect: None,
             interrupt_kind: FsErrorKind::Interrupted,
+            interrupt_pattern: None,
             attempts: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -93,6 +98,11 @@ impl Fixture {
     fn fail_once(mut self, kind: FsErrorKind, effect: Option<FsEffectState>) -> Self {
         self.interrupt_effect = Some(effect);
         self.interrupt_kind = kind;
+        self
+    }
+    fn interrupt_pattern(mut self, pattern: Vec<bool>, effect: Option<FsEffectState>) -> Self {
+        self.interrupt_pattern = Some(pattern);
+        self.interrupt_effect = Some(effect);
         self
     }
     fn properties(&self) -> ProviderProperties {
@@ -121,6 +131,7 @@ impl Fixture {
             drops: self.drops.clone(),
             interrupt_effect: self.interrupt_effect,
             interrupt_kind: self.interrupt_kind,
+            interrupt_pattern: self.interrupt_pattern.clone(),
             attempts: self.attempts.clone(),
         }
     }
@@ -188,6 +199,7 @@ struct Session {
     drops: Arc<AtomicUsize>,
     interrupt_effect: Option<Option<FsEffectState>>,
     interrupt_kind: FsErrorKind,
+    interrupt_pattern: Option<Vec<bool>>,
     attempts: Arc<AtomicUsize>,
 }
 impl Drop for Session {
@@ -199,9 +211,14 @@ impl RandomAccessReadSession for Session {
     fn read_at(&mut self, offset: u64, output: &mut [u8]) -> FsResult<usize> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
         self.reads.lock().unwrap().push((offset, output.len()));
-        if attempt == 0
-            && let Some(effect) = self.interrupt_effect
-        {
+        let should_interrupt = self
+            .interrupt_pattern
+            .as_ref()
+            .and_then(|pattern| pattern.get(attempt))
+            .copied()
+            .unwrap_or(attempt == 0 && self.interrupt_effect.is_some());
+        if should_interrupt {
+            let effect = self.interrupt_effect.unwrap_or(None);
             let error = FsError::new(self.interrupt_kind, FsOperation::Read, "fixture interruption");
             return Err(match effect {
                 Some(effect) => error.with_effect_state(effect),
@@ -221,13 +238,40 @@ impl AsyncRandomAccessReadSession for Session {
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(Arc::clone(&wake));
+    let mut context = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
-            return value;
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => loop {
+                if wake.notified.swap(false, Ordering::AcqRel) {
+                    break;
+                }
+                let now = Instant::now();
+                assert!(now < deadline, "future did not complete before deadline");
+                std::thread::park_timeout(deadline.saturating_duration_since(now));
+            },
         }
+    }
+}
+
+struct ThreadWake {
+    thread: std::thread::Thread,
+    notified: AtomicBool,
+}
+impl Wake for ThreadWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+        self.thread.unpark();
     }
 }
 
@@ -298,6 +342,72 @@ fn test_sync_session_retries_unchanged_interruption_at_same_range() {
 }
 
 #[test]
+fn test_sync_session_allows_eight_consecutive_safe_interruptions() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_pattern(
+        vec![true, true, true, true, true, true, true, true, false],
+        Some(FsEffectState::Unchanged),
+    );
+    let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
+    let reader = filesystem
+        .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
+        .unwrap();
+    let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 1];
+
+    SyncInput::read_at(&mut input, &mut output, 3).unwrap();
+
+    assert_eq!(*b"d", output);
+    assert_eq!(9, fixture.attempts.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_sync_session_stops_after_ninth_safe_interruption_and_preserves_error() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_pattern(vec![true; 9], None);
+    let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
+    let reader = filesystem
+        .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
+        .unwrap();
+    let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
+    let error = SyncInput::read_at(&mut input, &mut [0; 1], 3).expect_err("ninth interruption must propagate");
+    let magika::Error::IOError(io_error) = error else {
+        panic!("expected I/O error")
+    };
+    let source = io_error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<FsError>())
+        .unwrap();
+    assert_eq!(FsErrorKind::Interrupted, source.kind());
+    assert_eq!(None, source.effect_state());
+    assert_eq!(9, fixture.attempts.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_sync_session_resets_retry_count_after_short_read_progress() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_pattern(
+        vec![
+            true, true, true, true, true, true, true, true, false, true, true, true, true, true, true, true, true,
+            false,
+        ],
+        Some(FsEffectState::Unchanged),
+    );
+    let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
+    let reader = filesystem
+        .open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())
+        .unwrap();
+    let mut input = crate::internal::SyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 2];
+
+    SyncInput::read_at(&mut input, &mut output, 2).unwrap();
+
+    assert_eq!(*b"cd", output);
+    assert_eq!(18, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(
+        vec![(2, 2); 9].into_iter().chain(vec![(3, 1); 9]).collect::<Vec<_>>(),
+        *fixture.reads.lock().unwrap()
+    );
+}
+
+#[test]
 fn test_sync_session_retries_interruption_without_effect_state() {
     let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_once(None);
     let filesystem = FileSystem::from_spi(fixture.clone()).unwrap();
@@ -342,6 +452,70 @@ fn test_sync_session_does_not_retry_indeterminate_interruption() {
 #[test]
 fn test_async_session_retries_interruption_without_effect_state() {
     assert_async_session_retries_safe_interruption(None);
+}
+
+#[test]
+fn test_async_session_allows_eight_consecutive_safe_interruptions() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_pattern(
+        vec![true, true, true, true, true, true, true, true, false],
+        Some(FsEffectState::Unchanged),
+    );
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 1];
+
+    block_on(AsyncInput::read_at(&mut input, &mut output, 3)).unwrap();
+
+    assert_eq!(*b"d", output);
+    assert_eq!(9, fixture.attempts.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_async_session_stops_after_ninth_safe_interruption_and_preserves_error() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_pattern(vec![true; 9], None);
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, None);
+    let error =
+        block_on(AsyncInput::read_at(&mut input, &mut [0; 1], 3)).expect_err("ninth interruption must propagate");
+    let magika::Error::IOError(io_error) = error else {
+        panic!("expected I/O error")
+    };
+    let source = io_error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<FsError>())
+        .unwrap();
+    assert_eq!(FsErrorKind::Interrupted, source.kind());
+    assert_eq!(None, source.effect_state());
+    assert_eq!(9, fixture.attempts.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_async_session_resets_retry_count_after_short_read_progress() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown).interrupt_pattern(
+        vec![
+            true, true, true, true, true, true, true, true, false, true, true, true, true, true, true, true, true,
+            false,
+        ],
+        Some(FsEffectState::Unchanged),
+    );
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut input = crate::internal::AsyncProviderInput::from_session(reader, 6, None);
+    let mut output = [0; 2];
+
+    block_on(AsyncInput::read_at(&mut input, &mut output, 2)).unwrap();
+
+    assert_eq!(*b"cd", output);
+    assert_eq!(18, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(
+        vec![(2, 2); 9].into_iter().chain(vec![(3, 1); 9]).collect::<Vec<_>>(),
+        *fixture.reads.lock().unwrap()
+    );
 }
 
 #[test]

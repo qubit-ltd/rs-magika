@@ -8,11 +8,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
-use std::task::RawWaker;
-use std::task::RawWakerVTable;
-use std::task::Waker;
+use std::task::Wake;
+use std::time::Duration;
+use std::time::Instant;
 
 use magika::AsyncInput;
 use magika::Error;
@@ -34,19 +37,40 @@ use crate::internal::provider_input::validate_request;
 use crate::internal::read_budget::ReadBudget;
 
 fn run_ready<F: Future>(future: F) -> F::Output {
-    fn clone(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    fn wake(_: *const ()) {}
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake, |_: *const ()| {});
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(Arc::clone(&wake));
     let mut context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match Future::poll(Pin::as_mut(&mut future), &mut context) {
             Poll::Ready(value) => return value,
-            Poll::Pending => std::thread::yield_now(),
+            Poll::Pending => loop {
+                if wake.notified.swap(false, Ordering::AcqRel) {
+                    break;
+                }
+                let now = Instant::now();
+                assert!(now < deadline, "future did not complete before deadline");
+                std::thread::park_timeout(deadline.saturating_duration_since(now));
+            },
         }
+    }
+}
+
+struct ThreadWake {
+    thread: std::thread::Thread,
+    notified: AtomicBool,
+}
+impl Wake for ThreadWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+        self.thread.unpark();
     }
 }
 
