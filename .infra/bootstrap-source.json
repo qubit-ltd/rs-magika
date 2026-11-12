@@ -62,10 +62,6 @@
       "executable": true,
       "sha256": "efb236dddf9f03c929071b1b86afffe827542d9cc7b44dc31f2de927c9265f39"
     },
-    ".infra/ci/local-path-dependencies.tsv": {
-      "executable": false,
-      "sha256": "cad0e7751664de89655111c4b859fe19d14940e755b4cca2ff6901cb1eaee52a"
-    },
     ".infra/dependency/policy.toml": {
       "executable": false,
       "sha256": "3424c292680fea6eba3f743943ba7280e9f3d2372fec3fe082fb6c931d20fabb"

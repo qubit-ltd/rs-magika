@@ -54,3 +54,83 @@ jobs:
             features: ((.features // []) | join(","))
           }]}' "$config")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  dynamic-loader:
+    name: Dynamic ONNX Runtime (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: rs-magika
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-fs
+          ref: v0.3.1
+          path: rs-fs
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-operation
+          ref: codex/operation-0.1.0-integration
+          path: rs-operation
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-mime
+          ref: v0.21.1
+          path: rs-mime
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-config
+          ref: v0.15.1
+          path: rs-config
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-command
+          ref: v0.11.1
+          path: rs-command
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-local-files
+          ref: v0.5.2
+          path: rs-local-files
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-redact
+          ref: v0.10.2
+          path: rs-redact
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-json
+          ref: v0.12.4
+          path: rs-json
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-fs-local
+          ref: v0.11.1
+          path: rs-fs-local
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94.0
+      - name: Install ONNX Runtime 1.24.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/onnxruntime-linux-x64-1.24.2.tgz"
+          curl --fail --location --retry 3 \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz \
+            --output "$archive"
+          echo '43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6  '"$archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/onnxruntime"
+          tar -xzf "$archive" --directory "$RUNNER_TEMP/onnxruntime"
+          echo "ORT_LIBRARY_PATH=$RUNNER_TEMP/onnxruntime/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+      - name: Check dynamic consumer feature graph
+        working-directory: rs-magika
+        run: |
+          set -euo pipefail
+          cargo tree --manifest-path .infra/fixtures/dynamic_loader_consumer/Cargo.toml -e features | tee "$RUNNER_TEMP/dynamic-loader-cargo-tree.txt"
+          if grep -q 'bundled-onnxruntime\|ort feature "download-binaries"' "$RUNNER_TEMP/dynamic-loader-cargo-tree.txt"; then
+            echo 'dynamic consumer unexpectedly enables bundled ONNX Runtime downloads' >&2
+            exit 1
+          fi
+      - name: Run dynamic consumer inference
+        working-directory: rs-magika
+        run: cargo run --manifest-path .infra/fixtures/dynamic_loader_consumer/Cargo.toml

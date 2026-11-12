@@ -12,6 +12,12 @@
       "commands": ["check", "doc"],
       "defaultFeatures": false,
       "features": []
+    },
+    {
+      "name": "inventory",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": true,
+      "features": ["inventory"]
     }
   ]
 }

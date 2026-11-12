@@ -8,3 +8,11 @@ publish = false
 qubit-magika = { path = "../../..", default-features = false }
 qubit-mime = { path = "../../../../rs-mime", version = "0.21" }
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
+
+[patch.crates-io]
+qubit-fs = { path = "../../../../rs-fs" }
+qubit-command = { path = "../../../../rs-command" }
+qubit-config = { path = "../../../../rs-config" }
+qubit-local-files = { path = "../../../../rs-local-files" }
+qubit-redact = { path = "../../../../rs-redact" }
+qubit-json = { path = "../../../../rs-json" }
