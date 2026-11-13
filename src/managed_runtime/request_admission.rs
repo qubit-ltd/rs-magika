@@ -49,8 +49,15 @@ impl RequestAdmission {
         }
     }
 
-    pub(crate) fn provider_operation_started(&mut self) {
+    pub(crate) fn begin_provider_operation(&mut self) -> MimeResult<()> {
+        if !self.state.try_start_provider_operation() {
+            self.state.request_stop();
+            let error = MimeError::detector_backend("magika", "provider operation stopped before start");
+            self.settle_error(MimeError::detector_backend("magika", "provider operation stopped before start"));
+            return Err(error);
+        }
         self.provider_pending = true;
+        Ok(())
     }
 
     pub(crate) fn provider_operation_completed(&mut self) {
@@ -176,6 +183,9 @@ impl RequestResourceOwner {
     }
 
     pub(super) fn worker_done(&self) {
+        if let Some(state) = self.state.upgrade() {
+            state.mark_worker_done();
+        }
         self.mark_done(false);
     }
     pub(super) fn driver_done(&self) {
@@ -289,7 +299,7 @@ mod tests {
             service,
             permit,
         );
-        admission.provider_operation_started();
+        admission.begin_provider_operation().unwrap();
         drop(admission);
 
         assert!(!state.inner.lock().unwrap().released);

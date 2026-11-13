@@ -24,6 +24,8 @@ pub(super) struct TaskInner {
     pub(super) business: Option<ChildBusinessOutcome>,
     /// Whether worker-owned input and permits have been dropped.
     pub(super) released: bool,
+    /// Whether the worker has completed its participant duties.
+    pub(super) worker_done: bool,
     /// Futures waiting for a result or release transition.
     pub(super) wakers: Vec<Waker>,
 }
@@ -37,6 +39,7 @@ impl TaskInner {
             result: None,
             business: None,
             released: false,
+            worker_done: false,
             wakers: Vec::new(),
         }
     }

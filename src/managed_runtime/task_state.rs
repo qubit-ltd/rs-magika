@@ -20,6 +20,18 @@ use qubit_operation::report::OperationId;
 use super::task_inner::TaskInner;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 
+/// Shared admission and cancellation state serialized with provider starts.
+pub(super) struct AdmissionGate {
+    pub(super) closed: bool,
+    pub(super) cancelling: bool,
+}
+
+impl AdmissionGate {
+    pub(super) const fn new() -> Self {
+        Self { closed: false, cancelling: false }
+    }
+}
+
 /// State observed by both the worker and operation control adapter.
 pub(super) struct TaskState {
     /// Stable identity attached to the managed child report.
@@ -33,6 +45,8 @@ pub(super) struct TaskState {
     owner: std::sync::Mutex<Option<Arc<super::request_admission::RequestResourceOwner>>>,
     /// Weak back-reference lets aggregate release prune the runtime's strong registry.
     active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
+    /// Weak shutdown gate shared with admission and provider-operation starts.
+    admission_gate: Option<Weak<Mutex<AdmissionGate>>>,
 }
 
 impl TaskState {
@@ -44,7 +58,7 @@ impl TaskState {
     /// * `bridge` - Weak bridge reference closed when this task is stopped.
     #[cfg(test)]
     pub(super) fn new(operation_id: OperationId, bridge: Option<Weak<AsyncSampleBridge>>) -> Self {
-        Self::new_registered(operation_id, bridge, None)
+        Self::new_registered(operation_id, bridge, None, None)
     }
 
     /// Creates a task state tracked strongly by the owning runtime until release.
@@ -52,6 +66,7 @@ impl TaskState {
         operation_id: OperationId,
         bridge: Option<Weak<AsyncSampleBridge>>,
         active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
+        admission_gate: Option<Weak<Mutex<AdmissionGate>>>,
     ) -> Self {
         Self {
             operation_id,
@@ -60,7 +75,27 @@ impl TaskState {
             bridge: std::sync::Mutex::new(bridge),
             owner: std::sync::Mutex::new(None),
             active_tasks,
+            admission_gate,
         }
+    }
+
+    /// Linearizes provider-operation start against cancellation and shutdown.
+    pub(super) fn try_start_provider_operation(&self) -> bool {
+        let gate = self.admission_gate.as_ref().and_then(Weak::upgrade);
+        if self.admission_gate.is_some() && gate.is_none() {
+            return false;
+        }
+        let gate = gate
+            .as_ref()
+            .map(|gate| gate.lock().unwrap_or_else(|error| error.into_inner()));
+        if gate.as_ref().is_some_and(|gate| gate.cancelling) {
+            return false;
+        }
+        !self
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .stop_requested
     }
 
     /// Reports whether the worker should skip or stop this job.
@@ -125,6 +160,26 @@ impl TaskState {
         if let Some(owner) = owner {
             owner.driver_done();
         }
+    }
+
+    pub(super) fn mark_worker_done(&self) {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner()).worker_done = true;
+        self.released.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(super) fn wait_worker_done_blocking(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        while !inner.worker_done {
+            let now = std::time::Instant::now();
+            if now >= deadline { return false; }
+            let (next, result) = self.released.wait_timeout(inner, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|error| error.into_inner());
+            inner = next;
+            if result.timed_out() && !inner.worker_done { return false; }
+        }
+        true
     }
 
     /// Records that the inference worker has begun this job.

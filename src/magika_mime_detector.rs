@@ -187,7 +187,7 @@ impl MagikaMimeDetector {
             });
         }
         let mut admission = self.runtime.reserve_for_provider(Some(scope), max_bytes)?;
-        admission.provider_operation_started();
+        admission.begin_provider_operation()?;
         let open_result = file_system
             .open_random_access_reader(path, ReadOptions::default())
             .await;
@@ -219,7 +219,7 @@ impl MagikaMimeDetector {
             Err(error) => return Err(error.into()),
         }
 
-        admission.provider_operation_started();
+        admission.begin_provider_operation()?;
         let stat_result = file_system.stat(path).await;
         admission.provider_operation_completed();
         let metadata = match stat_result {
@@ -261,7 +261,7 @@ impl MagikaMimeDetector {
                 });
             }
         }
-        admission.provider_operation_started();
+        admission.begin_provider_operation()?;
         let read_result = file_system
             .read_all(path, ReadOptions::default(), max_bytes)
             .await;
@@ -653,7 +653,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 });
             }
             let mut admission = self.runtime.reserve_for_provider(None, max_bytes)?;
-            admission.provider_operation_started();
+            admission.begin_provider_operation()?;
             let open_result = file_system
                 .open_random_access_reader(path, ReadOptions::default())
                 .await;
@@ -678,7 +678,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     ) => {}
                 Err(error) => return Err(error.into()),
             }
-            admission.provider_operation_started();
+            admission.begin_provider_operation()?;
             let stat_result = file_system.stat(path).await;
             admission.provider_operation_completed();
             let metadata = match stat_result {
@@ -716,7 +716,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     });
                 }
             }
-            admission.provider_operation_started();
+            admission.begin_provider_operation()?;
             let read_result = file_system
                 .read_all(path, ReadOptions::default(), max_bytes)
                 .await;

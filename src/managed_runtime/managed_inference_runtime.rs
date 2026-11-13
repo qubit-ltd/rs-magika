@@ -39,6 +39,7 @@ use super::job::Job;
 use super::managed_inference_shutdown_report::ManagedInferenceShutdownReport;
 use super::request_admission::RequestAdmission;
 use super::task_control::TaskControl;
+use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
@@ -113,6 +114,8 @@ pub struct ManagedInferenceRuntime {
     byte_budget: Arc<ByteBudget>,
     /// Strong active tasks retained until aggregate resource release.
     tasks: Arc<Mutex<Vec<Arc<TaskState>>>>,
+    /// Serializes admission and provider-start boundaries with shutdown.
+    admission_gate: Arc<Mutex<AdmissionGate>>,
 }
 
 impl std::fmt::Debug for ManagedInferenceRuntime {
@@ -220,6 +223,7 @@ impl ManagedInferenceRuntime {
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks: Arc::new(Mutex::new(Vec::new())),
+            admission_gate: Arc::new(Mutex::new(AdmissionGate::new())),
         })
     }
 
@@ -293,6 +297,7 @@ impl ManagedInferenceRuntime {
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks: Arc::new(Mutex::new(Vec::new())),
+            admission_gate: Arc::new(Mutex::new(AdmissionGate::new())),
         }
     }
 
@@ -383,7 +388,7 @@ impl ManagedInferenceRuntime {
     where
         I: AsyncInput + Send,
     {
-        admission.provider_operation_started();
+        admission.begin_provider_operation()?;
         let length_result = input.length().await;
         admission.provider_operation_completed();
         let length = match length_result {
@@ -402,7 +407,7 @@ impl ManagedInferenceRuntime {
         let state = Arc::clone(&admission.state);
         let inference =
             self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-        let (result, driver_completed) = drive_async_input(driver, input, inference).await;
+        let (result, driver_completed) = drive_async_input(driver, input, inference, state.clone()).await;
         if driver_completed {
             state.mark_driver_done();
         }
@@ -488,17 +493,32 @@ impl ManagedInferenceRuntime {
         scope: Option<&OperationScope>,
         byte_count: usize,
     ) -> MimeResult<RequestAdmission> {
+        self.reserve_request_with_hook(scope, byte_count, || {})
+    }
+
+    fn reserve_request_with_hook(
+        &self,
+        scope: Option<&OperationScope>,
+        byte_count: usize,
+        after_service_reservation: impl FnOnce(),
+    ) -> MimeResult<RequestAdmission> {
+        let admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+        if admission_gate.closed {
+            return Err(MimeError::detector_backend("magika", "runtime admission is closed"));
+        }
         let byte_permit = self.byte_budget.try_acquire(byte_count).ok_or_else(|| {
             MimeError::detector_backend("magika", "runtime in-flight byte budget is full")
         })?;
         let admission = self.service_group.try_admit().map_err(|error| {
             MimeError::detector_backend("magika", format!("runtime admission failed: {error}"))
         })?;
+        after_service_reservation();
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let state = Arc::new(TaskState::new_registered(
             OperationId::new(id as u128),
             None,
             Some(Arc::downgrade(&self.tasks)),
+            Some(Arc::downgrade(&self.admission_gate)),
         ));
         let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
         RequestAdmission::attach_scope(scope, Arc::clone(&control))?;
@@ -506,6 +526,7 @@ impl ManagedInferenceRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .push(Arc::clone(&state));
+        drop(admission_gate);
         Ok(RequestAdmission::new(
             OperationId::new(id as u128),
             state,
@@ -553,12 +574,26 @@ impl ManagedInferenceRuntime {
         mode: ShutdownMode,
         timeout: std::time::Duration,
     ) -> ManagedInferenceShutdownReport {
+        self.shutdown_blocking_with_hook(mode, timeout, || {})
+    }
+
+    fn shutdown_blocking_with_hook(
+        &self,
+        mode: ShutdownMode,
+        timeout: std::time::Duration,
+        after_task_scan: impl FnOnce(),
+    ) -> ManagedInferenceShutdownReport {
+        let mut admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+        admission_gate.closed = true;
+        admission_gate.cancelling |= mode == ShutdownMode::Cancel;
+        drop(admission_gate);
         if mode == ShutdownMode::Cancel {
-            let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
-            for task in tasks.iter() {
+            let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner()).clone();
+            for task in tasks {
                 task.request_stop();
             }
         }
+        after_task_scan();
         let admission = self.service_group.shutdown_blocking(mode, timeout);
         if !admission.is_complete() {
             return ManagedInferenceShutdownReport {
@@ -673,6 +708,7 @@ async fn drive_async_input<I>(
     driver: AsyncSampleDriver,
     mut input: I,
     inference: InferenceFuture,
+    state: Arc<TaskState>,
 ) -> (MimeResult<Option<String>>, bool)
 where
     I: AsyncInput,
@@ -695,6 +731,10 @@ where
             DriveEvent::Result(result) => return (result, true),
             DriveEvent::Request(None) => return (inference.await, true),
             DriveEvent::Request(Some(request)) => {
+                if !state.try_start_provider_operation() {
+                    state.request_stop();
+                    return (inference.await, true);
+                }
                 let mut buffer = vec![0; request.len()];
                 let mut read = Box::pin(input.read_at(&mut buffer, request.offset()));
                 let mut closed = Box::pin(driver.closed());
@@ -743,6 +783,7 @@ mod tests {
 
     use qubit_mime::MimeError;
     use qubit_operation::report::ChildBusinessOutcome;
+    use qubit_operation::report::StopReason;
     use qubit_operation::report::SupervisorLimits;
     use qubit_operation::supervisor::OperationSupervisor;
     use qubit_operation::supervisor::ShutdownMode;
@@ -750,6 +791,165 @@ mod tests {
     use super::ManagedInferenceRuntime;
     use super::WorkerInput;
     use super::execute_classified;
+
+    #[test]
+    fn shutdown_scan_cannot_miss_a_request_between_service_and_task_registration() {
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8,
+            Box::new(|_| Ok(None)),
+            Box::new(|| {}),
+        ));
+        let reservation_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let reservation_wait = Arc::clone(&reservation_gate);
+        let (reserved_tx, reserved_rx) = mpsc::channel();
+        let (admission_tx, admission_rx) = mpsc::channel();
+        let reserve_runtime = Arc::clone(&runtime);
+        let reserver = std::thread::spawn(move || {
+            let admission = reserve_runtime
+                .reserve_request_with_hook(None, 8, move || {
+                    reserved_tx.send(()).unwrap();
+                    let (lock, changed) = &*reservation_wait;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                })
+                .unwrap();
+            admission_tx.send(admission).unwrap();
+        });
+        reserved_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let (shutdown_started_tx, shutdown_started_rx) = mpsc::channel();
+        let (scan_tx, scan_rx) = mpsc::channel();
+        let shutdown_runtime = Arc::clone(&runtime);
+        let shutdown = std::thread::spawn(move || {
+            shutdown_started_tx.send(()).unwrap();
+            shutdown_runtime.shutdown_blocking_with_hook(
+                ShutdownMode::Cancel,
+                Duration::from_millis(250),
+                move || scan_tx.send(()).unwrap(),
+            )
+        });
+        shutdown_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let scanned_before_registration = scan_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+
+        let (lock, changed) = &*reservation_gate;
+        *lock.lock().unwrap() = true;
+        changed.notify_one();
+        let admission = admission_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        if !scanned_before_registration {
+            scan_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        let _report = shutdown.join().unwrap();
+        reserver.join().unwrap();
+
+        assert!(
+            admission.state.stop_requested(),
+            "shutdown must stop every request admitted before its task scan"
+        );
+        drop(admission);
+        let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn committed_provider_admission_checks_stop_before_first_and_later_io() {
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let service = supervisor.service_group(2).unwrap();
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8,
+            Box::new(|_| Ok(None)),
+            Box::new(|| {}),
+        ));
+
+        let first_runtime = Arc::clone(&runtime);
+        let mut first = service.start(qubit_operation::scope::ScopeOptions::default(), move |scope| async move {
+            let mut admission = first_runtime.reserve_for_provider(Some(&scope), 8)?;
+            scope.request_cancel(StopReason::UserCancelled);
+            assert!(admission.begin_provider_operation().is_err());
+            Ok::<_, MimeError>(())
+        }).unwrap();
+        let _ = first.result_blocking();
+
+        let later_runtime = Arc::clone(&runtime);
+        let mut later = service.start(qubit_operation::scope::ScopeOptions::default(), move |scope| async move {
+            let mut admission = later_runtime.reserve_for_provider(Some(&scope), 8)?;
+            admission.begin_provider_operation()?;
+            admission.provider_operation_completed();
+            scope.request_cancel(StopReason::UserCancelled);
+            assert!(admission.begin_provider_operation().is_err());
+            Ok::<_, MimeError>(())
+        }).unwrap();
+        let _ = later.result_blocking();
+
+        let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn scope_less_pending_read_keeps_budget_after_worker_done() {
+        struct ThreadWake(std::thread::Thread);
+        impl std::task::Wake for ThreadWake {
+            fn wake(self: Arc<Self>) { self.0.unpark(); }
+            fn wake_by_ref(self: &Arc<Self>) { self.0.unpark(); }
+        }
+        struct PendingReadInput(std::sync::mpsc::SyncSender<()>);
+        impl magika::AsyncInput for PendingReadInput {
+            fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+                std::future::ready(Ok(1))
+            }
+            fn read_at(
+                &mut self,
+                _buffer: &mut [u8],
+                _offset: u64,
+            ) -> impl Future<Output = Result<(), magika::Error>> {
+                let started = self.0.clone();
+                async move {
+                    started.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                    Ok(())
+                }
+            }
+        }
+        fn map_error(_: magika::Error) -> MimeError {
+            MimeError::detector_backend("magika", "test input failed")
+        }
+
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8,
+            Box::new(|_| Ok(None)),
+            Box::new(|| {}),
+        ));
+        let admission = runtime.reserve_for_provider(None, 8).unwrap();
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let input = PendingReadInput(started_tx);
+        let body_runtime = Arc::clone(&runtime);
+        let mut future = Box::pin(async move {
+            body_runtime
+                .detect_async_input_admitted(admission, input, 8, map_error)
+                .await
+        });
+        let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        loop {
+            match started_rx.try_recv() {
+                Ok(()) => break,
+                Err(mpsc::TryRecvError::Disconnected) => panic!("provider input dropped before read"),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+        let state = runtime.tasks.lock().unwrap().first().unwrap().clone();
+        drop(future);
+        assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
+        assert!(!state.inner.lock().unwrap().released);
+        assert!(runtime.reserve_for_provider(None, 1).is_err());
+        let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(10));
+    }
 
     #[test]
     fn test_shared_worker_classification_covers_success_and_panic() {

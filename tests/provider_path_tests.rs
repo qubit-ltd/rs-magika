@@ -245,6 +245,35 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
 }
 
 #[test]
+fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
+    let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Open);
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation)
+        .with_async_gate(Arc::clone(&gate));
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let body_detector = Arc::clone(&detector);
+    let handle = service.start(ScopeOptions::default(), move |scope| async move {
+        body_detector.detect_async_provider_path_managed(
+            &scope, &file_system, &path("/cancel-between-ops.py"), 4096,
+        ).await
+    }).unwrap();
+    gate.wait_until_entered(Duration::from_secs(5));
+    handle.request_cancel(StopReason::UserCancelled);
+    gate.release();
+    let mut handle = handle;
+    let _ = handle.result_blocking();
+    assert_eq!(1, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    let _ = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+}
+
+#[test]
 fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close() {
     let detector = Arc::new(
         qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
@@ -324,11 +353,6 @@ fn test_scope_less_dropped_provider_future_retains_pending_capacity() {
             std::thread::park_timeout(Duration::from_millis(10));
         }
         drop(future);
-        if point == AsyncProviderGatePoint::Read {
-            // Let the worker observe bridge closure and finish. Its owner must
-            // still retain capacity because the provider read was Pending.
-            std::thread::sleep(Duration::from_millis(100));
-        }
 
         let second_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
         let second_observations = second_provider.observations();
