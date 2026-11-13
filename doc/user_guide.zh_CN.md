@@ -289,15 +289,34 @@ async fn detect_request(
 }
 ```
 
-真实应用应让 detector 和 supervisor 覆盖整个应用生命周期；只有在停止接收新请求后才
-调用 shutdown。`max_bytes` 是单次采样的累计读取预算，也会占用 runtime 共享的在途字节
-预算。运行时构造时会创建 session-owning worker 并等待 Magika Session 初始化完成，因此
+真实应用应让 detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
+shutdown。`max_bytes` 既是单次采样的累计读取预算，也会占用 runtime 共享的在途字节预算。
+它只约束逻辑采样和由请求持有的 payload 记账，不代表进程总内存或 Provider/网络流量上限。
+runtime 会先预留容量和字节预算，再提交可选的 scope 子操作，然后才调用 Provider 的
+`open`、`stat`、`read_all`、`length` 或范围读取。runtime 已关闭、容量已满或 scope
+已取消时，会在 Provider 调用前拒绝请求。`read_all` 回退会把已读缓冲区直接交给 worker，
+不再复制一份完整数据。运行时构造时会创建 session-owning worker 并等待 Magika Session 初始化完成，因此
 当前没有额外的 `prepare()` API；builder 的 `build()` 就是准备阶段。采样工作在 worker
 上运行，async operation future 负责服务范围读取，不会阻塞执行器线程。
 
 旧版 `MimeDetector` hooks 仍可供不管理 operation scope 的调用方使用。当前上游 trait 不
-传递 parent scope，因此旧 hooks 无法提供 parent-scope cancellation 或 release 观察。迁移时，
-需要该保证的 async provider 调用应改为显式调用 managed API。
+传递 parent scope，因此旧 hooks 无法把请求关联到父 scope。迁移时，需要按 scope 观察接纳和
+资源状态的 async provider 调用应改为显式调用 managed API。
+
+Provider future 的取消不等于底层 I/O 已停止。`rs-fs` 约定：丢弃仍处于 Pending 的
+Provider future，只会停止本地轮询；Provider 启动的 native 或远端工作仍可能继续。Magika
+没有观察这些工作何时完成的接口，也不会把 future `Drop` 当成 I/O 已结束的证据。因此，
+如果请求在 Provider future 尚未完成时被丢弃，且无法观察底层完成时间，子操作的释放观察和
+runtime/字节容量会保持 `Pending`，甚至可能一直如此。调用方可以尽快停止等待，但不能据此
+断言 native 工作已中断。
+
+子操作的业务结果与资源释放是两件事。推理成功记录为 `Succeeded`；worker 返回错误时记录
+`Failed`，调用方仍会收到原始错误；worker panic 则记录为 `Panicked`。即使调用方已经
+取走结果、资源也已释放，终态结果仍可从子操作状态中读取。
+
+`shutdown_blocking` 用同一个 deadline 等待服务接纳/结算和 worker 退出。超时返回时，
+`worker_stopped == false` 表示 worker 尚未退出，运行时会保留其 handle；之后再次调用 shutdown
+可以继续观察并回收 worker。shutdown 不会强行中断 native 推理或 Provider I/O。
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
@@ -342,8 +361,8 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 - 创建 detector 会初始化模型和 runtime；应创建一个 detector 并共享，不要为每个
   输入重复创建。
 - 同一个 detector 上的推理会在内部串行执行。
-- 旧 `MimeDetector` provider hooks 不提供 parent-scope 生命周期观察；需要把取消和释放
-  跟踪关联到请求 scope 时，应使用 managed provider API。
+- 旧 `MimeDetector` provider hooks 不提供 parent-scope 生命周期观察；managed provider API
+  可以把接纳、子操作结果和资源释放状态关联到请求 scope，但仍受上文 Provider 完成观察限制。
 - `qubit-magika` 不保证每个输入都有 MIME 结果；调用方必须处理 `Ok(None)` 和
   `MimeError`。
 - 本 crate 暴露 Magika 映射后的 MIME 结果，不另行定义 MIME registry，也不替代

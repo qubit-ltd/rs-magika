@@ -157,6 +157,20 @@ impl MagikaMimeDetector {
     ///
     /// This explicit API owns an operation scope. The legacy MIME trait hook
     /// remains scope-less because its upstream contract does not pass one.
+    /// Before the first provider call (`open`, `stat`, `read_all`, `length`, or a range read), the
+    /// runtime reserves request capacity and the `max_bytes` accounting budget
+    /// and commits the optional scope child. Closed, full, or already-cancelled
+    /// requests are rejected before provider I/O. The byte reservation bounds
+    /// logical sampling and owned payload accounting; it is not a bound on
+    /// total process memory or provider/network work. The `read_all` fallback
+    /// transfers its returned buffer to the worker without making another
+    /// full-size copy.
+    ///
+    /// Dropping a pending provider future cancels local polling only. A
+    /// provider's native or remote operation may continue, and this API has no
+    /// completion observer for that work. In that case resource release and
+    /// child settlement remain pending, potentially indefinitely; future
+    /// cancellation does not prove that underlying I/O was interrupted.
     ///
     /// # Parameters
     ///
@@ -271,6 +285,13 @@ impl MagikaMimeDetector {
     }
 
     /// Stops managed inference admission and observes pending worker jobs.
+    ///
+    /// The timeout is one deadline shared by service admission/settlement and
+    /// worker exit. If it expires before the worker exits,
+    /// [`ManagedInferenceShutdownReport::worker_stopped`] is false and the
+    /// runtime retains the worker handle; a later call can continue observing
+    /// and reap it. Shutdown does not forcibly interrupt native inference or
+    /// provider I/O.
     ///
     /// # Parameters
     ///

@@ -96,6 +96,14 @@ scope into each managed request, and drain the detector before shutting down
 the application. The legacy `MimeDetector` hooks do not accept an operation
 scope; they keep their existing contract.
 
+Managed requests reserve runtime capacity, the logical `max_bytes` sampling
+budget, and the scope child before provider I/O. Closed, full, or cancelled
+requests are rejected before provider calls. Dropping a pending provider future
+only cancels local polling: when native or remote completion cannot be observed,
+child release and capacity remain pending, possibly indefinitely. See the
+[managed lifecycle guide](doc/user_guide.md#migration-guide) for this boundary,
+worker error reporting, and shutdown timeouts.
+
 Provider selection and detector configuration are separate inputs. A
 `ProviderSelection` decides which registered provider may create the service;
 `MimeConfig` controls the detector instance after that provider is resolved.

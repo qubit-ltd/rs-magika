@@ -604,7 +604,10 @@ impl ManagedInferenceRuntime {
     /// # Returns
     ///
     /// Admission and worker termination facts. A false `worker_stopped` means
-    /// the worker remains active and has not been joined.
+    /// the worker has not exited; its handle remains available for a later
+    /// shutdown call to observe and reap. One deadline covers service
+    /// admission/settlement and worker exit. Shutdown does not forcibly
+    /// interrupt native inference or provider I/O.
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,

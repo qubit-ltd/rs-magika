@@ -10,6 +10,11 @@
 use qubit_operation::supervisor::ShutdownReport;
 
 /// Runtime shutdown facts, including whether the session-owning worker exited.
+///
+/// A timeout can leave `worker_stopped` false while the runtime retains the
+/// worker handle. Call shutdown again to observe and reap the worker after it
+/// exits; shutdown does not forcibly interrupt native inference or provider
+/// I/O.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ManagedInferenceShutdownReport {
     /// Service-group request and resource facts.

@@ -325,12 +325,41 @@ In a real application, keep the supervisor beside the detector so request
 scopes come from the same supervisor, and call detector shutdown after the
 application has stopped admitting requests. `max_bytes` bounds cumulative
 sample reads and the runtime accounts that request against its shared byte
-budget. Sampling and inference run on the session-owning worker; async provider
-reads are serviced by the operation future without blocking its executor.
+budget. This is a logical sampling and owned-payload accounting bound, not a
+guarantee about total process memory or provider/network activity. Admission
+reserves runtime capacity and this byte budget, then commits the optional scope
+child before the first provider `open`, `stat`, `read_all`, `length`, or range-read
+call. A closed runtime, full capacity, or cancelled scope is rejected before
+those provider calls. The `read_all` fallback transfers its buffer to the
+worker instead of making another full-size copy. Sampling and inference run on
+the session-owning worker; async provider reads are serviced by the operation
+future without blocking its executor.
+
+Provider future cancellation has a narrower meaning than native I/O
+cancellation. The `rs-fs` contract says dropping a pending provider future
+stops local polling, but provider-native or remote work may continue. Magika
+has no completion observer for that work and never treats future `Drop` as
+proof that I/O ended. If a pending provider future is dropped and completion
+cannot be observed, the child release observation and runtime/byte capacity
+remain `Pending`, potentially indefinitely. Cancellation can stop the
+caller from waiting promptly; it does not guarantee that native work was
+interrupted.
+
+The child business outcome is independent of resource release. Successful
+inference reports `Succeeded`; a worker error reports `Failed` while the
+caller receives the original error, and a worker panic reports
+`Panicked`. The terminal child result remains observable after the caller
+consumes the result and after resources are released.
+
+`shutdown_blocking` uses one deadline for service admission/settlement and
+worker exit. On timeout, `worker_stopped == false` means the worker has not
+exited and its handle is retained; a later call can continue observing and
+reap it. Shutdown does not forcibly interrupt native inference or provider
+I/O.
 
 The old `MimeDetector` provider hooks remain useful for callers that do not
-manage operation scopes. They cannot provide parent-scope cancellation or
-release observation because the current upstream trait does not pass a scope.
+manage operation scopes. They cannot attach work to a parent scope because the
+current upstream trait does not pass one.
 
 When upgrading a pre-0.14 integration, apply these changes in order:
 
@@ -380,8 +409,9 @@ startup and handle per-input errors at the boundary where the input is read.
   and share it instead of constructing one per input.
 - Inference on one detector is serialized internally.
 - Legacy `MimeDetector` provider hooks do not provide parent-scope lifecycle
-  observation. Use the managed entry point when cancellation and release
-  tracking must be attached to a request scope.
+  observation. Use the managed entry point to attach admission, child outcome,
+  and resource-release observations to a request scope, while accounting for
+  the pending-provider completion limitation above.
 - `qubit-magika` does not promise a MIME result for every input; callers must
   handle `Ok(None)` and `MimeError`.
 - This crate exposes Magika's mapped MIME result; it does not define a separate

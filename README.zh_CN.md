@@ -90,6 +90,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 supervisor 和 detector；每个受管请求显式传入 scope；应用关闭前 drain detector。旧版
 `MimeDetector` hooks 不接收 operation scope，仍遵循原有契约。
 
+受管请求会在访问 Provider 之前预留 runtime 容量、逻辑上的 `max_bytes` 采样预算，
+并提交 scope 子操作；runtime 已关闭、容量已满或请求已取消时，不会调用 Provider。
+如果 Provider future 尚处于 Pending 就被丢弃，只能确认本地轮询停止。无法观察 native
+或远端操作何时完成时，子操作释放和容量会继续保持 Pending，甚至可能一直如此。详见
+[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)中的边界、worker 错误和关闭超时。
+
 Provider 选择和 detector 配置是两个独立输入：`ProviderSelection` 决定允许哪个已注册
 Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的 detector 实例。
 默认情况下，应用仍需在启动时显式注册 Provider。启用 `qubit-magika` 的
