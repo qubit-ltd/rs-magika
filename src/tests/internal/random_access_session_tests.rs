@@ -480,7 +480,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
 }
 
 #[test]
-fn test_dropping_managed_provider_driver_wakes_worker_and_delays_release_until_exit() {
+fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_completion() {
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());
     let service = supervisor.service_group(1).unwrap();
     let provider_gate = Arc::new(TestAsyncReadGate::new());
@@ -541,21 +541,15 @@ fn test_dropping_managed_provider_driver_wakes_worker_and_delays_release_until_e
 
     worker_held_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     let _terminal = handle.result_blocking().unwrap();
-    let observer = handle.observer();
-    let (released_tx, released_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        released_tx.send(observer.released_blocking().unwrap()).unwrap();
-    });
-    assert!(released_rx.recv_timeout(Duration::from_millis(30)).is_err());
     let (lock, ready) = &*release_gate;
     *lock.lock().unwrap() = true;
     ready.notify_all();
-    assert!(released_rx.recv_timeout(Duration::from_secs(30)).unwrap().all_released);
     let report = detector.shutdown_blocking(
-        qubit_operation::supervisor::ShutdownMode::Drain,
-        Duration::from_secs(30),
+        qubit_operation::supervisor::ShutdownMode::Cancel,
+        Duration::from_millis(50),
     );
-    assert!(report.worker_stopped);
+    assert!(!report.admission.is_complete());
+    assert!(!report.worker_stopped);
 }
 
 #[test]

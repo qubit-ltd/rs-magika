@@ -47,21 +47,35 @@ use crate::internal::async_sample_bridge::AsyncSampleDriver;
 use crate::magika_mime_detector::content_type_to_mime;
 use crate::magika_mime_detector::map_magika_error;
 
+#[path = "internal/worker_state.rs"]
+mod worker_state;
+
+use self::worker_state::WorkerState;
+
 /// Monotonically allocates identifiers for runtime child operations.
 static NEXT_CHILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Runs inference and classifies the exact result shape used by both workers.
-fn execute_classified<T>(
-    work: impl FnOnce() -> MimeResult<T>,
-) -> (MimeResult<T>, ChildBusinessOutcome) {
+/// Converts worker execution into a result and its matching child outcome.
+///
+/// # Type Parameters
+///
+/// * `T` - Successful inference result type.
+///
+/// # Parameters
+///
+/// * `work` - Inference closure whose panic is contained at the worker
+///   boundary.
+///
+/// # Returns
+///
+/// The closure result and a lifecycle outcome that distinguishes success,
+/// failure, and panic.
+fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>, ChildBusinessOutcome) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok(Ok(value)) => (Ok(value), ChildBusinessOutcome::Succeeded),
         Ok(Err(error)) => (Err(error), ChildBusinessOutcome::Failed),
         Err(_) => (
-            Err(MimeError::detector_backend(
-                "magika",
-                "inference worker panicked",
-            )),
+            Err(MimeError::detector_backend("magika", "inference worker panicked")),
             ChildBusinessOutcome::Panicked,
         ),
     }
@@ -69,8 +83,7 @@ fn execute_classified<T>(
 
 /// Owned byte classifier used by the worker thread.
 #[cfg(test)]
-pub(crate) type ManagedInferenceEngine =
-    Box<dyn Fn(Vec<u8>) -> MimeResult<Option<String>> + Send + 'static>;
+pub(crate) type ManagedInferenceEngine = Box<dyn Fn(Vec<u8>) -> MimeResult<Option<String>> + Send + 'static>;
 
 /// Shareable managed execution runtime. One worker owns its Magika session and
 /// one queued request; the supervisor service group admits at most one running
@@ -118,23 +131,6 @@ pub struct ManagedInferenceRuntime {
     admission_gate: Arc<Mutex<AdmissionGate>>,
 }
 
-/// Retains the worker handle until actual exit and remembers its join result.
-struct WorkerState {
-    handle: Option<std::thread::JoinHandle<()>>,
-    stopped: bool,
-    panicked: bool,
-}
-
-impl WorkerState {
-    fn new(handle: std::thread::JoinHandle<()>) -> Self {
-        Self {
-            handle: Some(handle),
-            stopped: false,
-            panicked: false,
-        }
-    }
-}
-
 impl std::fmt::Debug for ManagedInferenceRuntime {
     /// Formats the runtime without exposing session or payload state.
     ///
@@ -177,7 +173,7 @@ impl ManagedInferenceRuntime {
         }
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(1);
-        let worker = std::thread::Builder::new()
+        let worker = match std::thread::Builder::new()
             .name("magika-inference".to_owned())
             .spawn(move || {
                 let mut session = match Session::new() {
@@ -191,11 +187,7 @@ impl ManagedInferenceRuntime {
                     }
                 };
                 while let Ok(job) = receiver.recv() {
-                    let Job {
-                        input,
-                        state,
-                        owner,
-                    } = job;
+                    let Job { input, state, owner } = job;
                     let bridge = match &input {
                         WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
                         _ => None,
@@ -210,8 +202,7 @@ impl ManagedInferenceRuntime {
                         );
                     } else {
                         state.mark_started();
-                        let (result, outcome) =
-                            execute_classified(|| infer_input(&mut session, input));
+                        let (result, outcome) = execute_classified(|| infer_input(&mut session, input));
                         state.finish_business(result, outcome);
                     }
                     if let Some(bridge) = bridge {
@@ -219,19 +210,34 @@ impl ManagedInferenceRuntime {
                     }
                     owner.worker_done();
                 }
-            })
-            .map_err(|error| {
-                MimeError::detector_backend("magika", format!("could not start worker: {error}"))
-            })?;
-        ready_receiver.recv().map_err(|_| {
-            MimeError::detector_backend("magika", "worker exited during initialization")
-        })??;
-        let service_group = supervisor.service_group(2).map_err(|error| {
-            MimeError::detector_backend(
-                "magika",
-                format!("could not create service group: {error}"),
-            )
-        })?;
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                return Err(MimeError::detector_backend(
+                    "magika",
+                    format!("could not start worker: {error}"),
+                ));
+            }
+        };
+        match ready_receiver.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                return Err(MimeError::detector_backend(
+                    "magika",
+                    "worker exited during initialization",
+                ));
+            }
+        }
+        let service_group = match supervisor.service_group(2) {
+            Ok(service_group) => service_group,
+            Err(error) => {
+                return Err(MimeError::detector_backend(
+                    "magika",
+                    format!("could not create service group: {error}"),
+                ));
+            }
+        };
         Ok(Self {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(WorkerState::new(worker)),
@@ -253,6 +259,11 @@ impl ManagedInferenceRuntime {
     /// * `engine` - Gated classifier executed by the worker.
     /// * `after_business` - Gate run after result publication but before
     ///   release.
+    ///
+    /// # Returns
+    ///
+    /// A test runtime whose worker uses `engine` and waits at `after_business`
+    /// after publishing each result.
     #[cfg(test)]
     pub(crate) fn with_engine(
         supervisor: OperationSupervisor,
@@ -260,16 +271,25 @@ impl ManagedInferenceRuntime {
         engine: ManagedInferenceEngine,
         after_business: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
-        Self::with_engine_and_worker_exit_hook(
-            supervisor,
-            max_in_flight_bytes,
-            engine,
-            after_business,
-            Box::new(|| {}),
-        )
+        Self::with_engine_and_worker_exit_hook(supervisor, max_in_flight_bytes, engine, after_business, Box::new(|| {}))
     }
 
     /// Creates a deterministic worker with a hook after all jobs are released.
+    ///
+    /// # Parameters
+    ///
+    /// * `supervisor` - Supervisor used to register and settle test operations.
+    /// * `max_in_flight_bytes` - Aggregate payload limit enforced by the
+    ///   runtime.
+    /// * `engine` - Classifier run for each accepted test job.
+    /// * `after_business` - Hook run after publishing each job result and
+    ///   before releasing its operation resources.
+    /// * `before_worker_exit` - Hook run after the worker observes channel
+    ///   close.
+    ///
+    /// # Returns
+    ///
+    /// A test runtime using the supplied classifier and lifecycle hooks.
     #[cfg(test)]
     pub(crate) fn with_engine_and_worker_exit_hook(
         supervisor: OperationSupervisor,
@@ -283,11 +303,7 @@ impl ManagedInferenceRuntime {
             .name("magika-test-inference".to_owned())
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
-                    let Job {
-                        input,
-                        state,
-                        owner,
-                    } = job;
+                    let Job { input, state, owner } = job;
                     if state.stop_requested() {
                         state.finish_business(
                             Err(MimeError::detector_backend(
@@ -322,9 +338,7 @@ impl ManagedInferenceRuntime {
                 before_worker_exit();
             })
             .expect("test inference worker should start");
-        let service_group = supervisor
-            .service_group(2)
-            .expect("service group should construct");
+        let service_group = supervisor.service_group(2).expect("service group should construct");
         Self {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(WorkerState::new(worker)),
@@ -355,11 +369,7 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns an admission, size-limit, Magika, or worker error.
-    pub async fn detect_bytes(
-        &self,
-        scope: &OperationScope,
-        bytes: Vec<u8>,
-    ) -> MimeResult<Option<String>> {
+    pub async fn detect_bytes(&self, scope: &OperationScope, bytes: Vec<u8>) -> MimeResult<Option<String>> {
         let length = bytes.len();
         if length > self.max_in_flight_bytes() {
             return Err(MimeError::BufferLimitExceeded {
@@ -371,24 +381,21 @@ impl ManagedInferenceRuntime {
             .await
     }
 
-    /// Classifies owned bytes through the worker without a parent scope.
+    /// Classifies owned bytes through the worker without registering a parent.
     ///
     /// # Parameters
     ///
-    /// * `bytes` - Owned input payload retained through worker completion.
+    /// * `bytes` - Owned payload retained until the worker releases the job.
     ///
     /// # Returns
     ///
-    /// A MIME mapping or `None` for an unmapped Magika type.
+    /// A MIME mapping, or `None` when Magika has no mapping.
     ///
     /// # Errors
     ///
     /// Returns a size-limit, capacity, Magika, or worker error.
     #[cfg(test)]
-    pub(crate) async fn detect_bytes_unmanaged(
-        &self,
-        bytes: Vec<u8>,
-    ) -> MimeResult<Option<String>> {
+    pub(crate) async fn detect_bytes_unmanaged(&self, bytes: Vec<u8>) -> MimeResult<Option<String>> {
         let length = bytes.len();
         if length > self.max_in_flight_bytes() {
             return Err(MimeError::BufferLimitExceeded {
@@ -396,10 +403,24 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit(None, WorkerInput::Bytes(bytes.into_boxed_slice()))?
-            .await
+        self.submit(None, WorkerInput::Bytes(bytes.into_boxed_slice()))?.await
     }
 
+    /// Reserves operation and byte capacity before a provider performs I/O.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Optional parent operation that owns this inference request.
+    /// * `max_bytes` - Maximum provider payload retained for the request.
+    ///
+    /// # Returns
+    ///
+    /// An admission token that must be used to dispatch or settle the request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the payload exceeds the runtime limit or admission
+    /// capacity is unavailable.
     pub(crate) fn reserve_for_provider(
         &self,
         scope: Option<&OperationScope>,
@@ -414,6 +435,26 @@ impl ManagedInferenceRuntime {
         self.reserve_request(scope, max_bytes)
     }
 
+    /// Drives provider reads for an already admitted async input.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `I` - Provider input whose range reads can be awaited.
+    ///
+    /// # Parameters
+    ///
+    /// * `admission` - Previously reserved operation and byte capacity.
+    /// * `input` - Provider source read on demand by Magika sampling.
+    /// * `max_bytes` - Bound used for provider range requests.
+    /// * `map_error` - Route-specific conversion for Magika failures.
+    ///
+    /// # Returns
+    ///
+    /// A MIME mapping, or `None` when the input has no mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider, admission, Magika, or worker errors.
     pub(crate) async fn detect_async_input_admitted<I>(
         &self,
         mut admission: RequestAdmission,
@@ -431,18 +472,14 @@ impl ManagedInferenceRuntime {
             Ok(length) => length,
             Err(error) => {
                 let error = map_error(error);
-                admission.settle_error(MimeError::detector_backend(
-                    "magika",
-                    "provider length lookup failed",
-                ));
+                admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
                 return Err(error);
             }
         };
         let bridge = AsyncSampleBridge::new(length);
         let driver = bridge.driver();
         let state = Arc::clone(&admission.state);
-        let inference =
-            self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
+        let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
         let (result, driver_completed) = drive_async_input(driver, input, inference, state.clone()).await;
         if driver_completed {
             state.mark_driver_done();
@@ -450,6 +487,20 @@ impl ManagedInferenceRuntime {
         result
     }
 
+    /// Dispatches owned bytes using capacity reserved by the caller.
+    ///
+    /// # Parameters
+    ///
+    /// * `admission` - Previously reserved operation and byte capacity.
+    /// * `bytes` - Owned input retained until the worker releases it.
+    ///
+    /// # Returns
+    ///
+    /// A MIME mapping, or `None` when Magika has no mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if worker dispatch or inference fails.
     pub(crate) async fn detect_bytes_admitted(
         &self,
         admission: RequestAdmission,
@@ -506,11 +557,7 @@ impl ManagedInferenceRuntime {
     ///
     /// Returns an error when capacity, scope registration, or worker admission
     /// rejects the request.
-    fn submit(
-        &self,
-        scope: Option<&OperationScope>,
-        input: WorkerInput,
-    ) -> MimeResult<InferenceFuture> {
+    fn submit(&self, scope: Option<&OperationScope>, input: WorkerInput) -> MimeResult<InferenceFuture> {
         let byte_count = match &input {
             WorkerInput::Bytes(bytes) => bytes.len(),
             WorkerInput::Bridge(_, byte_limit, _) => *byte_limit,
@@ -524,14 +571,45 @@ impl ManagedInferenceRuntime {
         self.dispatch(admission, input)
     }
 
-    fn reserve_request(
-        &self,
-        scope: Option<&OperationScope>,
-        byte_count: usize,
-    ) -> MimeResult<RequestAdmission> {
+    /// Acquires byte and service capacity for a request.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Optional parent operation that owns the request.
+    /// * `byte_count` - Payload bytes reserved until resource release.
+    ///
+    /// # Returns
+    ///
+    /// An admission token that owns the acquired capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when shutdown has closed admission or a capacity or
+    /// scope registration step fails.
+    fn reserve_request(&self, scope: Option<&OperationScope>, byte_count: usize) -> MimeResult<RequestAdmission> {
         self.reserve_request_with_hook(scope, byte_count, || {})
     }
 
+    /// Acquires request capacity and invokes a hook after service admission.
+    ///
+    /// The hook runs while the admission gate is held, allowing lifecycle tests
+    /// to synchronize shutdown with registration without changing production
+    /// admission behavior.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Optional parent operation that owns the request.
+    /// * `byte_count` - Payload bytes reserved until resource release.
+    /// * `after_service_reservation` - One-shot synchronization hook.
+    ///
+    /// # Returns
+    ///
+    /// An admission token that owns the acquired capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when shutdown has closed admission or a capacity or
+    /// scope registration step fails.
     fn reserve_request_with_hook(
         &self,
         scope: Option<&OperationScope>,
@@ -542,12 +620,14 @@ impl ManagedInferenceRuntime {
         if admission_gate.closed {
             return Err(MimeError::detector_backend("magika", "runtime admission is closed"));
         }
-        let byte_permit = self.byte_budget.try_acquire(byte_count).ok_or_else(|| {
-            MimeError::detector_backend("magika", "runtime in-flight byte budget is full")
-        })?;
-        let admission = self.service_group.try_admit().map_err(|error| {
-            MimeError::detector_backend("magika", format!("runtime admission failed: {error}"))
-        })?;
+        let byte_permit = self
+            .byte_budget
+            .try_acquire(byte_count)
+            .ok_or_else(|| MimeError::detector_backend("magika", "runtime in-flight byte budget is full"))?;
+        let admission = self
+            .service_group
+            .try_admit()
+            .map_err(|error| MimeError::detector_backend("magika", format!("runtime admission failed: {error}")))?;
         after_service_reservation();
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let state = Arc::new(TaskState::new_registered(
@@ -572,17 +652,24 @@ impl ManagedInferenceRuntime {
         ))
     }
 
-    fn dispatch(
-        &self,
-        admission: RequestAdmission,
-        input: WorkerInput,
-    ) -> MimeResult<InferenceFuture> {
+    /// Sends an admitted input to the worker and returns its result observer.
+    ///
+    /// # Parameters
+    ///
+    /// * `admission` - Token that owns operation and byte capacity.
+    /// * `input` - Owned work sent to the session-owning worker.
+    ///
+    /// # Returns
+    ///
+    /// A future that observes the worker's inference result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation cannot be dispatched.
+    fn dispatch(&self, admission: RequestAdmission, input: WorkerInput) -> MimeResult<InferenceFuture> {
         let control = admission.control();
         let sent_state = {
-            let sender = self
-                .sender
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());
             match sender.as_ref() {
                 Some(sender) => admission.dispatch(input, sender)?,
                 None => {
@@ -616,6 +703,21 @@ impl ManagedInferenceRuntime {
         self.shutdown_blocking_with_hook(mode, timeout, || {})
     }
 
+    /// Shuts down admission with an optional hook after the cancellation scan.
+    ///
+    /// The hook is used by lifecycle tests to observe the boundary between
+    /// scanning active tasks and waiting for service settlement.
+    ///
+    /// # Parameters
+    ///
+    /// * `mode` - Drain queued work or request cooperative cancellation.
+    /// * `timeout` - Maximum wait for child and worker release.
+    /// * `after_task_scan` - One-shot hook run after active tasks are scanned.
+    ///
+    /// # Returns
+    ///
+    /// Admission and worker termination facts, including whether the worker
+    /// stopped before the timeout.
     fn shutdown_blocking_with_hook(
         &self,
         mode: ShutdownMode,
@@ -634,9 +736,7 @@ impl ManagedInferenceRuntime {
             }
         }
         after_task_scan();
-        let admission = self
-            .service_group
-            .shutdown_blocking(mode, remaining_timeout(deadline));
+        let admission = self.service_group.shutdown_blocking(mode, remaining_timeout(deadline));
         if !admission.is_complete() {
             return ManagedInferenceShutdownReport {
                 admission,
@@ -644,21 +744,12 @@ impl ManagedInferenceRuntime {
                 worker_panicked: false,
             };
         }
-        self.sender
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        self.sender.lock().unwrap_or_else(|error| error.into_inner()).take();
         loop {
-            let mut worker = self
-                .worker
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
             match worker.handle.as_ref() {
                 Some(handle) if handle.is_finished() => {
-                    let handle = worker
-                        .handle
-                        .take()
-                        .expect("finished worker handle is present");
+                    let handle = worker.handle.take().expect("finished worker handle is present");
                     worker.panicked = handle.join().is_err();
                     worker.stopped = true;
                     return ManagedInferenceShutdownReport {
@@ -692,6 +783,15 @@ impl ManagedInferenceRuntime {
     }
 }
 
+/// Computes the time left before a shared shutdown deadline.
+///
+/// # Parameters
+///
+/// * `deadline` - Absolute deadline, or `None` when the wait is unbounded.
+///
+/// # Returns
+///
+/// The remaining duration, saturating to zero after expiration.
 fn remaining_timeout(deadline: Option<std::time::Instant>) -> std::time::Duration {
     deadline
         .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
@@ -710,25 +810,17 @@ fn remaining_timeout(deadline: Option<std::time::Instant>) -> std::time::Duratio
 /// The MIME mapping for a classified input, or `None` for unmapped types.
 fn infer_input(session: &mut Session, input: WorkerInput) -> MimeResult<Option<String>> {
     match input {
-        WorkerInput::Bytes(bytes) => {
-            match FeaturesOrRuled::extract_sync(&bytes[..]).map_err(map_magika_error)? {
-                FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
-                FeaturesOrRuled::Features(features) => {
-                    identify_features(session, &features, map_magika_error)
-                }
-            }
-        }
+        WorkerInput::Bytes(bytes) => match FeaturesOrRuled::extract_sync(&bytes[..]).map_err(map_magika_error)? {
+            FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
+            FeaturesOrRuled::Features(features) => identify_features(session, &features, map_magika_error),
+        },
         WorkerInput::Bridge(bridge, _, map_error) => {
             match FeaturesOrRuled::extract_sync(BridgeSyncInput(bridge)).map_err(map_error)? {
                 FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
-                FeaturesOrRuled::Features(features) => {
-                    identify_features(session, &features, map_error)
-                }
+                FeaturesOrRuled::Features(features) => identify_features(session, &features, map_error),
             }
         }
-        WorkerInput::Features(features, map_error) => {
-            identify_features(session, &features, map_error)
-        }
+        WorkerInput::Features(features, map_error) => identify_features(session, &features, map_error),
     }
 }
 
@@ -858,7 +950,7 @@ mod tests {
     use super::execute_classified;
 
     #[test]
-    fn shutdown_scan_cannot_miss_a_request_between_service_and_task_registration() {
+    fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registration() {
         let supervisor = OperationSupervisor::new(SupervisorLimits::default());
         let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
             supervisor,
@@ -891,11 +983,9 @@ mod tests {
         let shutdown_runtime = Arc::clone(&runtime);
         let shutdown = std::thread::spawn(move || {
             shutdown_started_tx.send(()).unwrap();
-            shutdown_runtime.shutdown_blocking_with_hook(
-                ShutdownMode::Cancel,
-                Duration::from_millis(250),
-                move || scan_tx.send(()).unwrap(),
-            )
+            shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Cancel, Duration::from_millis(250), move || {
+                scan_tx.send(()).unwrap()
+            })
         });
         shutdown_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let scanned_before_registration = scan_rx.recv_timeout(Duration::from_millis(50)).is_ok();
@@ -919,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_provider_admission_checks_stop_before_first_and_later_io() {
+    fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
         let supervisor = OperationSupervisor::new(SupervisorLimits::default());
         let service = supervisor.service_group(2).unwrap();
         let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
@@ -930,45 +1020,55 @@ mod tests {
         ));
 
         let first_runtime = Arc::clone(&runtime);
-        let mut first = service.start(qubit_operation::scope::ScopeOptions::default(), move |scope| async move {
-            let mut admission = first_runtime.reserve_for_provider(Some(&scope), 8)?;
-            scope.request_cancel(StopReason::UserCancelled);
-            assert!(admission.begin_provider_operation().is_err());
-            Ok::<_, MimeError>(())
-        }).unwrap();
+        let mut first = service
+            .start(
+                qubit_operation::scope::ScopeOptions::default(),
+                move |scope| async move {
+                    let mut admission = first_runtime.reserve_for_provider(Some(&scope), 8)?;
+                    scope.request_cancel(StopReason::UserCancelled);
+                    assert!(admission.begin_provider_operation().is_err());
+                    Ok::<_, MimeError>(())
+                },
+            )
+            .unwrap();
         let _ = first.result_blocking();
 
         let later_runtime = Arc::clone(&runtime);
-        let mut later = service.start(qubit_operation::scope::ScopeOptions::default(), move |scope| async move {
-            let mut admission = later_runtime.reserve_for_provider(Some(&scope), 8)?;
-            admission.begin_provider_operation()?;
-            admission.provider_operation_completed();
-            scope.request_cancel(StopReason::UserCancelled);
-            assert!(admission.begin_provider_operation().is_err());
-            Ok::<_, MimeError>(())
-        }).unwrap();
+        let mut later = service
+            .start(
+                qubit_operation::scope::ScopeOptions::default(),
+                move |scope| async move {
+                    let mut admission = later_runtime.reserve_for_provider(Some(&scope), 8)?;
+                    admission.begin_provider_operation()?;
+                    admission.provider_operation_completed();
+                    scope.request_cancel(StopReason::UserCancelled);
+                    assert!(admission.begin_provider_operation().is_err());
+                    Ok::<_, MimeError>(())
+                },
+            )
+            .unwrap();
         let _ = later.result_blocking();
 
         let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
     }
 
     #[test]
-    fn scope_less_pending_read_keeps_budget_after_worker_done() {
+    fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
         struct ThreadWake(std::thread::Thread);
         impl std::task::Wake for ThreadWake {
-            fn wake(self: Arc<Self>) { self.0.unpark(); }
-            fn wake_by_ref(self: &Arc<Self>) { self.0.unpark(); }
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
         }
         struct PendingReadInput(std::sync::mpsc::SyncSender<()>);
         impl magika::AsyncInput for PendingReadInput {
             fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
                 std::future::ready(Ok(1))
             }
-            fn read_at(
-                &mut self,
-                _buffer: &mut [u8],
-                _offset: u64,
-            ) -> impl Future<Output = Result<(), magika::Error>> {
+            fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
                 let started = self.0.clone();
                 async move {
                     started.send(()).unwrap();
@@ -1017,14 +1117,49 @@ mod tests {
     }
 
     #[test]
+    fn test_admitted_owned_bytes_return_worker_result() {
+        struct ThreadWake(std::thread::Thread);
+        impl std::task::Wake for ThreadWake {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let runtime = ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8,
+            Box::new(|bytes| Ok(Some(format!("application/x-bytes-{}", bytes.len())))),
+            Box::new(|| {}),
+        );
+        let admission = runtime.reserve_for_provider(None, 3).unwrap();
+        let mut future = Box::pin(runtime.detect_bytes_admitted(admission, vec![1, 2, 3]));
+        let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let result = loop {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+                break result;
+            }
+            std::thread::park_timeout(Duration::from_secs(1));
+        };
+        assert_eq!(result.unwrap().as_deref(), Some("application/x-bytes-3"));
+        assert!(
+            runtime
+                .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1))
+                .worker_stopped
+        );
+    }
+
+    #[test]
     fn test_shared_worker_classification_covers_success_and_panic() {
-        let (result, outcome) =
-            execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
+        let (result, outcome) = execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
         assert!(matches!(result, Ok(Some(value)) if value == "text/plain"));
         assert_eq!(outcome, ChildBusinessOutcome::Succeeded);
 
-        let (result, outcome): (qubit_mime::MimeResult<()>, _) =
-            execute_classified(|| panic!("engine panic"));
+        let (result, outcome): (qubit_mime::MimeResult<()>, _) = execute_classified(|| panic!("engine panic"));
         assert!(result.is_err());
         assert_eq!(outcome, ChildBusinessOutcome::Panicked);
     }
@@ -1093,11 +1228,7 @@ mod tests {
             .submit(None, WorkerInput::Bytes(vec![0; 5].into()))
             .expect("first job should fit the byte budget");
         started_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-        assert!(
-            runtime
-                .submit(None, WorkerInput::Bytes(vec![0; 5].into()))
-                .is_err()
-        );
+        assert!(runtime.submit(None, WorkerInput::Bytes(vec![0; 5].into())).is_err());
 
         let (lock, ready) = &*gate;
         *lock.lock().unwrap() = true;

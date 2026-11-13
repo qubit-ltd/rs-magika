@@ -7,7 +7,7 @@
 // =============================================================================
 //! Cumulative byte budgets for provider-backed Magika inputs.
 
-use super::budget_exceeded::BudgetExceeded;
+use qubit_mime::MimeError;
 
 /// Tracks the total number of bytes requested during one detection.
 #[derive(Debug)]
@@ -31,8 +31,8 @@ impl ReadBudget {
 
     /// Reserves `count` bytes before a provider range read.
     ///
-    /// Returns [`BudgetExceeded`] without changing the used total if this read
-    /// would exceed the limit or overflow the cumulative count.
+    /// Returns a buffer-limit error without changing the used total if this
+    /// read would exceed the limit or overflow the cumulative count.
     ///
     /// # Parameters
     ///
@@ -41,16 +41,17 @@ impl ReadBudget {
     /// # Returns
     ///
     /// `Ok(())` when the bytes fit within the remaining budget, or
-    /// [`BudgetExceeded`] when the cumulative request exceeds the limit.
-    pub(crate) fn consume(&mut self, count: usize) -> Result<(), BudgetExceeded> {
+    /// [`MimeError::BufferLimitExceeded`] when the cumulative request exceeds
+    /// the limit.
+    pub(crate) fn consume(&mut self, count: usize) -> Result<(), MimeError> {
         let Some(requested) = self.used.checked_add(count) else {
-            return Err(BudgetExceeded {
+            return Err(MimeError::BufferLimitExceeded {
                 requested: usize::MAX,
                 limit: self.limit,
             });
         };
         if requested > self.limit {
-            return Err(BudgetExceeded {
+            return Err(MimeError::BufferLimitExceeded {
                 requested,
                 limit: self.limit,
             });

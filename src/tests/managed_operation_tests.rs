@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
-use qubit_operation::report::ChildBusinessOutcome;
 use qubit_operation::protocol::StopReason;
+use qubit_operation::report::ChildBusinessOutcome;
 use qubit_operation::report::SupervisorLimits;
 use qubit_operation::scope::ScopeOptions;
 use qubit_operation::supervisor::OperationSupervisor;
@@ -219,7 +219,10 @@ fn test_managed_engine_error_is_delivered_and_reported_as_failed_child() {
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());
     let service = supervisor.service_group(1).unwrap();
     let engine: ManagedInferenceEngine = Box::new(|_bytes| {
-        Err(qubit_mime::MimeError::detector_backend("fixture", "original engine error"))
+        Err(qubit_mime::MimeError::detector_backend(
+            "fixture",
+            "original engine error",
+        ))
     });
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
@@ -418,10 +421,7 @@ fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
     let body_runtime = Arc::clone(&runtime);
     let mut handle = service
         .start(ScopeOptions::default(), move |scope| async move {
-            body_runtime
-                .detect_bytes(&scope, b"fixture".to_vec())
-                .await
-                .map(|_| ())
+            body_runtime.detect_bytes(&scope, b"fixture".to_vec()).await.map(|_| ())
         })
         .unwrap();
     let operation_succeeded = matches!(
@@ -437,9 +437,7 @@ fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown_thread = std::thread::spawn(move || {
         shutdown_tx
-            .send(
-                shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(150)),
-            )
+            .send(shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(150)))
             .unwrap();
     });
     let worker_reached_exit = worker_exit_rx.recv_timeout(Duration::from_secs(2)).is_ok();
@@ -480,12 +478,9 @@ fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
     };
     let repeated_report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::ZERO);
 
-    let timed_report =
-        timed_result.expect("shutdown should honor its deadline while worker exit is gated");
-    let first_observer_report =
-        first_observer_result.expect("first concurrent observer should return");
-    let second_observer_report =
-        second_observer_result.expect("second concurrent observer should return");
+    let timed_report = timed_result.expect("shutdown should honor its deadline while worker exit is gated");
+    let first_observer_report = first_observer_result.expect("first concurrent observer should return");
+    let second_observer_report = second_observer_result.expect("second concurrent observer should return");
     assert!(operation_succeeded);
     assert!(resources_released);
     assert!(worker_reached_exit);
@@ -496,4 +491,39 @@ fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
     assert!(final_report.worker_panicked);
     assert!(repeated_report.worker_stopped);
     assert!(repeated_report.worker_panicked);
+}
+
+#[test]
+fn test_public_runtime_detection_preserves_result_release_and_shutdown() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        MimeConfig::default().max_buffer_size(),
+        Box::new(|bytes| Ok(Some(format!("application/x-{}", bytes.len())))),
+        Box::new(|| {}),
+    ));
+    assert!(format!("{runtime:?}").contains("ManagedInferenceRuntime"));
+    let detector = Arc::new(
+        crate::MagikaMimeDetector::builder()
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .unwrap(),
+    );
+    let request_detector = Arc::clone(&detector);
+    let service = supervisor.service_group(2).unwrap();
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            request_detector.detect_bytes_managed(&scope, vec![1, 2, 3]).await
+        })
+        .unwrap();
+
+    let outcome = handle.result_blocking().unwrap();
+    assert!(matches!(
+        outcome,
+        qubit_operation::report::OperationOutcome::Succeeded(Some(value)) if value == "application/x-3"
+    ));
+    assert!(handle.observer().released_blocking().unwrap().all_released);
+    let shutdown = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+    assert!(shutdown.worker_stopped);
+    assert!(shutdown.admission.is_complete());
 }

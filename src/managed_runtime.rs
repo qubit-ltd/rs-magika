@@ -7,6 +7,7 @@
 // =============================================================================
 //! Bounded asynchronous sampling and inference on one session-owning worker.
 
+pub(super) mod admission_gate;
 pub(super) mod bridge_sync_input;
 pub(super) mod byte_budget;
 pub(super) mod byte_permit;
@@ -16,6 +17,7 @@ pub(super) mod job;
 mod managed_inference_runtime;
 mod managed_inference_shutdown_report;
 pub(super) mod request_admission;
+pub(super) mod request_resource_owner;
 pub(super) mod task_control;
 pub(super) mod task_inner;
 pub(super) mod task_state;

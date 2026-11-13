@@ -10,7 +10,6 @@
 mod async_provider_input;
 mod async_route;
 pub(crate) mod async_sample_bridge;
-pub(crate) mod budget_exceeded;
 pub(crate) mod provider_input;
 pub(crate) mod read_budget;
 mod read_seek_input;

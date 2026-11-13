@@ -127,6 +127,39 @@ fn test_invalid_ranges_fail_without_publishing_requests() {
 }
 
 #[test]
+fn test_empty_reads_and_closed_driver_finish_without_range_requests() {
+    let bridge = AsyncSampleBridge::new(0);
+    let mut empty = [];
+    bridge.read_at(0, &mut empty).unwrap();
+    bridge.close();
+    assert!(block_on(bridge.next_request()).is_none());
+
+    let waker = std::task::Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut closed = std::pin::pin!(bridge.closed());
+    assert!(Future::poll(closed.as_mut(), &mut context).is_ready());
+}
+
+#[test]
+fn test_bridge_close_wakes_pending_request_and_close_waiters() {
+    let bridge = AsyncSampleBridge::new(1);
+    let waker = std::task::Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut request = std::pin::pin!(bridge.next_request());
+    assert!(Future::poll(request.as_mut(), &mut context).is_pending());
+    let mut closed = std::pin::pin!(bridge.closed());
+    assert!(Future::poll(closed.as_mut(), &mut context).is_pending());
+
+    bridge.close();
+
+    assert!(matches!(
+        Future::poll(request.as_mut(), &mut context),
+        Poll::Ready(None)
+    ));
+    assert!(Future::poll(closed.as_mut(), &mut context).is_ready());
+}
+
+#[test]
 fn test_bridge_never_exposes_two_unanswered_requests() {
     let bridge = Arc::new(AsyncSampleBridge::new(8));
     let first_bridge = Arc::clone(&bridge);

@@ -114,3 +114,26 @@ impl Drop for ReadRequest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Weak;
+
+    use super::ReadRequest;
+    use crate::internal::async_sample_bridge::response::Response;
+
+    #[test]
+    fn test_abandoned_request_interrupts_worker_after_bridge_drop() {
+        let response = Arc::new(Response::new());
+        let request = ReadRequest::new(0, 1, Arc::clone(&response), Weak::new());
+
+        drop(request);
+
+        let result = response.result.lock().unwrap();
+        assert_eq!(
+            std::io::ErrorKind::Interrupted,
+            result.as_ref().unwrap().as_ref().unwrap_err().kind(),
+        );
+    }
+}

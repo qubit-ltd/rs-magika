@@ -145,6 +145,21 @@ mod tests {
     }
 
     #[test]
+    fn test_blocking_wait_observes_result_published_after_wait_begins() {
+        let state = Arc::new(TaskState::new(OperationId::new(102), None));
+        let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
+        let future = InferenceFuture::new(Arc::clone(&state), control);
+        let worker_state = Arc::clone(&state);
+        let worker = std::thread::spawn(move || {
+            worker_state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
+            worker_state.mark_released();
+        });
+
+        assert_eq!(future.wait_blocking().unwrap().as_deref(), Some("text/plain"));
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn test_dropping_pending_future_requests_cooperative_stop() {
         let state = Arc::new(TaskState::new(OperationId::new(100), None));
         let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));

@@ -6,6 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 
+use qubit_mime::MimeError;
+
 use crate::internal::read_budget::ReadBudget;
 
 #[test]
@@ -14,8 +16,13 @@ fn test_read_budget_counts_repeated_reads() {
     assert!(budget.consume(4_096).is_ok());
     assert!(budget.consume(4_096).is_ok());
     let error = budget.consume(4_097).expect_err("third read must exceed budget");
-    assert_eq!(12_289, error.requested);
-    assert_eq!(8_192, error.limit);
+    assert!(matches!(
+        error,
+        MimeError::BufferLimitExceeded {
+            requested: 12_289,
+            limit: 8_192
+        }
+    ));
 }
 
 #[test]
@@ -23,8 +30,13 @@ fn test_read_budget_reports_addition_overflow() {
     let mut budget = ReadBudget::new(usize::MAX);
     assert!(budget.consume(usize::MAX).is_ok());
     let error = budget.consume(1).expect_err("overflow must be rejected");
-    assert_eq!(usize::MAX, error.requested);
-    assert_eq!(usize::MAX, error.limit);
+    assert!(matches!(
+        error,
+        MimeError::BufferLimitExceeded {
+            requested: usize::MAX,
+            limit: usize::MAX
+        }
+    ));
 }
 
 #[test]
@@ -34,6 +46,11 @@ fn test_read_budget_rejects_second_window_at_limit() {
     let error = budget
         .consume(4_096)
         .expect_err("second window must exceed the cumulative limit");
-    assert_eq!(8_192, error.requested);
-    assert_eq!(4_096, error.limit);
+    assert!(matches!(
+        error,
+        MimeError::BufferLimitExceeded {
+            requested: 8_192,
+            limit: 4_096
+        }
+    ));
 }

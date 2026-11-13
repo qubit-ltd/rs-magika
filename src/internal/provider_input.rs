@@ -17,7 +17,6 @@ use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::ReadOptions;
 use qubit_mime::MimeError;
 
-use super::budget_exceeded::BudgetExceeded;
 use super::read_budget::ReadBudget;
 
 /// Reads exactly one Magika range through a synchronous provider.
@@ -303,13 +302,12 @@ pub(crate) fn invalid_input(message: &'static str) -> io::Error {
 pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
     match error {
         Error::IOError(error) => {
-            if let Some(error) = error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<BudgetExceeded>())
+            if let Some(MimeError::BufferLimitExceeded { requested, limit }) =
+                error.get_ref().and_then(|source| source.downcast_ref::<MimeError>())
             {
                 return MimeError::BufferLimitExceeded {
-                    requested: error.requested,
-                    limit: error.limit,
+                    requested: *requested,
+                    limit: *limit,
                 };
             }
             MimeError::Io(error)

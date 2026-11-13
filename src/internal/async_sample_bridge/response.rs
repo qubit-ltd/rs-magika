@@ -42,3 +42,49 @@ pub(super) fn set_response(response: &Response, result: io::Result<Vec<u8>>) {
         response.ready.notify_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Response;
+    use super::set_response;
+
+    #[test]
+    fn test_response_publication_recovers_a_poisoned_result_lock() {
+        let response = std::sync::Arc::new(Response::new());
+        let poisoned = std::sync::Arc::clone(&response);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned.result.lock().unwrap();
+                panic!("poison response lock before publication");
+            })
+            .join()
+            .is_err()
+        );
+
+        set_response(&response, Ok(vec![3]));
+
+        assert_eq!(
+            response
+                .result
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap(),
+            &[3]
+        );
+    }
+
+    #[test]
+    fn test_response_keeps_the_first_published_result() {
+        let response = Response::new();
+        set_response(&response, Ok(vec![1, 2]));
+        set_response(&response, Err(std::io::Error::other("later response")));
+
+        assert_eq!(
+            response.result.lock().unwrap().as_ref().unwrap().as_ref().unwrap(),
+            &[1, 2]
+        );
+    }
+}

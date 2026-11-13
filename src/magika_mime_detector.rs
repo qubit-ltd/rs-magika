@@ -144,11 +144,7 @@ impl MagikaMimeDetector {
     /// # Errors
     ///
     /// Returns an admission, size-limit, Magika, or worker error.
-    pub async fn detect_bytes_managed(
-        &self,
-        scope: &OperationScope,
-        content: Vec<u8>,
-    ) -> MimeResult<Option<String>> {
+    pub async fn detect_bytes_managed(&self, scope: &OperationScope, content: Vec<u8>) -> MimeResult<Option<String>> {
         self.runtime.detect_bytes(scope, content).await
     }
 
@@ -157,14 +153,14 @@ impl MagikaMimeDetector {
     ///
     /// This explicit API owns an operation scope. The legacy MIME trait hook
     /// remains scope-less because its upstream contract does not pass one.
-    /// Before the first provider call (`open`, `stat`, `read_all`, `length`, or a range read), the
-    /// runtime reserves request capacity and the `max_bytes` accounting budget
-    /// and commits the optional scope child. Closed, full, or already-cancelled
-    /// requests are rejected before provider I/O. The byte reservation bounds
-    /// logical sampling and owned payload accounting; it is not a bound on
-    /// total process memory or provider/network work. The `read_all` fallback
-    /// transfers its returned buffer to the worker without making another
-    /// full-size copy.
+    /// Before the first provider call (`open`, `stat`, `read_all`, `length`, or
+    /// a range read), the runtime reserves request capacity and the
+    /// `max_bytes` accounting budget and commits the optional scope child.
+    /// Closed, full, or already-cancelled requests are rejected before
+    /// provider I/O. The byte reservation bounds logical sampling and owned
+    /// payload accounting; it is not a bound on total process memory or
+    /// provider/network work. The `read_all` fallback transfers its
+    /// returned buffer to the worker without making another full-size copy.
     ///
     /// Dropping a pending provider future cancels local polling only. A
     /// provider's native or remote operation may continue, and this API has no
@@ -217,12 +213,7 @@ impl MagikaMimeDetector {
                 let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
                 return self
                     .runtime
-                    .detect_async_input_admitted(
-                        admission,
-                        input,
-                        max_bytes,
-                        map_provider_magika_error,
-                    )
+                    .detect_async_input_admitted(admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
             Err(error)
@@ -260,12 +251,7 @@ impl MagikaMimeDetector {
                 let input = AsyncProviderInput::new(file_system, path, length, version, max_bytes);
                 return self
                     .runtime
-                    .detect_async_input_admitted(
-                        admission,
-                        input,
-                        max_bytes,
-                        map_provider_magika_error,
-                    )
+                    .detect_async_input_admitted(admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
             if length > max_bytes as u64 {
@@ -276,9 +262,7 @@ impl MagikaMimeDetector {
             }
         }
         admission.begin_provider_operation()?;
-        let read_result = file_system
-            .read_all(path, ReadOptions::default(), max_bytes)
-            .await;
+        let read_result = file_system.read_all(path, ReadOptions::default(), max_bytes).await;
         admission.provider_operation_completed();
         let bytes = read_result?;
         self.runtime.detect_bytes_admitted(admission, bytes).await
@@ -379,9 +363,7 @@ impl MagikaMimeDetector {
         map_error: fn(Error) -> MimeError,
     ) -> MimeResult<Vec<String>> {
         match extracted {
-            FeaturesOrRuled::Ruled(content_type) => {
-                Ok(content_type_to_mime(content_type).into_iter().collect())
-            }
+            FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type).into_iter().collect()),
             FeaturesOrRuled::Features(features) => Ok(self
                 .runtime
                 .identify_features_blocking(features, map_error)?
@@ -436,11 +418,7 @@ impl MagikaMimeDetector {
     /// Returns [`MimeError::Io`] when seeking or reading fails, or
     /// [`MimeError::DetectorBackend`] when Magika inference fails or the
     /// worker inference fails.
-    fn guess_from_reader_with_scope(
-        &self,
-        reader: &mut dyn ReadSeek,
-        scope: ReaderScope,
-    ) -> MimeResult<Vec<String>> {
+    fn guess_from_reader_with_scope(&self, reader: &mut dyn ReadSeek, scope: ReaderScope) -> MimeResult<Vec<String>> {
         let original_position = reader.stream_position()?;
         let result = (|| {
             let end = reader.seek(SeekFrom::End(0))?;
@@ -449,10 +427,7 @@ impl MagikaMimeDetector {
                 ReaderScope::Remaining => original_position,
             };
             let length = end.checked_sub(base_offset).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "reader end precedes window start",
-                )
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "reader end precedes window start")
             })?;
             let mut input = ReadSeekInput::new(reader, base_offset, length);
             self.guess_from_magika_input(&mut input)
@@ -595,8 +570,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     .maximum()
                     .and_then(|value| usize::try_from(value).ok());
                 let input = SyncProviderInput::from_session(reader, max_bytes, max_segment);
-                let extracted =
-                    FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
+                let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
                 let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
@@ -629,8 +603,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     .then(|| metadata.etag().cloned())
                     .flatten();
                 let input = SyncProviderInput::new(file_system, path, length, version, max_bytes);
-                let extracted =
-                    FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
+                let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
                 let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
@@ -688,8 +661,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                         .maximum()
                         .and_then(|value| usize::try_from(value).ok());
                     let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
-                    let candidates =
-                        guess_from_async_input(self, admission, input, max_bytes).await?;
+                    let candidates = guess_from_async_input(self, admission, input, max_bytes).await?;
                     return Ok((candidates, None));
                 }
                 Err(error)
@@ -723,10 +695,8 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                         .supports(FileSystemCapability::ConditionalRead)
                         .then(|| metadata.etag().cloned())
                         .flatten();
-                    let input =
-                        AsyncProviderInput::new(file_system, path, length, version, max_bytes);
-                    let candidates =
-                        guess_from_async_input(self, admission, input, max_bytes).await?;
+                    let input = AsyncProviderInput::new(file_system, path, length, version, max_bytes);
+                    let candidates = guess_from_async_input(self, admission, input, max_bytes).await?;
                     return Ok((candidates, None));
                 }
                 let requested = usize::try_from(length).unwrap_or(usize::MAX);
@@ -738,9 +708,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 }
             }
             admission.begin_provider_operation()?;
-            let read_result = file_system
-                .read_all(path, ReadOptions::default(), max_bytes)
-                .await;
+            let read_result = file_system.read_all(path, ReadOptions::default(), max_bytes).await;
             admission.provider_operation_completed();
             let bytes = read_result?;
             let candidates = self
@@ -830,9 +798,7 @@ fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
 ///
 /// An owned, nonempty MIME name, or `None` when the name is absent or empty.
 fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
-    mime_type
-        .filter(|mime_type| !mime_type.is_empty())
-        .map(str::to_owned)
+    mime_type.filter(|mime_type| !mime_type.is_empty()).map(str::to_owned)
 }
 
 /// Converts a Magika error to a MIME error.
@@ -939,16 +905,10 @@ mod tests {
         let detector = MagikaMimeDetector::new().expect("detector should initialize");
         assert_eq!(
             Some("application/pdf".to_owned()),
-            detector
-                .guess_from_filename("document.pdf")
-                .first()
-                .cloned()
+            detector.guess_from_filename("document.pdf").first().cloned()
         );
         let content_backend: &dyn MimeContentBackend = &detector;
-        assert_eq!(
-            ContentRequirement::Complete,
-            content_backend.content_requirement()
-        );
+        assert_eq!(ContentRequirement::Complete, content_backend.content_requirement());
         assert_eq!(
             vec!["text/x-python"],
             content_backend
@@ -956,14 +916,8 @@ mod tests {
                 .expect("bytes should classify")
         );
         let detector_backend: &dyn MimeDetectorBackend = &detector;
-        assert_eq!(
-            ContentRequirement::Complete,
-            detector_backend.content_requirement()
-        );
-        assert_eq!(
-            detector.max_buffer_size(),
-            detector_backend.max_test_bytes()
-        );
+        assert_eq!(ContentRequirement::Complete, detector_backend.content_requirement());
+        assert_eq!(detector.max_buffer_size(), detector_backend.max_test_bytes());
         assert_eq!(
             vec!["application/pdf"],
             detector_backend.guess_from_filename("document.pdf")
@@ -977,14 +931,12 @@ mod tests {
         let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
         assert_eq!(
             vec!["text/x-python"],
-            MimeContentBackend::detect_reader(&detector, &mut reader)
-                .expect("content reader should classify")
+            MimeContentBackend::detect_reader(&detector, &mut reader).expect("content reader should classify")
         );
         let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
         assert_eq!(
             (vec!["text/x-python".to_owned()], Vec::new()),
-            MimeDetectorBackend::guess_from_reader(&detector, &mut reader)
-                .expect("detector reader should classify")
+            MimeDetectorBackend::guess_from_reader(&detector, &mut reader).expect("detector reader should classify")
         );
         assert_eq!(
             (vec!["text/x-python".to_owned()], Vec::new()),
@@ -1012,18 +964,15 @@ mod tests {
         );
         assert_eq!(
             vec!["text/x-python"],
-            MimeDetectorBackend::guess_from_content(
-                &detector,
-                b"#!/usr/bin/env python3\nprint('ok')\n",
-            )
-            .expect("fully qualified content should classify")
+            MimeDetectorBackend::guess_from_content(&detector, b"#!/usr/bin/env python3\nprint('ok')\n",)
+                .expect("fully qualified content should classify")
         );
         let _ = MagikaMimeDetector::builder()
             .mime_config(MimeConfig::default())
             .build()
             .expect("builder should initialize");
-        let _ = MagikaMimeDetector::from_mime_config(MimeConfig::default())
-            .expect("configured detector should initialize");
+        let _ =
+            MagikaMimeDetector::from_mime_config(MimeConfig::default()).expect("configured detector should initialize");
     }
 
     #[test]
@@ -1069,19 +1018,14 @@ mod tests {
             caller_thread: std::thread::current().id(),
             bytes: b"#!/usr/bin/env python3\nprint('ok')\n",
         };
-        assert_eq!(
-            vec!["text/x-python"],
-            detector.guess_from_magika_input(input).unwrap()
-        );
+        assert_eq!(vec!["text/x-python"], detector.guess_from_magika_input(input).unwrap());
     }
 
     #[test]
     fn test_ruled_sync_input_bypasses_session_worker() {
         let detector = MagikaMimeDetector::new().expect("detector should initialize");
         assert_eq!(
-            content_type_to_mime(ContentType::Empty)
-                .into_iter()
-                .collect::<Vec<_>>(),
+            content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
             detector.guess_from_magika_input(&b""[..]).unwrap()
         );
     }
@@ -1090,12 +1034,7 @@ mod tests {
     fn test_local_directory_returns_no_mime_candidate() {
         let detector = MagikaMimeDetector::new().expect("detector should initialize");
         let directory = tempfile::tempdir().expect("temporary directory should be created");
-        assert!(
-            detector
-                .guess_from_magika_file(directory.path())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(detector.guess_from_magika_file(directory.path()).unwrap().is_empty());
     }
 
     #[cfg(unix)]
