@@ -15,6 +15,7 @@ pub(super) mod inference_future;
 pub(super) mod job;
 mod managed_inference_runtime;
 mod managed_inference_shutdown_report;
+pub(super) mod request_admission;
 pub(super) mod task_control;
 pub(super) mod task_inner;
 pub(super) mod task_state;

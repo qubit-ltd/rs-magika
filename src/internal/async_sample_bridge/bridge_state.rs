@@ -23,6 +23,8 @@ pub(super) struct BridgeState {
     pub(super) closed: bool,
     /// Driver task waiting for the next request.
     pub(super) driver_waker: Option<Waker>,
+    /// Tasks waiting for bridge closure while a provider future is pending.
+    pub(super) close_wakers: Vec<Waker>,
 }
 
 impl BridgeState {
@@ -33,6 +35,7 @@ impl BridgeState {
             active: None,
             closed: false,
             driver_waker: None,
+            close_wakers: Vec::new(),
         }
     }
 }

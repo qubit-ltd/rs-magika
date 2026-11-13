@@ -7,6 +7,7 @@
 // =============================================================================
 //! Shared business and release state for one accepted worker job.
 
+use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -28,7 +29,8 @@ pub(super) struct TaskState {
     /// Blocking notification used by synchronous inference callers.
     pub(super) released: Condvar,
     /// Bridge closed when cancellation stops async sampling.
-    bridge: Option<Weak<AsyncSampleBridge>>,
+    bridge: std::sync::Mutex<Option<Weak<AsyncSampleBridge>>>,
+    owner: std::sync::Mutex<Option<Arc<super::request_admission::RequestResourceOwner>>>,
 }
 
 impl TaskState {
@@ -43,7 +45,8 @@ impl TaskState {
             operation_id,
             inner: Mutex::new(TaskInner::new()),
             released: Condvar::new(),
-            bridge,
+            bridge: std::sync::Mutex::new(bridge),
+            owner: std::sync::Mutex::new(None),
         }
     }
 
@@ -65,14 +68,58 @@ impl TaskState {
         for waker in wakers {
             waker.wake();
         }
-        if let Some(bridge) = self.bridge.as_ref().and_then(Weak::upgrade) {
+        if let Some(bridge) = self
+            .bridge
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+        {
             bridge.close();
+        }
+    }
+
+    /// Attaches the bridge created after request admission.
+    pub(super) fn attach_bridge(&self, bridge: Weak<AsyncSampleBridge>) {
+        *self
+            .bridge
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(bridge);
+        if self.stop_requested() {
+            if let Some(bridge) = self
+                .bridge
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .and_then(Weak::upgrade)
+            {
+                bridge.close();
+            }
+        }
+    }
+
+    pub(super) fn attach_owner(&self, owner: Arc<super::request_admission::RequestResourceOwner>) {
+        *self.owner.lock().unwrap_or_else(|error| error.into_inner()) = Some(owner);
+    }
+
+    pub(super) fn mark_driver_done(&self) {
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .cloned();
+        if let Some(owner) = owner {
+            owner.driver_done();
         }
     }
 
     /// Records that the inference worker has begun this job.
     pub(super) fn mark_started(&self) {
-        self.inner.lock().unwrap_or_else(|error| error.into_inner()).started = true;
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .started = true;
     }
 
     /// Stores the business result and wakes result observers.
@@ -81,7 +128,11 @@ impl TaskState {
     ///
     /// * `result` - MIME inference result produced by the worker.
     /// * `business` - Worker outcome before cancellation-state reconciliation.
-    pub(super) fn finish_business(&self, result: MimeResult<Option<String>>, business: ChildBusinessOutcome) {
+    pub(super) fn finish_business(
+        &self,
+        result: MimeResult<Option<String>>,
+        business: ChildBusinessOutcome,
+    ) {
         let wakers = {
             let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
             if inner.business.is_none() {
@@ -106,6 +157,10 @@ impl TaskState {
         };
         wake_all(wakers);
         self.released.notify_all();
+        self.owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
     }
 }
 
@@ -145,7 +200,10 @@ mod tests {
         state.mark_started();
         state.finish_business(Ok(None), ChildBusinessOutcome::Stopped);
         state.mark_released();
-        let inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         assert!(inner.started);
         assert!(inner.released);
         assert!(inner.business.is_some());
@@ -154,8 +212,14 @@ mod tests {
     #[test]
     fn test_business_terminal_fact_is_write_once() {
         let state = TaskState::new(OperationId::new(5), None);
-        state.finish_business(Ok(Some("first".to_owned())), ChildBusinessOutcome::Succeeded);
-        state.finish_business(Err(qubit_mime::MimeError::detector_backend("test", "later")), ChildBusinessOutcome::Failed);
+        state.finish_business(
+            Ok(Some("first".to_owned())),
+            ChildBusinessOutcome::Succeeded,
+        );
+        state.finish_business(
+            Err(qubit_mime::MimeError::detector_backend("test", "later")),
+            ChildBusinessOutcome::Failed,
+        );
 
         let inner = state.inner.lock().unwrap();
         assert_eq!(inner.business, Some(ChildBusinessOutcome::Succeeded));
@@ -166,7 +230,10 @@ mod tests {
     fn test_requested_stop_classifies_the_terminal_business_fact_as_stopped() {
         let state = TaskState::new(OperationId::new(6), None);
         state.request_stop();
-        state.finish_business(Ok(Some("late result".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(
+            Ok(Some("late result".to_owned())),
+            ChildBusinessOutcome::Succeeded,
+        );
 
         let inner = state.inner.lock().unwrap();
         assert_eq!(inner.business, Some(ChildBusinessOutcome::Stopped));

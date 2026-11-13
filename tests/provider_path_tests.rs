@@ -26,6 +26,7 @@ use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
+use qubit_operation::protocol::StopReason;
 use qubit_operation::report::SupervisorLimits;
 use qubit_operation::scope::ScopeOptions;
 use qubit_operation::supervisor::OperationSupervisor;
@@ -55,7 +56,9 @@ fn large_provider(range: bool) -> ProviderFileSystemSpi {
 
 #[test]
 fn test_managed_provider_session_api_classifies_and_settles_worker() {
-    let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
+    );
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());
     let service = supervisor.service_group(1).unwrap();
     let file_system = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -78,11 +81,21 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
                 .await;
             assert!(rejected.is_err());
             let session_result = body_detector
-                .detect_async_provider_path_managed(&scope, &file_system, &path("/managed/python.py"), 4096)
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &file_system,
+                    &path("/managed/python.py"),
+                    4096,
+                )
                 .await
                 .map(|mime| mime.expect("Python sample should be classified"))?;
             let fallback_result = body_detector
-                .detect_async_provider_path_managed(&scope, &fallback_file_system, &path("/managed/fallback.py"), 4096)
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &fallback_file_system,
+                    &path("/managed/fallback.py"),
+                    4096,
+                )
                 .await
                 .map(|mime| mime.expect("fallback Python sample should be classified"))?;
             Ok::<_, MimeError>((session_result, fallback_result))
@@ -99,8 +112,185 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
 }
 
 #[test]
+fn test_managed_provider_admission_rejects_cancelled_scope_before_provider_io() {
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
+    );
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let body_detector = Arc::clone(&detector);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            scope.request_cancel(qubit_operation::protocol::StopReason::UserCancelled);
+            let result = body_detector
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &file_system,
+                    &path("/cancelled.py"),
+                    4096,
+                )
+                .await;
+            assert!(result.is_err());
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let _ = handle.result_blocking();
+    assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_reads.load(Ordering::SeqCst));
+    let _ = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+}
+
+#[test]
+fn test_managed_provider_admission_rejects_closed_runtime_before_provider_io() {
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
+    );
+    let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(report.worker_stopped);
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let body_detector = Arc::clone(&detector);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let result = body_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/closed.py"), 4096)
+                .await;
+            assert!(result.is_err());
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let _ = handle.result_blocking();
+    assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_reads.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
+    );
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(4).unwrap();
+    let gates = [
+        crate::support::AsyncProviderGate::new(AsyncProviderGatePoint::Open),
+        crate::support::AsyncProviderGate::new(AsyncProviderGatePoint::Open),
+    ];
+    let mut handles = Vec::new();
+    for gate in &gates {
+        let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_random_access()
+            .with_async_gate(Arc::clone(gate));
+        let file_system = provider.async_file_system();
+        let body_detector = Arc::clone(&detector);
+        handles.push(
+            service
+                .start(ScopeOptions::default(), move |scope| async move {
+                    body_detector
+                        .detect_async_provider_path_managed(
+                            &scope,
+                            &file_system,
+                            &path("/full.py"),
+                            4096,
+                        )
+                        .await
+                        .map(|_| ())
+                })
+                .unwrap(),
+        );
+    }
+    for gate in &gates {
+        gate.wait_until_entered(Duration::from_secs(2));
+    }
+
+    let rejected = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let observations = rejected.observations();
+    let file_system = rejected.async_file_system();
+    let body_detector = Arc::clone(&detector);
+    let mut rejected_handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let result = body_detector
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &file_system,
+                    &path("/over-capacity.py"),
+                    4096,
+                )
+                .await;
+            assert!(result.is_err());
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let _ = rejected_handle.result_blocking();
+    assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_reads.load(Ordering::SeqCst));
+    for gate in &gates {
+        gate.release();
+    }
+    for handle in &mut handles {
+        let _ = handle.result_blocking();
+    }
+    let _ = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+}
+
+#[test]
+fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close() {
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
+    );
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let file_system = provider.async_file_system();
+    let body_detector = Arc::clone(&detector);
+    let handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            body_detector
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &file_system,
+                    &path("/pending.py"),
+                    4096,
+                )
+                .await
+        })
+        .unwrap();
+    gate.wait_until_entered(Duration::from_secs(30));
+    let observer = handle.observer();
+    handle.request_cancel(StopReason::UserCancelled);
+    let mut handle = handle;
+    let _ = handle.result_blocking();
+    let (released_tx, released_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        released_tx
+            .send(observer.released_blocking().unwrap())
+            .unwrap()
+    });
+    assert!(released_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    let report = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
+    assert!(!report.admission.is_complete());
+    // The async fs contract does not let us certify provider-native completion.
+    gate.release();
+}
+
+#[test]
 fn test_sync_provider_backend_uses_session_range_and_full_read_routes() {
-    let detector = qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize");
+    let detector =
+        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize");
     let routes = [
         ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access(),
         ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -112,9 +302,13 @@ fn test_sync_provider_backend_uses_session_range_and_full_read_routes() {
     ];
     for provider in routes {
         let file_system = provider.file_system();
-        let (candidates, returned_bytes) =
-            MimeDetectorBackend::guess_from_provider_path(&detector, &file_system, &path("/managed/sync.py"), 4096)
-                .expect("sync provider route should classify the Python sample");
+        let (candidates, returned_bytes) = MimeDetectorBackend::guess_from_provider_path(
+            &detector,
+            &file_system,
+            &path("/managed/sync.py"),
+            4096,
+        )
+        .expect("sync provider route should classify the Python sample");
         assert_eq!(vec!["text/x-python"], candidates);
         assert!(returned_bytes.is_none());
     }
@@ -149,8 +343,15 @@ fn test_wake_driver_waits_for_wake_and_times_out_without_repolling() {
         },
         Duration::from_millis(20),
     );
-    assert!(result.is_err(), "a Pending future without a wake must time out");
-    assert_eq!(1, polls.load(Ordering::SeqCst), "the driver must not actively repoll");
+    assert!(
+        result.is_err(),
+        "a Pending future without a wake must time out"
+    );
+    assert_eq!(
+        1,
+        polls.load(Ordering::SeqCst),
+        "the driver must not actively repoll"
+    );
 
     let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let waker_slot = Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
@@ -250,8 +451,18 @@ fn test_pending_future_replaces_stale_waker() {
     let old_waker = std::task::Waker::from(Arc::new(CountWake(Arc::clone(&old_count))));
     let new_waker = std::task::Waker::from(Arc::new(CountWake(Arc::clone(&new_count))));
     let mut future = Box::pin(RegisterWaker(None));
-    assert!(future.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
-    assert!(future.as_mut().poll(&mut Context::from_waker(&new_waker)).is_pending());
+    assert!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(&old_waker))
+            .is_pending()
+    );
+    assert!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(&new_waker))
+            .is_pending()
+    );
     future.0.take().unwrap().wake();
     assert_eq!(0, old_count.load(Ordering::SeqCst));
     assert_eq!(1, new_count.load(Ordering::SeqCst));
@@ -272,7 +483,9 @@ fn test_provider_stat_open_and_read_suspend_until_wake() {
         let file_system = provider.async_file_system();
         let request_path = path("/script.py");
         let future: Pin<Box<dyn Future<Output = qubit_fs::FsResult<()>>>> = match point {
-            AsyncProviderGatePoint::Stat => Box::pin(async move { file_system.stat(&request_path).await.map(|_| ()) }),
+            AsyncProviderGatePoint::Stat => {
+                Box::pin(async move { file_system.stat(&request_path).await.map(|_| ()) })
+            }
             AsyncProviderGatePoint::Open => Box::pin(async move {
                 file_system
                     .open_reader(&request_path, qubit_fs::read::ReadOptions::default())
@@ -281,7 +494,10 @@ fn test_provider_stat_open_and_read_suspend_until_wake() {
             }),
             AsyncProviderGatePoint::Read => Box::pin(async move {
                 let mut reader = file_system
-                    .open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default())
+                    .open_random_access_reader(
+                        &request_path,
+                        qubit_fs::read::ReadOptions::default(),
+                    )
                     .await?;
                 reader.read_at(0, &mut [0_u8; 1]).await.map(|_| ())
             }),
@@ -295,7 +511,10 @@ fn test_provider_stat_open_and_read_suspend_until_wake() {
         releaser.join().unwrap();
         result.expect("gated provider operation should resume after wake");
         if point == AsyncProviderGatePoint::Read {
-            assert_eq!(1, provider.observations().session_drops.load(Ordering::SeqCst));
+            assert_eq!(
+                1,
+                provider.observations().session_drops.load(Ordering::SeqCst)
+            );
         }
     }
 }
@@ -307,12 +526,15 @@ fn test_dropping_pending_provider_read_releases_session() {
         .with_random_access()
         .with_async_gate(Arc::clone(&gate));
     let worker_gate = Arc::clone(&gate);
-    let observer = std::thread::spawn(move || worker_gate.wait_until_entered(Duration::from_secs(1)));
+    let observer =
+        std::thread::spawn(move || worker_gate.wait_until_entered(Duration::from_secs(1)));
     let file_system = provider.async_file_system();
     let request_path = path("/script.py");
-    let mut reader =
-        run_ready(file_system.open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default()))
-            .expect("session should open before the read is gated");
+    let mut reader = run_ready(
+        file_system
+            .open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default()),
+    )
+    .expect("session should open before the read is gated");
     let result = run_until(reader.read_at(0, &mut [0_u8; 1]), Duration::from_millis(20));
     assert!(
         result.is_err(),
@@ -341,14 +563,22 @@ fn test_gated_provider_read_error_resumes_after_wake() {
     });
     let file_system = provider.async_file_system();
     let request_path = path("/script.py");
-    let mut reader =
-        run_ready(file_system.open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default()))
-            .expect("session should open before the read is gated");
+    let mut reader = run_ready(
+        file_system
+            .open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default()),
+    )
+    .expect("session should open before the read is gated");
     let result = run_ready(reader.read_at(0, &mut [0_u8; 1]));
     releaser.join().unwrap();
-    assert!(result.is_err(), "the provider read error should propagate after wake");
+    assert!(
+        result.is_err(),
+        "the provider read error should propagate after wake"
+    );
     drop(reader);
-    assert_eq!(1, provider.observations().session_drops.load(Ordering::SeqCst));
+    assert_eq!(
+        1,
+        provider.observations().session_drops.load(Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -365,8 +595,14 @@ fn test_provider_path_sync_range_reads_only_bounded_windows() {
         result.expect("range detection should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(observations.stats.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(observations.opens.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
     assert!(
         observations
             .options
@@ -375,7 +611,12 @@ fn test_provider_path_sync_range_reads_only_bounded_windows() {
             .iter()
             .all(|options| options.offset().is_some() && options.length().is_some())
     );
-    assert!(observations.read_bytes.load(std::sync::atomic::Ordering::SeqCst) <= 8192);
+    assert!(
+        observations
+            .read_bytes
+            .load(std::sync::atomic::Ordering::SeqCst)
+            <= 8192
+    );
 }
 
 #[test]
@@ -392,7 +633,12 @@ fn test_provider_path_async_range_reads_only_bounded_windows() {
         result.expect("async range detection should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert!(observations.read_bytes.load(std::sync::atomic::Ordering::SeqCst) <= 8192);
+    assert!(
+        observations
+            .read_bytes
+            .load(std::sync::atomic::Ordering::SeqCst)
+            <= 8192
+    );
 }
 
 #[test]
@@ -457,10 +703,26 @@ fn test_provider_path_sync_uses_one_random_access_session_without_stat() {
         result.expect("session detection should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(1, observations.session_drops.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        1,
+        observations
+            .random_opens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        1,
+        observations
+            .session_drops
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -477,10 +739,26 @@ fn test_provider_path_async_uses_one_random_access_session_without_stat() {
         result.expect("async session detection should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(1, observations.session_drops.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        1,
+        observations
+            .random_opens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        1,
+        observations
+            .session_drops
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -574,8 +852,16 @@ fn test_provider_path_unsupported_session_open_falls_back_to_legacy_route() {
         result.expect("unsupported session should use legacy route"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(1, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        1,
+        observations
+            .random_opens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        1,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
     assert!(observations.opens.load(std::sync::atomic::Ordering::SeqCst) > 0);
 }
 
@@ -595,8 +881,16 @@ fn test_provider_path_async_unsupported_session_open_falls_back_to_legacy_route(
         result.expect("unsupported async session should use legacy route"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(1, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        1,
+        observations
+            .random_opens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        1,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
     assert!(observations.opens.load(std::sync::atomic::Ordering::SeqCst) > 0);
 }
 
@@ -617,8 +911,14 @@ fn test_provider_path_non_unsupported_session_open_error_propagates() {
     assert!(
         matches!(error, MimeError::FileSystem(ref error) if error.kind() == qubit_fs::error::FsErrorKind::PermissionDenied)
     );
-    assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        0,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -637,8 +937,14 @@ fn test_provider_path_async_non_unsupported_session_open_error_propagates() {
     assert!(
         matches!(error, MimeError::FileSystem(ref error) if error.kind() == qubit_fs::error::FsErrorKind::PermissionDenied)
     );
-    assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        0,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -656,9 +962,20 @@ fn test_provider_path_session_read_error_does_not_fall_back_to_path() {
         )
         .expect_err("session read failure should propagate");
     assert!(matches!(error, MimeError::Io { .. }));
-    assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        1,
+        observations
+            .random_opens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -675,9 +992,20 @@ fn test_provider_path_async_session_read_error_does_not_fall_back_to_path() {
     ))
     .expect_err("async session read failure should propagate");
     assert!(matches!(error, MimeError::Io(_)));
-    assert_eq!(1, observations.random_opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        1,
+        observations
+            .random_opens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        0,
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -740,7 +1068,10 @@ fn test_provider_path_unknown_length_falls_back_without_stat() {
         result.expect("unknown length fallback should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(observations.stats.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }
 
 #[test]
@@ -757,8 +1088,14 @@ fn test_provider_path_prefer_filename_skips_provider_access() {
         result.expect("filename detection should succeed"),
         Some("application/pdf".to_owned())
     );
-    assert_eq!(observations.stats.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(observations.opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        observations.stats.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        observations.opens.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }
 
 #[test]
@@ -787,7 +1124,9 @@ fn test_provider_path_conditional_range_uses_etag() {
 
 #[test]
 fn test_provider_path_async_conditional_ranges_reuse_exact_etag() {
-    let provider = large_provider(true).with_conditional().with_max_read_range_bytes(2);
+    let provider = large_provider(true)
+        .with_conditional()
+        .with_max_read_range_bytes(2);
     let result = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
         &path("/script.py"),
@@ -811,7 +1150,9 @@ fn test_provider_path_async_conditional_ranges_reuse_exact_etag() {
 
 #[test]
 fn test_provider_path_short_read_is_an_io_error() {
-    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().short_reads();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .short_reads();
     let error = detector()
         .detect_path(
             &provider.file_system(),
@@ -825,7 +1166,9 @@ fn test_provider_path_short_read_is_an_io_error() {
 
 #[test]
 fn test_provider_path_async_short_read_is_an_io_error() {
-    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().short_reads();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .short_reads();
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
         &path("/script.py"),
@@ -838,7 +1181,9 @@ fn test_provider_path_async_short_read_is_an_io_error() {
 
 #[test]
 fn test_provider_path_sync_read_failure_is_an_io_error() {
-    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().fail_reads();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .fail_reads();
     let error = detector()
         .detect_path(
             &provider.file_system(),
@@ -852,7 +1197,9 @@ fn test_provider_path_sync_read_failure_is_an_io_error() {
 
 #[test]
 fn test_provider_path_async_read_failure_is_an_io_error() {
-    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().fail_reads();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .fail_reads();
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
         &path("/script.py"),

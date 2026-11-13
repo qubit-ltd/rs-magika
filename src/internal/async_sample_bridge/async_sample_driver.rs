@@ -27,6 +27,11 @@ impl AsyncSampleDriver {
     pub(crate) async fn next_request(&self) -> Option<ReadRequest> {
         self.bridge.next_request().await
     }
+
+    /// Waits for independent bridge shutdown while provider I/O is pending.
+    pub(crate) async fn closed(&self) {
+        self.bridge.closed().await;
+    }
 }
 
 impl Drop for AsyncSampleDriver {

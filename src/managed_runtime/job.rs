@@ -9,9 +9,7 @@
 
 use std::sync::Arc;
 
-use qubit_operation::supervisor::ServiceRequest;
-
-use super::byte_permit::BytePermit;
+use super::request_admission::RequestResourceOwner;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 
@@ -21,8 +19,6 @@ pub(super) struct Job {
     pub(super) input: WorkerInput,
     /// State reported to the operation observer.
     pub(super) state: Arc<TaskState>,
-    /// Supervisor admission retained until the worker stops using the job.
-    pub(super) admission: ServiceRequest,
-    /// Aggregate payload capacity retained until the worker releases input.
-    pub(super) byte_permit: BytePermit,
+    /// Shared owner releases capacity only after worker and driver completion.
+    pub(super) owner: Arc<RequestResourceOwner>,
 }

@@ -77,9 +77,9 @@ impl AsyncSampleBridge {
     /// range beyond the resource or a short provider response, and
     /// `Interrupted` when the bridge closes before the range is answered.
     pub(crate) fn read_at(self: &Arc<Self>, offset: u64, output: &mut [u8]) -> io::Result<()> {
-        let end = offset
-            .checked_add(output.len() as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sample range offset overflow"))?;
+        let end = offset.checked_add(output.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "sample range offset overflow")
+        })?;
         if end > self.length {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -91,11 +91,19 @@ impl AsyncSampleBridge {
         }
 
         let response = Arc::new(Response::new());
-        let request = ReadRequest::new(offset, output.len(), Arc::clone(&response), Arc::downgrade(self));
+        let request = ReadRequest::new(
+            offset,
+            output.len(),
+            Arc::clone(&response),
+            Arc::downgrade(self),
+        );
         let wake = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             while !state.closed && (state.pending.is_some() || state.active.is_some()) {
-                state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner());
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner());
             }
             if state.closed {
                 return Err(closed_error());
@@ -107,9 +115,15 @@ impl AsyncSampleBridge {
             waker.wake();
         }
 
-        let mut result = response.result.lock().unwrap_or_else(|error| error.into_inner());
+        let mut result = response
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         while result.is_none() {
-            result = response.ready.wait(result).unwrap_or_else(|error| error.into_inner());
+            result = response
+                .ready
+                .wait(result)
+                .unwrap_or_else(|error| error.into_inner());
         }
         match result.take().expect("response checked") {
             Ok(bytes) if bytes.len() == output.len() => {
@@ -145,6 +159,25 @@ impl AsyncSampleBridge {
         .await
     }
 
+    /// Waits until worker cancellation or completion closes the bridge.
+    pub(crate) async fn closed(&self) {
+        poll_fn(|cx| {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.closed {
+                return Poll::Ready(());
+            }
+            if !state
+                .close_wakers
+                .iter()
+                .any(|waker| waker.will_wake(cx.waker()))
+            {
+                state.close_wakers.push(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
     /// Creates the async-side cancellation guard for this bridge.
     ///
     /// # Returns
@@ -158,10 +191,15 @@ impl AsyncSampleBridge {
 
     /// Closes the bridge and wakes both participants, including an active read.
     pub(crate) fn close(&self) {
-        let (waker, pending, active) = {
+        let (waker, close_wakers, pending, active) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.closed = true;
-            (state.driver_waker.take(), state.pending.take(), state.active.take())
+            (
+                state.driver_waker.take(),
+                std::mem::take(&mut state.close_wakers),
+                state.pending.take(),
+                state.active.take(),
+            )
         };
         let error = || Err(closed_error());
         if let Some(request) = pending {
@@ -173,6 +211,9 @@ impl AsyncSampleBridge {
         }
         self.changed.notify_all();
         if let Some(waker) = waker {
+            waker.wake();
+        }
+        for waker in close_wakers {
             waker.wake();
         }
     }
