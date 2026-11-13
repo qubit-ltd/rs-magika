@@ -84,12 +84,14 @@ impl TaskState {
     pub(super) fn finish_business(&self, result: MimeResult<Option<String>>, business: ChildBusinessOutcome) {
         let wakers = {
             let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-            inner.business = Some(if inner.stop_requested {
-                ChildBusinessOutcome::Stopped
-            } else {
-                business
-            });
-            inner.result = Some(result);
+            if inner.business.is_none() {
+                inner.business = Some(if inner.stop_requested {
+                    ChildBusinessOutcome::Stopped
+                } else {
+                    business
+                });
+                inner.result = Some(result);
+            }
             std::mem::take(&mut inner.wakers)
         };
         wake_all(wakers);
@@ -147,5 +149,26 @@ mod tests {
         assert!(inner.started);
         assert!(inner.released);
         assert!(inner.business.is_some());
+    }
+
+    #[test]
+    fn test_business_terminal_fact_is_write_once() {
+        let state = TaskState::new(OperationId::new(5), None);
+        state.finish_business(Ok(Some("first".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(Err(qubit_mime::MimeError::detector_backend("test", "later")), ChildBusinessOutcome::Failed);
+
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(inner.business, Some(ChildBusinessOutcome::Succeeded));
+        assert!(matches!(inner.result.as_ref(), Some(Ok(Some(value))) if value == "first"));
+    }
+
+    #[test]
+    fn test_requested_stop_classifies_the_terminal_business_fact_as_stopped() {
+        let state = TaskState::new(OperationId::new(6), None);
+        state.request_stop();
+        state.finish_business(Ok(Some("late result".to_owned())), ChildBusinessOutcome::Succeeded);
+
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(inner.business, Some(ChildBusinessOutcome::Stopped));
     }
 }

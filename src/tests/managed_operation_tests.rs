@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
+use qubit_operation::report::ChildBusinessOutcome;
 use qubit_operation::protocol::StopReason;
 use qubit_operation::report::SupervisorLimits;
 use qubit_operation::scope::ScopeOptions;
@@ -211,6 +212,40 @@ fn test_byte_budget_rejects_aggregate_payload_and_shutdown_joins_worker() {
     assert!(shutdown.admission.is_complete());
     assert!(shutdown.worker_stopped);
     assert!(!shutdown.worker_panicked);
+}
+
+#[test]
+fn test_managed_engine_error_is_delivered_and_reported_as_failed_child() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let engine: ManagedInferenceEngine = Box::new(|_bytes| {
+        Err(qubit_mime::MimeError::detector_backend("fixture", "original engine error"))
+    });
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        64,
+        engine,
+        Box::new(|| {}),
+    ));
+    let body_runtime = Arc::clone(&runtime);
+    let (report_tx, report_rx) = mpsc::channel();
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let result = body_runtime.detect_bytes(&scope, b"fixture".to_vec()).await;
+            let report = scope.join().await;
+            report_tx.send(report).unwrap();
+            result.map(|_| ())
+        })
+        .expect("managed operation should be admitted");
+
+    let outcome = handle.result_blocking().unwrap();
+    let qubit_operation::report::OperationOutcome::Failed(error) = outcome else {
+        panic!("operation should return the inference error");
+    };
+    assert!(error.to_string().contains("original engine error"));
+    let report = report_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(report.required_failures.len(), 1);
+    assert_eq!(report.required_failures[0].outcome, ChildBusinessOutcome::Failed);
 }
 
 #[test]

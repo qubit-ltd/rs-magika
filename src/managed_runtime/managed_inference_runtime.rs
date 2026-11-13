@@ -49,6 +49,18 @@ use crate::magika_mime_detector::map_magika_error;
 /// Monotonically allocates identifiers for runtime child operations.
 static NEXT_CHILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Runs inference and classifies the exact result shape used by both workers.
+fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>, ChildBusinessOutcome) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(value)) => (Ok(value), ChildBusinessOutcome::Succeeded),
+        Ok(Err(error)) => (Err(error), ChildBusinessOutcome::Failed),
+        Err(_) => (
+            Err(MimeError::detector_backend("magika", "inference worker panicked")),
+            ChildBusinessOutcome::Panicked,
+        ),
+    }
+}
+
 /// Owned byte classifier used by the worker thread.
 #[cfg(test)]
 pub(crate) type ManagedInferenceEngine = Box<dyn Fn(Vec<u8>) -> MimeResult<Option<String>> + Send + 'static>;
@@ -173,15 +185,8 @@ impl ManagedInferenceRuntime {
                         );
                     } else {
                         state.mark_started();
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| infer_input(&mut session, input)));
-                        match result {
-                            Ok(result) => state.finish_business(result, ChildBusinessOutcome::Succeeded),
-                            Err(_) => state.finish_business(
-                                Err(MimeError::detector_backend("magika", "inference worker panicked")),
-                                ChildBusinessOutcome::Panicked,
-                            ),
-                        }
+                        let (result, outcome) = execute_classified(|| infer_input(&mut session, input));
+                        state.finish_business(result, outcome);
                     }
                     if let Some(bridge) = bridge {
                         bridge.close();
@@ -246,7 +251,7 @@ impl ManagedInferenceRuntime {
                         );
                     } else {
                         state.mark_started();
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match input {
+                        let (result, outcome) = execute_classified(|| match input {
                             WorkerInput::Bytes(bytes) => (engine)(bytes.into_vec()),
                             WorkerInput::Bridge(bridge, _, _) => {
                                 let mut input = BridgeSyncInput(bridge);
@@ -261,14 +266,8 @@ impl ManagedInferenceRuntime {
                                 "magika",
                                 "test engine only accepts owned bytes",
                             )),
-                        }));
-                        match result {
-                            Ok(result) => state.finish_business(result, ChildBusinessOutcome::Succeeded),
-                            Err(_) => state.finish_business(
-                                Err(MimeError::detector_backend("magika", "inference worker panicked")),
-                                ChildBusinessOutcome::Panicked,
-                            ),
-                        }
+                        });
+                        state.finish_business(result, outcome);
                     }
                     after_business();
                     drop(admission);
@@ -676,12 +675,25 @@ mod tests {
     use std::time::Duration;
 
     use qubit_mime::MimeError;
+    use qubit_operation::report::ChildBusinessOutcome;
     use qubit_operation::report::SupervisorLimits;
     use qubit_operation::supervisor::OperationSupervisor;
     use qubit_operation::supervisor::ShutdownMode;
 
+    use super::execute_classified;
     use super::ManagedInferenceRuntime;
     use super::WorkerInput;
+
+    #[test]
+    fn test_shared_worker_classification_covers_success_and_panic() {
+        let (result, outcome) = execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
+        assert!(matches!(result, Ok(Some(value)) if value == "text/plain"));
+        assert_eq!(outcome, ChildBusinessOutcome::Succeeded);
+
+        let (result, outcome): (qubit_mime::MimeResult<()>, _) = execute_classified(|| panic!("engine panic"));
+        assert!(result.is_err());
+        assert_eq!(outcome, ChildBusinessOutcome::Panicked);
+    }
 
     #[test]
     fn test_unmanaged_detection_enforces_limit_and_shutdown_joins_worker() {

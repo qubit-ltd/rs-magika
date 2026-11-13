@@ -48,7 +48,7 @@ impl ManagedOperationControl for TaskControl {
         let inner = self.0.inner.lock().unwrap_or_else(|error| error.into_inner());
         ChildSnapshot {
             operation_id: self.0.operation_id,
-            phase: if inner.result.is_some() {
+            phase: if inner.business.is_some() {
                 OperationPhase::ResultReady
             } else if inner.started {
                 OperationPhase::Running
@@ -165,6 +165,24 @@ mod tests {
         assert!(matches!(control.poll_business(&mut context), Poll::Ready(_)));
         state.mark_released();
         assert!(matches!(control.poll_released(&mut context), Poll::Ready(_)));
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.phase, OperationPhase::ResultReady);
+        assert_eq!(snapshot.resource_phase, ResourcePhase::Released);
+    }
+
+    #[test]
+    fn test_control_keeps_result_ready_after_result_consumption_and_release() {
+        let state = Arc::new(TaskState::new(OperationId::new(4), None));
+        let control = TaskControl(Arc::clone(&state));
+        state.mark_started();
+        state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
+        assert_eq!(control.snapshot().phase, OperationPhase::ResultReady);
+
+        let consumed = state.inner.lock().unwrap().result.take();
+        assert!(matches!(consumed, Some(Ok(Some(value))) if value == "text/plain"));
+        assert_eq!(control.snapshot().phase, OperationPhase::ResultReady);
+
+        state.mark_released();
         let snapshot = control.snapshot();
         assert_eq!(snapshot.phase, OperationPhase::ResultReady);
         assert_eq!(snapshot.resource_phase, ResourcePhase::Released);
