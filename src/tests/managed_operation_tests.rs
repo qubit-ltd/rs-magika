@@ -392,3 +392,108 @@ fn test_cancel_shutdown_reports_blocked_worker_until_real_release() {
     assert!(complete.admission.is_complete());
     assert!(complete.worker_stopped);
 }
+
+#[test]
+fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let worker_exit_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (worker_exit_tx, worker_exit_rx) = mpsc::channel();
+    let gate = Arc::clone(&worker_exit_gate);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_and_worker_exit_hook(
+        supervisor,
+        64,
+        Box::new(|_bytes| Ok(Some("text/plain".to_owned()))),
+        Box::new(|| {}),
+        Box::new(move || {
+            worker_exit_tx.send(()).unwrap();
+            let (lock, ready) = &*gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+            panic!("controlled worker exit panic");
+        }),
+    ));
+    let body_runtime = Arc::clone(&runtime);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            body_runtime
+                .detect_bytes(&scope, b"fixture".to_vec())
+                .await
+                .map(|_| ())
+        })
+        .unwrap();
+    let operation_succeeded = matches!(
+        handle.result_blocking(),
+        Ok(qubit_operation::report::OperationOutcome::Succeeded(()))
+    );
+    let resources_released = handle
+        .observer()
+        .released_blocking()
+        .is_ok_and(|settlement| settlement.all_released);
+
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown_thread = std::thread::spawn(move || {
+        shutdown_tx
+            .send(
+                shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(150)),
+            )
+            .unwrap();
+    });
+    let worker_reached_exit = worker_exit_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    let timed_result = shutdown_rx.recv_timeout(Duration::from_millis(300));
+
+    let (first_observer_tx, first_observer_rx) = mpsc::channel();
+    let first_runtime = Arc::clone(&runtime);
+    let first_observer = std::thread::spawn(move || {
+        first_observer_tx
+            .send(first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::ZERO))
+            .unwrap();
+    });
+    let (second_observer_tx, second_observer_rx) = mpsc::channel();
+    let second_runtime = Arc::clone(&runtime);
+    let second_observer = std::thread::spawn(move || {
+        second_observer_tx
+            .send(second_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::ZERO))
+            .unwrap();
+    });
+    let first_observer_result = first_observer_rx.recv_timeout(Duration::from_secs(2));
+    let second_observer_result = second_observer_rx.recv_timeout(Duration::from_secs(2));
+
+    // Always release the worker and join the shutdown caller before asserting.
+    let (lock, ready) = &*worker_exit_gate;
+    *lock.lock().unwrap() = true;
+    ready.notify_all();
+    shutdown_thread.join().unwrap();
+    first_observer.join().unwrap();
+    second_observer.join().unwrap();
+
+    let finish_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let final_report = loop {
+        let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::ZERO);
+        if report.worker_stopped || std::time::Instant::now() >= finish_deadline {
+            break report;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let repeated_report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::ZERO);
+
+    let timed_report =
+        timed_result.expect("shutdown should honor its deadline while worker exit is gated");
+    let first_observer_report =
+        first_observer_result.expect("first concurrent observer should return");
+    let second_observer_report =
+        second_observer_result.expect("second concurrent observer should return");
+    assert!(operation_succeeded);
+    assert!(resources_released);
+    assert!(worker_reached_exit);
+    assert!(!timed_report.worker_stopped);
+    assert!(!first_observer_report.worker_stopped);
+    assert!(!second_observer_report.worker_stopped);
+    assert!(final_report.worker_stopped);
+    assert!(final_report.worker_panicked);
+    assert!(repeated_report.worker_stopped);
+    assert!(repeated_report.worker_panicked);
+}

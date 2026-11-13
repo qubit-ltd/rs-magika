@@ -103,7 +103,7 @@ pub struct ManagedInferenceRuntime {
     /// Admission queue whose capacity is shared with the supervisor group.
     sender: Mutex<Option<SyncSender<Job>>>,
     /// Session-owning worker, joined after service group settlement.
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    worker: Mutex<WorkerState>,
     /// Finite managed child admission for active and queued jobs.
     service_group: ServiceGroup,
     /// Supervisor retained for all child-operation registrations.
@@ -116,6 +116,23 @@ pub struct ManagedInferenceRuntime {
     tasks: Arc<Mutex<Vec<Arc<TaskState>>>>,
     /// Serializes admission and provider-start boundaries with shutdown.
     admission_gate: Arc<Mutex<AdmissionGate>>,
+}
+
+/// Retains the worker handle until actual exit and remembers its join result.
+struct WorkerState {
+    handle: Option<std::thread::JoinHandle<()>>,
+    stopped: bool,
+    panicked: bool,
+}
+
+impl WorkerState {
+    fn new(handle: std::thread::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+            stopped: false,
+            panicked: false,
+        }
+    }
 }
 
 impl std::fmt::Debug for ManagedInferenceRuntime {
@@ -217,7 +234,7 @@ impl ManagedInferenceRuntime {
         })?;
         Ok(Self {
             sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
+            worker: Mutex::new(WorkerState::new(worker)),
             service_group,
             _supervisor: supervisor,
             max_in_flight_bytes,
@@ -242,6 +259,24 @@ impl ManagedInferenceRuntime {
         max_in_flight_bytes: usize,
         engine: ManagedInferenceEngine,
         after_business: Box<dyn Fn() + Send + 'static>,
+    ) -> Self {
+        Self::with_engine_and_worker_exit_hook(
+            supervisor,
+            max_in_flight_bytes,
+            engine,
+            after_business,
+            Box::new(|| {}),
+        )
+    }
+
+    /// Creates a deterministic worker with a hook after all jobs are released.
+    #[cfg(test)]
+    pub(crate) fn with_engine_and_worker_exit_hook(
+        supervisor: OperationSupervisor,
+        max_in_flight_bytes: usize,
+        engine: ManagedInferenceEngine,
+        after_business: Box<dyn Fn() + Send + 'static>,
+        before_worker_exit: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
@@ -284,6 +319,7 @@ impl ManagedInferenceRuntime {
                     after_business();
                     owner.worker_done();
                 }
+                before_worker_exit();
             })
             .expect("test inference worker should start");
         let service_group = supervisor
@@ -291,7 +327,7 @@ impl ManagedInferenceRuntime {
             .expect("service group should construct");
         Self {
             sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
+            worker: Mutex::new(WorkerState::new(worker)),
             service_group,
             _supervisor: supervisor,
             max_in_flight_bytes,
@@ -583,6 +619,7 @@ impl ManagedInferenceRuntime {
         timeout: std::time::Duration,
         after_task_scan: impl FnOnce(),
     ) -> ManagedInferenceShutdownReport {
+        let deadline = std::time::Instant::now().checked_add(timeout);
         let mut admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
         admission_gate.closed = true;
         admission_gate.cancelling |= mode == ShutdownMode::Cancel;
@@ -594,7 +631,9 @@ impl ManagedInferenceRuntime {
             }
         }
         after_task_scan();
-        let admission = self.service_group.shutdown_blocking(mode, timeout);
+        let admission = self
+            .service_group
+            .shutdown_blocking(mode, remaining_timeout(deadline));
         if !admission.is_complete() {
             return ManagedInferenceShutdownReport {
                 admission,
@@ -606,31 +645,54 @@ impl ManagedInferenceRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
-        match self
-            .worker
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
-            Some(worker) => match worker.join() {
-                Ok(()) => ManagedInferenceShutdownReport {
-                    admission,
-                    worker_stopped: true,
-                    worker_panicked: false,
-                },
-                Err(_) => ManagedInferenceShutdownReport {
-                    admission,
-                    worker_stopped: true,
-                    worker_panicked: true,
-                },
-            },
-            None => ManagedInferenceShutdownReport {
-                admission,
-                worker_stopped: true,
-                worker_panicked: false,
-            },
+        loop {
+            let mut worker = self
+                .worker
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match worker.handle.as_ref() {
+                Some(handle) if handle.is_finished() => {
+                    let handle = worker
+                        .handle
+                        .take()
+                        .expect("finished worker handle is present");
+                    worker.panicked = handle.join().is_err();
+                    worker.stopped = true;
+                    return ManagedInferenceShutdownReport {
+                        admission,
+                        worker_stopped: worker.stopped,
+                        worker_panicked: worker.panicked,
+                    };
+                }
+                Some(_) => {
+                    let panicked = worker.panicked;
+                    drop(worker);
+                    let remaining = remaining_timeout(deadline);
+                    if remaining.is_zero() {
+                        return ManagedInferenceShutdownReport {
+                            admission,
+                            worker_stopped: false,
+                            worker_panicked: panicked,
+                        };
+                    }
+                    std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
+                }
+                None => {
+                    return ManagedInferenceShutdownReport {
+                        admission,
+                        worker_stopped: worker.stopped,
+                        worker_panicked: worker.panicked,
+                    };
+                }
+            }
         }
     }
+}
+
+fn remaining_timeout(deadline: Option<std::time::Instant>) -> std::time::Duration {
+    deadline
+        .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+        .unwrap_or(std::time::Duration::MAX)
 }
 
 /// Applies Magika sampling and model inference on the owning worker thread.
