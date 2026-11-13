@@ -31,6 +31,8 @@ pub(super) struct TaskState {
     /// Bridge closed when cancellation stops async sampling.
     bridge: std::sync::Mutex<Option<Weak<AsyncSampleBridge>>>,
     owner: std::sync::Mutex<Option<Arc<super::request_admission::RequestResourceOwner>>>,
+    /// Weak back-reference lets aggregate release prune the runtime's strong registry.
+    active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
 }
 
 impl TaskState {
@@ -40,13 +42,24 @@ impl TaskState {
     ///
     /// * `operation_id` - Stable identifier reported to the parent scope.
     /// * `bridge` - Weak bridge reference closed when this task is stopped.
+    #[cfg(test)]
     pub(super) fn new(operation_id: OperationId, bridge: Option<Weak<AsyncSampleBridge>>) -> Self {
+        Self::new_registered(operation_id, bridge, None)
+    }
+
+    /// Creates a task state tracked strongly by the owning runtime until release.
+    pub(super) fn new_registered(
+        operation_id: OperationId,
+        bridge: Option<Weak<AsyncSampleBridge>>,
+        active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
+    ) -> Self {
         Self {
             operation_id,
             inner: Mutex::new(TaskInner::new()),
             released: Condvar::new(),
             bridge: std::sync::Mutex::new(bridge),
             owner: std::sync::Mutex::new(None),
+            active_tasks,
         }
     }
 
@@ -161,6 +174,12 @@ impl TaskState {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
+        if let Some(active_tasks) = self.active_tasks.as_ref().and_then(Weak::upgrade) {
+            active_tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .retain(|task| task.operation_id != self.operation_id);
+        }
     }
 }
 

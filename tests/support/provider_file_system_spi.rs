@@ -136,6 +136,10 @@ impl AsyncProviderGate {
             waker.wake();
         }
     }
+
+    pub(crate) fn is_entered(&self) -> bool {
+        self.entered.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Default)]

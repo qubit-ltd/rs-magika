@@ -111,8 +111,8 @@ pub struct ManagedInferenceRuntime {
     max_in_flight_bytes: usize,
     /// Aggregate bytes reserved by the active and queued jobs.
     byte_budget: Arc<ByteBudget>,
-    /// Weak cancellation targets for accepted requests.
-    tasks: Mutex<Vec<std::sync::Weak<TaskState>>>,
+    /// Strong active tasks retained until aggregate resource release.
+    tasks: Arc<Mutex<Vec<Arc<TaskState>>>>,
 }
 
 impl std::fmt::Debug for ManagedInferenceRuntime {
@@ -219,7 +219,7 @@ impl ManagedInferenceRuntime {
             _supervisor: supervisor,
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
-            tasks: Mutex::new(Vec::new()),
+            tasks: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -292,7 +292,7 @@ impl ManagedInferenceRuntime {
             _supervisor: supervisor,
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
-            tasks: Mutex::new(Vec::new()),
+            tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -495,14 +495,17 @@ impl ManagedInferenceRuntime {
             MimeError::detector_backend("magika", format!("runtime admission failed: {error}"))
         })?;
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let state = Arc::new(TaskState::new(OperationId::new(id as u128), None));
-        {
-            let mut tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
-            tasks.retain(|task| task.strong_count() > 0);
-            tasks.push(Arc::downgrade(&state));
-        }
+        let state = Arc::new(TaskState::new_registered(
+            OperationId::new(id as u128),
+            None,
+            Some(Arc::downgrade(&self.tasks)),
+        ));
         let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
         RequestAdmission::attach_scope(scope, Arc::clone(&control))?;
+        self.tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Arc::clone(&state));
         Ok(RequestAdmission::new(
             OperationId::new(id as u128),
             state,
@@ -552,7 +555,7 @@ impl ManagedInferenceRuntime {
     ) -> ManagedInferenceShutdownReport {
         if mode == ShutdownMode::Cancel {
             let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
-            for task in tasks.iter().filter_map(std::sync::Weak::upgrade) {
+            for task in tasks.iter() {
                 task.request_stop();
             }
         }

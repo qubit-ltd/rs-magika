@@ -288,6 +288,66 @@ fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close()
 }
 
 #[test]
+fn test_scope_less_dropped_provider_future_retains_pending_capacity() {
+    struct ThreadWake(std::thread::Thread);
+    impl Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    for point in [AsyncProviderGatePoint::Open, AsyncProviderGatePoint::Read] {
+        let detector =
+            qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize");
+        let gate = AsyncProviderGate::new(point);
+        let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_random_access()
+            .with_async_gate(Arc::clone(&gate));
+        let first_fs = first_provider.async_file_system();
+        let max_bytes = detector.max_buffer_size();
+        let first_path = path("/dropped-scope-less.py");
+        let mut future = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
+            &detector, &first_fs, &first_path, max_bytes,
+        ));
+        let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gate.is_entered() {
+            assert!(
+                Instant::now() < deadline,
+                "{point:?} provider operation did not start"
+            );
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+        drop(future);
+        if point == AsyncProviderGatePoint::Read {
+            // Let the worker observe bridge closure and finish. Its owner must
+            // still retain capacity because the provider read was Pending.
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let second_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+        let second_observations = second_provider.observations();
+        let second_fs = second_provider.async_file_system();
+        let second_path = path("/after-drop.py");
+        let result = crate::support::run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+            &detector, &second_fs, &second_path, 1024,
+        ));
+        assert!(
+            result.is_err(),
+            "{point:?} drop released scope-less admission too early"
+        );
+        assert_eq!(0, second_observations.opens.load(Ordering::SeqCst));
+        assert_eq!(0, second_observations.random_opens.load(Ordering::SeqCst));
+        let _ = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn test_sync_provider_backend_uses_session_range_and_full_read_routes() {
     let detector =
         qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize");
