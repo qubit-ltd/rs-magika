@@ -666,6 +666,9 @@ fn test_async_content_returns_empty_candidate_and_worker_error() {
         Box::new(move |bytes| {
             engine_calls.fetch_add(1, Ordering::SeqCst);
             match bytes.as_slice() {
+                // Magika classifies empty content through its rule path; this
+                // fake worker confirms the async hook still dispatches it.
+                b"" => Ok(Some("inode/x-empty".to_owned())),
                 b"none" => Ok(None),
                 b"error" => Err(qubit_mime::MimeError::detector_backend("fixture", "inference failed")),
                 _ => Ok(Some("text/plain".to_owned())),
@@ -689,9 +692,13 @@ fn test_async_content_returns_empty_candidate_and_worker_error() {
             .unwrap()
             .is_empty()
     );
+    assert_eq!(
+        block_on_content(MimeDetectorBackend::guess_from_content_async(&detector, b"")).unwrap(),
+        vec!["inode/x-empty"]
+    );
     let error = block_on_content(MimeDetectorBackend::guess_from_content_async(&detector, b"error")).unwrap_err();
     assert!(error.to_string().contains("inference failed"));
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(
         runtime
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
