@@ -37,13 +37,13 @@ use super::drive_event::DriveEvent;
 use super::inference_future::InferenceFuture;
 use super::job::Job;
 use super::managed_inference_shutdown_report::ManagedInferenceShutdownReport;
+use super::provider_driver_guard::ProviderDriverGuard;
 use super::request_admission::RequestAdmission;
 use super::task_control::TaskControl;
 use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
-use crate::internal::async_sample_bridge::AsyncSampleDriver;
 use crate::magika_mime_detector::content_type_to_mime;
 use crate::magika_mime_detector::map_magika_error;
 
@@ -510,11 +510,8 @@ impl ManagedInferenceRuntime {
         let driver = bridge.driver();
         let state = Arc::clone(&admission.state);
         let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-        let (result, driver_completed) = drive_async_input(driver, input, inference, state.clone()).await;
-        if driver_completed {
-            state.mark_driver_done();
-        }
-        result
+        let guard = ProviderDriverGuard::new(input, driver, state);
+        drive_async_input(guard, inference).await
     }
 
     /// Dispatches owned bytes using capacity reserved by the caller.
@@ -884,25 +881,22 @@ fn identify_features(
 ///
 /// # Parameters
 ///
-/// * `driver` - Cancellation guard for the bridge's async side.
-/// * `input` - Provider input held by the async caller.
+/// * `guard` - Owns the provider input and bridge driver.
 /// * `inference` - Worker result observer.
 ///
 /// # Returns
 ///
 /// The worker's MIME inference result.
 async fn drive_async_input<I>(
-    driver: AsyncSampleDriver,
-    mut input: I,
+    mut guard: ProviderDriverGuard<I>,
     inference: InferenceFuture,
-    state: Arc<TaskState>,
-) -> (MimeResult<Option<String>>, bool)
+) -> MimeResult<Option<String>>
 where
     I: AsyncInput,
 {
     let mut inference = Box::pin(inference);
     loop {
-        let next_request = driver.next_request();
+        let next_request = guard.driver.as_ref().expect("driver remains owned").next_request();
         let mut next_request = Box::pin(next_request);
         let event = poll_fn(|cx| {
             if let Poll::Ready(result) = inference.as_mut().poll(cx) {
@@ -915,18 +909,26 @@ where
         })
         .await;
         match event {
-            DriveEvent::Result(result) => return (result, true),
-            DriveEvent::Request(None) => return (inference.await, true),
+            DriveEvent::Result(result) => return result,
+            DriveEvent::Request(None) => return inference.await,
             DriveEvent::Request(Some(request)) => {
-                if !state.try_start_provider_operation() {
-                    state.request_stop();
-                    return (inference.await, true);
+                if !guard.state.try_start_provider_operation() {
+                    guard.state.request_stop();
+                    return inference.await;
                 }
                 let mut buffer = vec![0; request.len()];
-                let mut read = Box::pin(input.read_at(&mut buffer, request.offset()));
-                let mut closed = Box::pin(driver.closed());
+                let mut read = Box::pin(
+                    guard
+                        .input
+                        .as_mut()
+                        .expect("input remains owned")
+                        .read_at(&mut buffer, request.offset()),
+                );
+                let mut closed = Box::pin(guard.driver.as_ref().expect("driver remains owned").closed());
                 let read_result = poll_fn(|cx| {
+                    guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Poll::Ready(result) = read.as_mut().poll(cx) {
+                        guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
                         return Poll::Ready(Some(result));
                     }
                     if closed.as_mut().poll(cx).is_ready() {
@@ -940,7 +942,7 @@ where
                     // not expose whether provider-native work has completed.
                     drop(read);
                     drop(closed);
-                    return (inference.await, false);
+                    return inference.await;
                 };
                 drop(read);
                 drop(closed);
@@ -978,6 +980,26 @@ mod tests {
     use super::ManagedInferenceRuntime;
     use super::WorkerInput;
     use super::execute_classified;
+
+    fn map_provider_test_error(_: magika::Error) -> MimeError {
+        MimeError::detector_backend("magika", "test input failed")
+    }
+
+    struct ReleaseWorkerGate(Arc<(Mutex<bool>, Condvar)>);
+
+    impl ReleaseWorkerGate {
+        fn release(&self) {
+            let (lock, changed) = &*self.0;
+            *lock.lock().unwrap_or_else(|error| error.into_inner()) = true;
+            changed.notify_all();
+        }
+    }
+
+    impl Drop for ReleaseWorkerGate {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
 
     #[test]
     fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registration() {
@@ -1089,9 +1111,6 @@ mod tests {
             fn wake(self: Arc<Self>) {
                 self.0.unpark();
             }
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.0.unpark();
-            }
         }
         struct PendingReadInput(std::sync::mpsc::SyncSender<()>);
         impl magika::AsyncInput for PendingReadInput {
@@ -1147,13 +1166,194 @@ mod tests {
     }
 
     #[test]
-    fn test_admitted_owned_bytes_return_worker_result() {
+    fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
         struct ThreadWake(std::thread::Thread);
         impl std::task::Wake for ThreadWake {
             fn wake(self: Arc<Self>) {
                 self.0.unpark();
             }
-            fn wake_by_ref(self: &Arc<Self>) {
+        }
+        struct ReadyInput;
+        impl magika::AsyncInput for ReadyInput {
+            fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+                std::future::ready(Ok(1))
+            }
+            fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+                let _ = buffer;
+                std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test read failed"))))
+            }
+        }
+
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let (worker_tx, worker_rx) = mpsc::sync_channel(1);
+        let worker_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let callback_gate = Arc::clone(&worker_gate);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8,
+            Box::new(|_| Ok(None)),
+            Box::new(move || {
+                worker_tx.send(()).unwrap();
+                let (lock, changed) = &*callback_gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+            }),
+        ));
+        // Declared after the runtime so an assertion unwind releases the
+        // worker before runtime teardown attempts to join it.
+        let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
+        let admission = runtime.reserve_for_provider(None, 8).unwrap();
+        let body_runtime = Arc::clone(&runtime);
+        let mut future = Box::pin(async move {
+            body_runtime
+                .detect_async_input_admitted(admission, ReadyInput, 8, map_provider_test_error)
+                .await
+        });
+        let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while worker_rx.try_recv().is_err() {
+            assert!(std::time::Instant::now() < deadline, "worker did not reach its gate");
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        drop(future);
+        gate_cleanup.release();
+        let state = runtime.tasks.lock().unwrap().first().unwrap().clone();
+        assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
+        assert!(state.wait_released_blocking(Duration::from_secs(2)));
+        assert!(runtime.reserve_for_provider(None, 8).is_ok());
+        let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
+        struct ThreadWake(std::thread::Thread);
+        impl std::task::Wake for ThreadWake {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        struct CountedInput(Arc<std::sync::atomic::AtomicUsize>);
+        impl magika::AsyncInput for CountedInput {
+            fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+                std::future::ready(Ok(1))
+            }
+            fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                buffer[0] = b'x';
+                std::future::ready(Ok(()))
+            }
+        }
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let (worker_tx, worker_rx) = mpsc::sync_channel(1);
+        let worker_signaled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_signaled = Arc::clone(&worker_signaled);
+        let worker_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let callback_gate = Arc::clone(&worker_gate);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            16,
+            Box::new(|_| Ok(None)),
+            Box::new(move || {
+                if !callback_signaled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    worker_tx.send(()).unwrap();
+                    let (lock, changed) = &*callback_gate;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                }
+            }),
+        ));
+        // Declared after the runtime so an assertion unwind releases the
+        // worker before runtime teardown attempts to join it.
+        let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
+        let first_admission = runtime.reserve_for_provider(None, 8).unwrap();
+        let first_runtime = Arc::clone(&runtime);
+        let mut first = Box::pin(async move { first_runtime.detect_bytes_admitted(first_admission, vec![b'a']).await });
+        let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while worker_rx.try_recv().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "first worker did not reach its gate"
+            );
+            assert!(first.as_mut().poll(&mut context).is_pending());
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_admission = runtime.reserve_for_provider(None, 8).unwrap();
+        let second_runtime = Arc::clone(&runtime);
+        let second_reads = Arc::clone(&reads);
+        let mut second = Box::pin(async move {
+            second_runtime
+                .detect_async_input_admitted(second_admission, CountedInput(second_reads), 8, map_provider_test_error)
+                .await
+        });
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
+        let states = runtime.tasks.lock().unwrap().clone();
+        assert_eq!(2, states.len());
+        drop(second);
+        assert!(runtime.reserve_for_provider(None, 1).is_err());
+
+        gate_cleanup.release();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Poll::Ready(result) = first.as_mut().poll(&mut context) {
+                result.unwrap();
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "first request did not finish");
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        for state in states {
+            assert!(state.wait_released_blocking(Duration::from_secs(2)));
+        }
+        assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(runtime.reserve_for_provider(None, 8).is_ok());
+        let success_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let success_admission = runtime.reserve_for_provider(None, 8).unwrap();
+        let success_runtime = Arc::clone(&runtime);
+        let success_input = Arc::clone(&success_reads);
+        let mut success = Box::pin(async move {
+            success_runtime
+                .detect_async_input_admitted(
+                    success_admission,
+                    CountedInput(success_input),
+                    8,
+                    map_provider_test_error,
+                )
+                .await
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Poll::Ready(result) = success.as_mut().poll(&mut context) {
+                assert!(result.is_ok());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "successful provider request timed out"
+            );
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        assert_eq!(1, success_reads.load(std::sync::atomic::Ordering::SeqCst));
+        let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+        assert!(report.worker_stopped);
+        assert!(report.admission.is_complete());
+    }
+
+    #[test]
+    fn test_admitted_owned_bytes_return_worker_result() {
+        struct ThreadWake(std::thread::Thread);
+        impl std::task::Wake for ThreadWake {
+            fn wake(self: Arc<Self>) {
                 self.0.unpark();
             }
         }

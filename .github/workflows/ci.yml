@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: qubit-ltd/rs-operation
-          ref: codex/operation-0.1.0-integration
+          ref: ceba551e5fc15b6816da74118490688f4f147aa4
           path: rs-operation
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:

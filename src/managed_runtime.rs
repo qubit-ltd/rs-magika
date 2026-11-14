@@ -16,6 +16,7 @@ pub(super) mod inference_future;
 pub(super) mod job;
 mod managed_inference_runtime;
 mod managed_inference_shutdown_report;
+pub(super) mod provider_driver_guard;
 pub(super) mod request_admission;
 pub(super) mod request_resource_owner;
 pub(super) mod task_control;

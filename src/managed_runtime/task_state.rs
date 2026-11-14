@@ -200,6 +200,27 @@ impl TaskState {
         true
     }
 
+    #[cfg(test)]
+    pub(super) fn wait_released_blocking(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        while !inner.released {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (next, result) = self
+                .released
+                .wait_timeout(inner, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|error| error.into_inner());
+            inner = next;
+            if result.timed_out() && !inner.released {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Records that the inference worker has begun this job.
     pub(super) fn mark_started(&self) {
         self.inner.lock().unwrap_or_else(|error| error.into_inner()).started = true;

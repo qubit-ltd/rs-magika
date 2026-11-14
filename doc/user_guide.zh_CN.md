@@ -319,6 +319,10 @@ Provider future，只会停止本地轮询；Provider 启动的 native 或远端
 runtime/字节容量会保持 `Pending`，甚至可能一直如此。调用方可以尽快停止等待，但不能据此
 断言 native 工作已中断。
 
+如果丢弃请求时没有尚未完成的 Provider 范围读取，关闭采样 bridge 后即可结束 driver 所有权。
+若最后一次读取已经返回 `Ready`，I/O 完成状态可确认；worker 也完成后就会释放容量。显式
+managed 和 scope-less provider 入口都遵循此生命周期。
+
 子操作的业务结果与资源释放是两件事。推理成功记录为 `Succeeded`；worker 返回错误时记录
 `Failed`，调用方仍会收到原始错误；worker panic 则记录为 `Panicked`。即使调用方已经
 取走结果、资源也已释放，终态结果仍可从子操作状态中读取。

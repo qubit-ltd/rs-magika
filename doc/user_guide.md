@@ -357,6 +357,11 @@ remain `Pending`, potentially indefinitely. Cancellation can stop the
 caller from waiting promptly; it does not guarantee that native work was
 interrupted.
 
+When no provider read is pending, dropping the request closes its sampling
+bridge and releases driver ownership. If a read has returned `Ready`, its I/O
+completion is known; capacity is released once the worker also finishes. This
+applies to both scope-managed and scope-less provider entry points.
+
 The child business outcome is independent of resource release. Successful
 inference reports `Succeeded`; a worker error reports `Failed` while the
 caller receives the original error, and a worker panic reports

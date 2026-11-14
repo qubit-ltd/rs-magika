@@ -8,4 +8,4 @@
 ../rs-redact	https://github.com/qubit-ltd/rs-redact.git	main
 ../rs-json	https://github.com/qubit-ltd/rs-json.git	main
 ../rs-fs-testkit	https://github.com/qubit-ltd/rs-fs-testkit.git	main
-../rs-operation	https://github.com/qubit-ltd/rs-operation.git	codex/operation-0.1.0-integration
+../rs-operation	https://github.com/qubit-ltd/rs-operation.git	ceba551e5fc15b6816da74118490688f4f147aa4
