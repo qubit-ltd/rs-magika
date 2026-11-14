@@ -23,6 +23,7 @@ use std::time::Instant;
 use qubit_fs::Path;
 use qubit_fs_local::LocalFileSystems;
 use qubit_fs_local::LocalResourcePolicy;
+use qubit_magika::ManagedInferenceRuntime;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorBackend;
@@ -53,6 +54,104 @@ fn large_provider(range: bool) -> ProviderFileSystemSpi {
     } else {
         provider.without_range().logical(32 * 1024 * 1024)
     }
+}
+
+#[test]
+fn test_managed_guide_reuses_detector_for_two_requests() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(2).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+
+    // Hold the first Provider read pending while a separate future advances on
+    // this test thread. The request observer uses the guide's async result and
+    // release APIs throughout.
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Open);
+    let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let first_fs = first_provider.async_file_system();
+    let first_detector = Arc::clone(&detector);
+    let mut first = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            first_detector
+                .detect_async_provider_path_managed(&scope, &first_fs, &path("/guide/first.py"), 4096)
+                .await
+        })
+        .unwrap();
+    gate.wait_until_entered(Duration::from_secs(5));
+
+    let first_wait = async {
+        let outcome = first.result().await.unwrap();
+        let settlement = first.released().await;
+        (outcome, settlement)
+    };
+    let mut first_wait = Box::pin(first_wait);
+    let heartbeat_reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let heartbeat_flag = Arc::clone(&heartbeat_reached);
+    let mut heartbeat = Box::pin(async move {
+        heartbeat_flag.store(true, Ordering::SeqCst);
+    });
+    let mut heartbeat_done = false;
+    run_ready(std::future::poll_fn(|context| {
+        let _ = first_wait.as_mut().poll(context);
+        if !heartbeat_done && heartbeat.as_mut().poll(context).is_ready() {
+            heartbeat_done = true;
+        }
+        if heartbeat_done { Poll::Ready(()) } else { Poll::Pending }
+    }));
+    assert!(heartbeat_reached.load(Ordering::SeqCst));
+    gate.release();
+    let (first_outcome, first_settlement) = run_ready(first_wait);
+    assert!(matches!(
+        first_outcome,
+        qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
+    ));
+    assert!(first_settlement.all_released);
+
+    let second_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let second_fs = second_provider.async_file_system();
+    let second_detector = Arc::clone(&detector);
+    let mut second = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            second_detector
+                .detect_async_provider_path_managed(&scope, &second_fs, &path("/guide/second.py"), 4096)
+                .await
+        })
+        .unwrap();
+    let second_outcome = run_ready(second.result()).unwrap();
+    let second_settlement = run_ready(second.released());
+    assert!(matches!(
+        second_outcome,
+        qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
+    ));
+    assert!(second_settlement.all_released);
+
+    assert!(
+        service
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .is_complete()
+    );
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+    assert!(
+        supervisor
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .is_complete()
+    );
 }
 
 #[test]

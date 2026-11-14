@@ -249,18 +249,25 @@ async content hook 与同步 content hook 一样返回 backend 原始 Magika 候
 `detect_async_provider_path_managed`。启动时共享一个 supervisor 和 detector，再把每个
 请求的 scope 显式传入：
 
+<!-- managed-guide-example-start -->
 ```rust,no_run
 use std::sync::Arc;
 use std::time::Duration;
 
 use qubit_fs::{AsyncFileSystem, Path};
-use qubit_magika::MagikaMimeDetector;
+use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};
+use qubit_operation::report::OperationOutcome;
 use qubit_operation::report::SupervisorLimits;
 use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::{OperationSupervisor, ShutdownMode};
+use qubit_operation::supervisor::{OperationSupervisor, ServiceGroup, ShutdownMode};
 
-fn prepare_detector() -> qubit_mime::MimeResult<(OperationSupervisor, Arc<MagikaMimeDetector>)> {
+fn prepare_application() -> Result<(
+    OperationSupervisor,
+    ServiceGroup,
+    Arc<MagikaMimeDetector>,
+), Box<dyn std::error::Error>> {
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(4)?;
     let config = qubit_mime::MimeConfig::default();
     let runtime = Arc::new(ManagedInferenceRuntime::new(
         supervisor.clone(),
@@ -272,34 +279,53 @@ fn prepare_detector() -> qubit_mime::MimeResult<(OperationSupervisor, Arc<Magika
             .managed_runtime(runtime)
             .build()?,
     );
-    Ok((supervisor, detector))
+    Ok((supervisor, service, detector))
 }
 
 async fn detect_request(
-    supervisor: &OperationSupervisor,
-    detector: Arc<MagikaMimeDetector>,
+    service: &ServiceGroup,
+    detector: &Arc<MagikaMimeDetector>,
     file_system: Arc<AsyncFileSystem>,
     path: Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let service = supervisor.service_group(4)?;
+) -> Result<(
+    OperationOutcome<Option<String>, qubit_mime::MimeError>,
+    qubit_operation::report::SettlementReport,
+), Box<dyn std::error::Error>> {
     let request_detector = Arc::clone(&detector);
     let mut request = service.start(ScopeOptions::default(), move |scope| async move {
         request_detector
             .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
             .await
     })?;
-    let _outcome = request.result_blocking()?;
-    let _settlement = request.released_blocking()?;
-    let _request_group_shutdown = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
-    let shutdown = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
-    assert!(shutdown.worker_stopped);
-    let _supervisor_shutdown = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
-    Ok(())
+    let outcome = request.result().await?;
+    let settlement = request.released().await;
+    Ok((outcome, settlement))
+}
+
+fn shutdown_application(
+    supervisor: &OperationSupervisor,
+    service: &ServiceGroup,
+    detector: &MagikaMimeDetector,
+) {
+    // 停止接收新请求，并等待活动请求完成后再调用。超时报告仍会显示未完成的工作，
+    // 超时不表示底层工作已被强制停止。
+    let service_report = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(service_report.is_complete());
+    let detector_report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(detector_report.worker_stopped);
+    let supervisor_report = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(supervisor_report.is_complete());
 }
 ```
+<!-- managed-guide-example-end -->
 
-真实应用应让 detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
-shutdown。`max_bytes` 既是单次采样的累计读取预算，也会占用 runtime 共享的在途字节预算。
+请检查 `detect_request` 返回的 `OperationOutcome`：`Succeeded(Some(mime))` 包含识别结果，
+`Succeeded(None)` 表示没有识别结果，`Failed(error)` 携带 detector 错误。其他变体表示操作被停止或执行失败。
+`released()` 单独报告资源释放状态，它不返回 `Result`。`shutdown_application` 应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
+等待活动请求完成后，使用自身的阻塞执行机制调用它。
+
+真实应用应让 service group、detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
+关闭函数。`max_bytes` 既是单次采样的累计读取预算，也会占用 runtime 共享的在途字节预算。
 它只约束逻辑采样和由请求持有的 payload 记账，不代表进程总内存或 Provider/网络流量上限。
 runtime 会先预留容量和字节预算，再提交可选的 scope 子操作，然后才调用 Provider 的
 `open`、`stat`、`read_all`、`length` 或范围读取。runtime 已关闭、容量已满或 scope

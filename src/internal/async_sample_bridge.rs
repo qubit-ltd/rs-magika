@@ -205,3 +205,48 @@ impl AsyncSampleBridge {
 fn closed_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "async sample bridge closed")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
+
+    use super::AsyncSampleBridge;
+
+    #[test]
+    fn test_poisoned_bridge_state_still_serves_a_read() {
+        let bridge = AsyncSampleBridge::new(4);
+        let poison_bridge = Arc::clone(&bridge);
+        let _ = std::thread::spawn(move || {
+            let _state = poison_bridge.state.lock().unwrap();
+            panic!("poison bridge state for recovery test");
+        })
+        .join();
+
+        let worker_bridge = Arc::clone(&bridge);
+        let worker = std::thread::spawn(move || {
+            let mut bytes = [0; 2];
+            worker_bridge.read_at(1, &mut bytes).unwrap();
+            bytes
+        });
+        let request = block_on(bridge.next_request()).expect("worker should publish a read request");
+        assert_eq!((1, 2), (request.offset(), request.len()));
+        request.respond(Ok(vec![7, 9]));
+        assert_eq!([7, 9], worker.join().unwrap());
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Poll::Ready(output) = Future::poll(future.as_mut(), &mut context) {
+                return output;
+            }
+            std::thread::yield_now();
+        }
+    }
+}

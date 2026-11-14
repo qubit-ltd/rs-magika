@@ -43,6 +43,7 @@ use super::task_control::TaskControl;
 use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
+use super::worker_input::worker_bytes;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 use crate::magika_mime_detector::content_type_to_mime;
 use crate::magika_mime_detector::map_magika_error;
@@ -200,6 +201,7 @@ impl ManagedInferenceRuntime {
                             )),
                             ChildBusinessOutcome::Stopped,
                         );
+                        drop(input);
                     } else {
                         state.mark_started();
                         let (result, outcome) = execute_classified(|| infer_input(&mut session, input));
@@ -312,6 +314,7 @@ impl ManagedInferenceRuntime {
                             )),
                             ChildBusinessOutcome::Stopped,
                         );
+                        drop(input);
                     } else {
                         state.mark_started();
                         let (result, outcome) = execute_classified(|| match input {
@@ -377,7 +380,7 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit(Some(scope), WorkerInput::Bytes(bytes.into_boxed_slice()))?
+        self.submit(Some(scope), WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?
             .await
     }
 
@@ -407,7 +410,7 @@ impl ManagedInferenceRuntime {
             });
         }
         let admission = self.reserve_request(None, length)?;
-        let input = WorkerInput::Bytes(content.to_vec().into_boxed_slice());
+        let input = WorkerInput::Bytes(worker_bytes(content.to_vec().into_boxed_slice()));
         self.dispatch(admission, input)?.await
     }
 
@@ -433,7 +436,8 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit(None, WorkerInput::Bytes(bytes.into_boxed_slice()))?.await
+        self.submit(None, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?
+            .await
     }
 
     /// Reserves operation and byte capacity before a provider performs I/O.
@@ -533,7 +537,7 @@ impl ManagedInferenceRuntime {
         admission: RequestAdmission,
         bytes: Vec<u8>,
     ) -> MimeResult<Option<String>> {
-        self.dispatch(admission, WorkerInput::Bytes(bytes.into_boxed_slice()))?
+        self.dispatch(admission, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?
             .await
     }
 
@@ -977,6 +981,7 @@ mod tests {
     use qubit_operation::supervisor::OperationSupervisor;
     use qubit_operation::supervisor::ShutdownMode;
 
+    use super::super::worker_input::WorkerBytes;
     use super::ManagedInferenceRuntime;
     use super::WorkerInput;
     use super::execute_classified;
@@ -999,6 +1004,170 @@ mod tests {
         fn drop(&mut self) {
             self.release();
         }
+    }
+
+    struct PausedDropProbe {
+        entered: mpsc::SyncSender<()>,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Drop for PausedDropProbe {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let (lock, changed) = &*self.gate;
+            let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
+            while !*released {
+                released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
+            }
+        }
+    }
+
+    #[test]
+    fn test_cancelled_input_drops_before_worker_release() {
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let first_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let first_gate_worker = Arc::clone(&first_gate);
+        let (first_started_tx, first_started_rx) = mpsc::sync_channel(1);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8,
+            Box::new(move |_| {
+                let _ = first_started_tx.send(());
+                let (lock, changed) = &*first_gate_worker;
+                let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
+                while !*released {
+                    released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
+                }
+                Ok(None)
+            }),
+            Box::new(|| {}),
+        ));
+        let first_gate_cleanup = ReleaseWorkerGate(Arc::clone(&first_gate));
+
+        let _first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
+        first_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (probe_entered_tx, probe_entered_rx) = mpsc::sync_channel(1);
+        let probe_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let probe_gate_cleanup = ReleaseWorkerGate(Arc::clone(&probe_gate));
+        let _probe = runtime
+            .submit(
+                None,
+                WorkerInput::Bytes(WorkerBytes::with_drop_probe(
+                    Box::new([]),
+                    Box::new(PausedDropProbe {
+                        entered: probe_entered_tx,
+                        gate: Arc::clone(&probe_gate),
+                    }),
+                )),
+            )
+            .unwrap();
+        let state = runtime.tasks.lock().unwrap()[1].clone();
+        state.request_stop();
+        first_gate_cleanup.release();
+
+        let entered = probe_entered_rx.recv_timeout(Duration::from_secs(2));
+        if entered.is_err() {
+            probe_gate_cleanup.release();
+            first_gate_cleanup.release();
+            panic!("cancelled input destructor did not enter");
+        }
+        assert!(!state.wait_worker_done_blocking(Duration::ZERO));
+        assert!(!state.wait_released_blocking(Duration::ZERO));
+        probe_gate_cleanup.release();
+        assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
+        assert!(state.wait_released_blocking(Duration::from_secs(2)));
+        assert!(runtime.reserve_for_provider(None, 0).is_ok());
+        let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_cancelled_queued_bytes_restore_byte_budget() {
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_gate_copy = Arc::clone(&worker_gate);
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8,
+            Box::new(move |_| {
+                let _ = started_tx.send(());
+                let (lock, changed) = &*worker_gate_copy;
+                let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
+                while !*released {
+                    released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
+                }
+                Ok(None)
+            }),
+            Box::new(|| {}),
+        ));
+        let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
+
+        let _first = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let queued = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
+        let state = runtime.tasks.lock().unwrap()[1].clone();
+        drop(queued);
+        assert!(runtime.reserve_for_provider(None, 1).is_err());
+
+        gate_cleanup.release();
+        assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
+        assert!(state.wait_released_blocking(Duration::from_secs(2)));
+        assert!(runtime.reserve_for_provider(None, 8).is_ok());
+        let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_provider_read_error_is_mapped_and_settled() {
+        struct FailedLengthInput;
+
+        impl magika::AsyncInput for FailedLengthInput {
+            fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+                std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test length failed"))))
+            }
+
+            fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+                std::future::ready(Ok(()))
+            }
+        }
+
+        struct FailedReadInput;
+
+        impl magika::AsyncInput for FailedReadInput {
+            fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+                std::future::ready(Ok(8192))
+            }
+
+            fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+                std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test read failed"))))
+            }
+        }
+
+        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor,
+            8192,
+            Box::new(|_| Ok(None)),
+            Box::new(|| {}),
+        ));
+        let mapped_error = map_provider_test_error(magika::Error::IOError(std::io::Error::other("test mapping")));
+        assert!(matches!(mapped_error, MimeError::DetectorBackend { .. }));
+        let length_admission = runtime.reserve_for_provider(None, 8192).unwrap();
+        let length_result = block_on(runtime.detect_async_input_admitted(
+            length_admission,
+            FailedLengthInput,
+            8192,
+            map_provider_test_error,
+        ));
+        assert!(matches!(length_result, Err(MimeError::DetectorBackend { .. })));
+
+        let admission = runtime.reserve_for_provider(None, 8192).unwrap();
+        let result =
+            block_on(runtime.detect_async_input_admitted(admission, FailedReadInput, 8192, map_provider_test_error));
+
+        assert!(matches!(result, Err(MimeError::Io(_))));
+        let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+        assert!(report.admission.is_complete());
+        assert!(report.worker_stopped);
     }
 
     #[test]

@@ -286,56 +286,89 @@ Use the managed entry point when an application needs the provider sample reads
 to be children of a `qubit-operation` scope. Share one supervisor and detector
 for the application lifetime, then pass the request scope explicitly:
 
+<!-- managed-guide-example-start -->
 ```rust,no_run
 use std::sync::Arc;
 use std::time::Duration;
 
 use qubit_fs::{AsyncFileSystem, Path};
 use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};
+use qubit_operation::report::OperationOutcome;
 use qubit_operation::report::SupervisorLimits;
 use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::{OperationSupervisor, ShutdownMode};
+use qubit_operation::supervisor::{OperationSupervisor, ServiceGroup, ShutdownMode};
 
-fn managed_detector() -> qubit_mime::MimeResult<(OperationSupervisor, MagikaMimeDetector)> {
+fn prepare_application() -> Result<(
+    OperationSupervisor,
+    ServiceGroup,
+    Arc<MagikaMimeDetector>,
+), Box<dyn std::error::Error>> {
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(4)?;
     let config = qubit_mime::MimeConfig::default();
-    let runtime = std::sync::Arc::new(ManagedInferenceRuntime::new(
+    let runtime = Arc::new(ManagedInferenceRuntime::new(
         supervisor.clone(),
         config.max_buffer_size(),
     )?);
-    let detector = MagikaMimeDetector::builder()
-        .mime_config(config)
-        .managed_runtime(runtime)
-        .build()?;
-    Ok((supervisor, detector))
+    let detector = Arc::new(
+        MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()?,
+    );
+    Ok((supervisor, service, detector))
 }
 
 async fn detect_request(
-    detector: Arc<MagikaMimeDetector>,
-    supervisor: &OperationSupervisor,
+    service: &ServiceGroup,
+    detector: &Arc<MagikaMimeDetector>,
     file_system: Arc<AsyncFileSystem>,
     path: Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let service = supervisor.service_group(4)?;
+) -> Result<(
+    OperationOutcome<Option<String>, qubit_mime::MimeError>,
+    qubit_operation::report::SettlementReport,
+), Box<dyn std::error::Error>> {
     let request_detector = Arc::clone(&detector);
     let mut request = service.start(ScopeOptions::default(), move |scope| async move {
         request_detector
             .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
             .await
     })?;
-    let _outcome = request.result_blocking()?;
-    let _settlement = request.released_blocking()?;
-    let _request_group_shutdown = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
-    let shutdown = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
-    assert!(shutdown.worker_stopped);
-    let _supervisor_shutdown = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
-    Ok(())
+    let outcome = request.result().await?;
+    let settlement = request.released().await;
+    Ok((outcome, settlement))
+}
+
+fn shutdown_application(
+    supervisor: &OperationSupervisor,
+    service: &ServiceGroup,
+    detector: &MagikaMimeDetector,
+) {
+    // Stop admitting requests before calling this function and wait for active
+    // request futures to finish. A timed-out report keeps pending work visible;
+    // it does not mean that the work was forcibly stopped.
+    let service_report = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(service_report.is_complete());
+    let detector_report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(detector_report.worker_stopped);
+    let supervisor_report = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(supervisor_report.is_complete());
 }
 ```
+<!-- managed-guide-example-end -->
 
-In a real application, keep the supervisor beside the detector so request
-scopes come from the same supervisor, and call detector shutdown after the
-application has stopped admitting requests. `max_bytes` bounds cumulative
+Inspect the `OperationOutcome` returned by `detect_request`: `Succeeded(Some(mime))`
+contains a classification, `Succeeded(None)` means there was no classification,
+and `Failed(error)` carries the detector error. Other variants report stopped
+or otherwise failed operation work. `released()` separately reports resource
+settlement; it has no `Result` wrapper. Keep `shutdown_application` at a synchronous application
+shutdown boundary. An async-only host should run that boundary on its own
+blocking executor facility after it stops admission and awaits active requests.
+
+In a real application, keep the service group, supervisor, and detector for the
+application lifetime so request scopes come from the same supervisor, and call
+the shutdown function after the application has stopped admitting requests.
+`max_bytes` bounds cumulative
 sample reads and the runtime accounts that request against its shared byte
 budget. This is a logical sampling and owned-payload accounting bound, not a
 guarantee about total process memory or provider/network activity. Admission
