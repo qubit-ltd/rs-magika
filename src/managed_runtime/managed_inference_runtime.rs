@@ -381,6 +381,36 @@ impl ManagedInferenceRuntime {
             .await
     }
 
+    /// Classifies borrowed content through the worker without a parent scope.
+    ///
+    /// Admission and the aggregate byte budget are reserved before copying
+    /// the input into worker-owned storage. Sampling, feature extraction, and
+    /// inference then run on the session-owning worker.
+    ///
+    /// # Parameters
+    ///
+    /// * `content` - Complete content bytes to inspect.
+    ///
+    /// # Returns
+    ///
+    /// A MIME mapping or `None` when Magika has no mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns a size-limit, capacity, Magika, or worker error.
+    pub(crate) async fn detect_content_unmanaged(&self, content: &[u8]) -> MimeResult<Option<String>> {
+        let length = content.len();
+        if length > self.max_in_flight_bytes() {
+            return Err(MimeError::BufferLimitExceeded {
+                requested: length,
+                limit: self.max_in_flight_bytes(),
+            });
+        }
+        let admission = self.reserve_request(None, length)?;
+        let input = WorkerInput::Bytes(content.to_vec().into_boxed_slice());
+        self.dispatch(admission, input)?.await
+    }
+
     /// Classifies owned bytes through the worker without registering a parent.
     ///
     /// # Parameters

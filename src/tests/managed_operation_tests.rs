@@ -527,3 +527,331 @@ fn test_public_runtime_detection_preserves_result_release_and_shutdown() {
     assert!(shutdown.worker_stopped);
     assert!(shutdown.admission.is_complete());
 }
+
+#[test]
+fn test_managed_bytes_respects_detector_limit() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let limit = MimeConfig::default().max_buffer_size();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine_calls = Arc::clone(&calls);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        limit.saturating_mul(2),
+        Box::new(move |_bytes| {
+            engine_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("text/plain".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = Arc::new(
+        crate::MagikaMimeDetector::builder()
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .unwrap(),
+    );
+    let service = supervisor.service_group(1).unwrap();
+    let request_detector = Arc::clone(&detector);
+    let request_calls = Arc::clone(&calls);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let error = request_detector
+                .detect_bytes_managed(&scope, vec![0; limit + 1])
+                .await
+                .unwrap_err();
+            assert!(matches!(error, qubit_mime::MimeError::BufferLimitExceeded { requested, limit: actual } if requested == limit + 1 && actual == limit));
+            assert_eq!(request_calls.load(Ordering::SeqCst), 0);
+            request_detector
+                .detect_bytes_managed(&scope, vec![0; limit])
+                .await?;
+            request_detector
+                .detect_bytes_managed(&scope, vec![0; limit - 1])
+                .await?;
+            Ok::<(), qubit_mime::MimeError>(())
+        })
+        .unwrap();
+    assert!(matches!(
+        handle.result_blocking().unwrap(),
+        qubit_operation::report::OperationOutcome::Succeeded(())
+    ));
+    assert!(handle.observer().released_blocking().unwrap().all_released);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+}
+
+#[test]
+fn test_async_content_yields_while_worker_is_gated() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let engine_gate = Arc::clone(&gate);
+    let (started_tx, started_rx) = mpsc::channel();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        MimeConfig::default().max_buffer_size(),
+        Box::new(move |_bytes| {
+            started_tx.send(()).unwrap();
+            let (lock, ready) = &*engine_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+            Ok(Some("text/plain".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = crate::MagikaMimeDetector::builder()
+        .managed_runtime(Arc::clone(&runtime))
+        .build()
+        .unwrap();
+    let mut detection = Box::pin(MimeDetectorBackend::guess_from_content_async(&detector, b"fixture"));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+
+    // This watchdog also releases a synchronous implementation, turning the
+    // regression into a bounded assertion failure instead of a hung suite.
+    let watchdog_gate = Arc::clone(&gate);
+    let (watchdog_cancel_tx, watchdog_cancel_rx) = mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        if watchdog_cancel_rx.recv_timeout(Duration::from_secs(3)).is_err() {
+            let (lock, ready) = &*watchdog_gate;
+            *lock.lock().unwrap() = true;
+            ready.notify_all();
+        }
+    });
+
+    let first_poll = detection.as_mut().poll(&mut context);
+    assert!(first_poll.is_pending(), "async content hook blocked its polling thread");
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the worker should enter the gated inference");
+    let mut heartbeat = 0;
+    let mut heartbeat_task = Box::pin(std::future::poll_fn(|_| {
+        heartbeat += 1;
+        std::task::Poll::Ready(())
+    }));
+    assert!(heartbeat_task.as_mut().poll(&mut context).is_ready());
+    assert_eq!(heartbeat, 1, "executor work must run while inference is gated");
+
+    let (lock, ready) = &*gate;
+    *lock.lock().unwrap() = true;
+    ready.notify_all();
+    watchdog_cancel_tx.send(()).unwrap();
+    watchdog.join().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let std::task::Poll::Ready(result) = detection.as_mut().poll(&mut context) {
+            assert_eq!(result.unwrap(), vec!["text/plain"]);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "worker result did not arrive");
+        std::thread::yield_now();
+    }
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+}
+
+#[test]
+fn test_async_content_returns_empty_candidate_and_worker_error() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine_calls = Arc::clone(&calls);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        MimeConfig::default().max_buffer_size(),
+        Box::new(move |bytes| {
+            engine_calls.fetch_add(1, Ordering::SeqCst);
+            match bytes.as_slice() {
+                b"none" => Ok(None),
+                b"error" => Err(qubit_mime::MimeError::detector_backend("fixture", "inference failed")),
+                _ => Ok(Some("text/plain".to_owned())),
+            }
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = crate::MagikaMimeDetector::builder()
+        .managed_runtime(Arc::clone(&runtime))
+        .build()
+        .unwrap();
+    let unpolled = MimeDetectorBackend::guess_from_content_async(&detector, b"not-polled");
+    drop(unpolled);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "an unpolled future must not submit work"
+    );
+    assert!(
+        block_on_content(MimeDetectorBackend::guess_from_content_async(&detector, b"none"))
+            .unwrap()
+            .is_empty()
+    );
+    let error = block_on_content(MimeDetectorBackend::guess_from_content_async(&detector, b"error")).unwrap_err();
+    assert!(error.to_string().contains("inference failed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+}
+
+#[test]
+fn test_async_content_rejects_detector_limit_and_closed_runtime() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let limit = MimeConfig::default().max_buffer_size();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine_calls = Arc::clone(&calls);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        limit,
+        Box::new(move |_bytes| {
+            engine_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("text/plain".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = crate::MagikaMimeDetector::builder()
+        .managed_runtime(Arc::clone(&runtime))
+        .build()
+        .unwrap();
+    let error = block_on_content(MimeDetectorBackend::guess_from_content_async(
+        &detector,
+        &vec![0; limit + 1],
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(error, qubit_mime::MimeError::BufferLimitExceeded { requested, limit: actual } if requested == limit + 1 && actual == limit)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+    assert!(block_on_content(MimeDetectorBackend::guess_from_content_async(&detector, b"closed")).is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_unmanaged_content_api_enforces_runtime_byte_limit() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine_calls = Arc::clone(&calls);
+    let runtime = ManagedInferenceRuntime::with_engine(
+        supervisor,
+        4,
+        Box::new(move |_bytes| {
+            engine_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("text/plain".to_owned()))
+        }),
+        Box::new(|| {}),
+    );
+    let error = block_on_content(runtime.detect_content_unmanaged(b"12345")).unwrap_err();
+    assert!(matches!(
+        error,
+        qubit_mime::MimeError::BufferLimitExceeded { requested: 5, limit: 4 }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        block_on_content(runtime.detect_content_unmanaged(b"1234")).unwrap(),
+        Some("text/plain".to_owned())
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+}
+
+#[test]
+fn test_async_content_drop_releases_capacity_after_worker_finishes() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let engine_gate = Arc::clone(&gate);
+    let (started_tx, started_rx) = mpsc::channel();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        MimeConfig::default().max_buffer_size(),
+        Box::new(move |_bytes| {
+            started_tx.send(()).unwrap();
+            let (lock, ready) = &*engine_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+            Ok(Some("text/plain".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = crate::MagikaMimeDetector::builder()
+        .managed_runtime(Arc::clone(&runtime))
+        .build()
+        .unwrap();
+    let mut abandoned = Box::pin(MimeDetectorBackend::guess_from_content_async(&detector, b"first"));
+    let context = &mut std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(abandoned.as_mut().poll(context).is_pending());
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first request should reach the worker");
+    drop(abandoned);
+
+    let mut queued = Box::pin(MimeDetectorBackend::guess_from_content_async(&detector, b"queued"));
+    assert!(queued.as_mut().poll(context).is_pending());
+    let rejected = block_on_content(MimeDetectorBackend::guess_from_content_async(&detector, b"full"));
+    assert!(rejected.is_err(), "running plus queued requests should fill capacity");
+
+    let (lock, ready) = &*gate;
+    *lock.lock().unwrap() = true;
+    ready.notify_all();
+    assert_eq!(block_on_content(queued).unwrap(), vec!["text/plain"]);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match block_on_content(MimeDetectorBackend::guess_from_content_async(&detector, b"reused")) {
+            Ok(candidates) => {
+                assert_eq!(candidates, vec!["text/plain"]);
+                break;
+            }
+            Err(_) => {
+                assert!(std::time::Instant::now() < deadline, "worker capacity was not released");
+                std::thread::yield_now();
+            }
+        }
+    }
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+}
+
+fn block_on_content<F: Future>(future: F) -> F::Output {
+    struct ThreadWake(std::thread::Thread);
+    impl std::task::Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let std::task::Poll::Ready(result) = future.as_mut().poll(&mut context) {
+            return result;
+        }
+        let now = std::time::Instant::now();
+        assert!(now < deadline, "async content hook did not complete");
+        std::thread::park_timeout(deadline.saturating_duration_since(now));
+    }
+}

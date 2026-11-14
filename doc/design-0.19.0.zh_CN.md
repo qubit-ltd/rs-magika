@@ -1,9 +1,10 @@
 # rs-magika 0.19.0 详细设计：有界采样与受管理异步推理
 
-- 状态：待评审设计，尚未实现。
+- 状态：历史提案。部分机制已落地；本文不是当前实现的完整说明，也不是该提案全部要求已经验收的证明。
 - 日期：2026-11-11。
 - 当前版本：qubit-magika 0.18.0；下一破坏性版本：0.19.0。
 - 与 qubit-mime 0.22.0 的异步后端契约配套。
+- 当前行为请参阅[用户指南](user_guide.md)；提案逐项状态及代码、测试证据见下方对照表。
 
 ## 0. 实施前置条件：先实现 rs-operation
 
@@ -34,7 +35,7 @@
 
 目标是运行时无关的异步调用、有限模型/线程/内存数量、保留随机访问与一致性保证、明确不可中断推理的取消语义。模型准确率调整、新模型格式、GPU 调度、多进程推理服务与动态自动扩容不在本版范围。
 
-## 2. 当前实现依据
+## 2. 提案编写时的实现基线（历史记录，不代表当前状态）
 
 - `src/magika_mime_detector_builder.rs` 创建 session，并由 detector 持有 Mutex。
 - `src/magika_mime_detector.rs::guess_from_extracted` 对 ruled 结果直接映射，对 features 加锁同步推理。
@@ -42,6 +43,19 @@
 - `internal/async_provider_input.rs` 已区分保留随机访问 session 与 legacy 路径读取，并累计 ReadBudget；这部分设计应保留。
 - 上游本地已安装 magika 1.1.0 的 Features 拥有 Vec<i32>，可作为 owned 工作数据；跨线程能力需通过 Send 编译断言固定，不能将 Session 锁 guard 或借用 provider 一并送往 worker。
 - 模型和 ONNX Runtime 初始化错误目前属于 ProviderFailure 初始化失败；不得错误映射为“provider 缺失”来触发 OnAbsence fallback。
+
+## 2.1 当前实现状态对照（有限证据）
+
+下表仅标记能够由当前代码路径和测试直接确认的机制。它不表示本历史提案的公共 API 草案、全部准备协议或性能目标已经实现。
+
+| 提案机制 | 当前代码证据 | 回归证据 | 状态 |
+| --- | --- | --- | --- |
+| Session 由专属 worker 创建和持有 | `src/managed_runtime/managed_inference_runtime.rs` 的 worker 启动与 `WorkerInput` 执行路径 | `src/tests/managed_operation_tests.rs` 的 worker 生命周期和关闭测试 | 已实现；不代表提案要求的多类 worker 拆分已实现 |
+| Async provider 通过容量一范围桥采样 | `src/internal/async_sample_bridge.rs`、`src/managed_runtime/managed_inference_runtime.rs` | `src/tests/internal/async_sample_bridge_tests.rs`、`src/tests/internal/random_access_session_tests.rs` | 已实现 |
+| 受理请求受 runtime 字节预算约束 | `src/managed_runtime/byte_budget.rs`、`src/managed_runtime/managed_inference_runtime.rs` | `test_byte_budget_rejects_aggregate_payload_and_shutdown_joins_worker` | 已实现；detector 单请求上限另见当前实施设计 |
+| 关闭后继续观察 worker 退出 | `src/managed_runtime/managed_inference_runtime.rs` 与 shutdown report | `managed_operation_tests.rs` 中 timeout、并发观察和 worker exit hook 测试 | 已实现 |
+| 为任意输入提供 async content worker hook | 由 2026-11-14 本轮实现及 `guess_from_content_async` 回归测试确认 | `test_async_content_yields_while_worker_is_gated` | 已实现；边界和错误时机见当前实施设计 |
+| 提案中的完整准备 API、同步托管 API、公共 handle 协议、性能目标及全部 feature/MSRV 验收 | 本表未逐项审计其当前代码和验收证据 | 未建立完整对应测试证据 | 未核实；不得据此声称完成 |
 
 ## 3. 架构和职责
 
@@ -158,7 +172,7 @@ MagikaRuntime 通过公共 supervisor 创建服务子 scope，model prepare、�
 
 发布链：operation → command/local-files/fs → 适配器与 mime → magika → 全链消费测试。复用 scope 不能双重登记或重复预算。保持同步 MIME 映射、对象采样一致性和初始化错误分类；不增加 progress/event-bus 依赖。
 
-关联设计：[mime](../../rs-mime/doc/design-0.22.0.zh_CN.md)、[fs](../../rs-fs/doc/design-0.4.0.zh_CN.md)、[local-files](../../rs-local-files/doc/design-0.6.0.zh_CN.md)。
+关联资料：[mime 用户指南](../../rs-mime/doc/user_guide.md)、[fs 设计](../../rs-fs/doc/design-0.4.0.zh_CN.md)、[local-files 设计](../../rs-local-files/doc/design-0.6.0.zh_CN.md)。
 
 ## 11. 验收与性能证据
 

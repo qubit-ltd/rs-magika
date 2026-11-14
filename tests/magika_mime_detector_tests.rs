@@ -8,6 +8,7 @@
 #![cfg(feature = "bundled-onnxruntime")]
 
 use std::fs::File;
+use std::future::Future;
 use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -17,6 +18,10 @@ use std::panic::catch_unwind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Wake;
+use std::task::Waker;
 
 use qubit_config::Config;
 use qubit_magika::MagikaMimeDetector;
@@ -75,6 +80,13 @@ fn test_magika_content_backend_detects_complete_input() {
     let content = include_bytes!("fixtures/real_files/script.py");
     let candidates = backend.detect_bytes(content).expect("content backend inference");
     assert_eq!(candidates, vec!["text/x-python"]);
+    let async_candidates = block_on(MimeDetectorBackend::guess_from_content_async(detector, content))
+        .expect("async content hook inference");
+    assert_eq!(async_candidates, candidates);
+    let empty = MimeDetectorBackend::guess_from_content(detector, b"").expect("empty content inference");
+    let async_empty =
+        block_on(MimeDetectorBackend::guess_from_content_async(detector, b"")).expect("async empty content inference");
+    assert_eq!(async_empty, empty);
     let mut bytes = b"skip".to_vec();
     bytes.extend_from_slice(content);
     let mut reader = Cursor::new(bytes);
@@ -84,6 +96,31 @@ fn test_magika_content_backend_detects_complete_input() {
         candidates
     );
     assert_eq!(reader.position(), 4);
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct ThreadWake(std::thread::Thread);
+    impl Wake for ThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        let now = std::time::Instant::now();
+        assert!(now < deadline, "async content hook did not complete");
+        std::thread::park_timeout(deadline.saturating_duration_since(now));
+    }
 }
 
 #[test]

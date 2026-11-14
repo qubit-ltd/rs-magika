@@ -104,8 +104,16 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 默认选择仍是 `repository`；需要 Magika 时应显式选择。若需配置媒体流分类器，
 仍须通过 `with_media_stream_classifier` 显式构造并注册 Provider。
 应用还需引用该 crate（`use qubit_magika as _;`），确保链接器保留 inventory 提交项。
-创建 detector 会初始化内嵌 Magika 模型和 ONNX Runtime Session。应用应只创建一次并
-共享（例如使用 `Arc`）；同一 detector 上的推理调用会在内部串行执行。
+构造 detector 时会同步等待 worker 初始化内嵌 Magika 模型和 ONNX Runtime Session。
+应用应在启动阶段构造一次并共享（例如使用 `Arc`）；共享 runtime 上的推理调用会在内部串行执行。
+
+同步内容、reader 和本地文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待。
+匹配的仓库规则可以直接返回。`MimeDetectorBackend` 的
+`guess_from_content_async` hook 在首次轮询时检查 detector 内容上限，再预留共享 runtime
+请求及字节容量，然后复制已受理的输入，由 worker 采样和推理。该 future 异步等待结果，且
+没有 parent operation scope。managed bytes 和 provider 方法额外绑定显式 scope。每个
+detector 执行自身的单请求上限；共享 runtime 的 detector 共用聚合预算和关闭边界，任一
+detector 调用 shutdown 都会关闭该共享 runtime。
 
 ### Media refinement 支持范围
 
@@ -133,10 +141,9 @@ Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求
 在 `read_all` 中发现超限时返回 `MimeError::FileSystem`。Magika 返回
 `Unknown` 或 `Undefined` 时结果为
 `Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
-同步特征采样在模型 Session mutex 之外执行；只有推理会获取该锁，因此推理仍然串行。
-异步路径先等待文件系统完成特征提取，再持有共享 Session mutex 同步执行 Magika 推理。
-推理和等待锁都可能占用异步执行器线程；需要隔离时，应由应用把检测放到阻塞工作线程
-或服务边界中。
+Provider 原生异步 I/O 由调用方 future 等待；若 Provider 一直不完成，future 也可能一直
+Pending。采样就绪后，Magika 采样与推理由 session-owning worker 执行。旧 hooks 不提供
+parent-scope 生命周期观察；需要 scope 跟踪时使用 managed API。
 
 ## 延伸阅读
 

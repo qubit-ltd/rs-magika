@@ -143,8 +143,17 @@ impl MagikaMimeDetector {
     ///
     /// # Errors
     ///
-    /// Returns an admission, size-limit, Magika, or worker error.
+    /// Returns [`MimeError::BufferLimitExceeded`] when `content` exceeds this
+    /// detector's configured maximum, or an admission, runtime budget,
+    /// Magika, or worker error.
     pub async fn detect_bytes_managed(&self, scope: &OperationScope, content: Vec<u8>) -> MimeResult<Option<String>> {
+        let limit = self.max_test_bytes();
+        if content.len() > limit {
+            return Err(MimeError::BufferLimitExceeded {
+                requested: content.len(),
+                limit,
+            });
+        }
         self.runtime.detect_bytes(scope, content).await
     }
 
@@ -486,6 +495,46 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// Propagates Magika inference and media-classifier errors.
     fn guess_from_content(&self, content: &[u8]) -> MimeResult<Vec<String>> {
         self.guess_from_magika_input(content)
+    }
+
+    /// Classifies content asynchronously on the session-owning worker.
+    ///
+    /// The input is copied only after the runtime accepts the request. The
+    /// worker performs feature sampling and inference, so polling this future
+    /// does not wait for model execution. Unlike managed APIs, this legacy
+    /// hook has no parent operation scope. It uses both this detector's
+    /// per-request limit and the shared runtime's aggregate byte budget.
+    ///
+    /// # Parameters
+    ///
+    /// * `content` - Complete content bytes to inspect.
+    ///
+    /// # Returns
+    ///
+    /// Zero or one Magika MIME candidates.
+    ///
+    /// # Errors
+    ///
+    /// Returns a size-limit, admission, Magika, or worker error.
+    fn guess_from_content_async<'a>(
+        &'a self,
+        content: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = MimeResult<Vec<String>>> + Send + 'a>> {
+        Box::pin(async move {
+            let limit = self.max_test_bytes();
+            if content.len() > limit {
+                return Err(MimeError::BufferLimitExceeded {
+                    requested: content.len(),
+                    limit,
+                });
+            }
+            Ok(self
+                .runtime
+                .detect_content_unmanaged(content)
+                .await?
+                .into_iter()
+                .collect())
+        })
     }
 
     /// Detects MIME candidates from a seekable reader without consuming it.

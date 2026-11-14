@@ -227,10 +227,19 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 附带相同的条件 ETag；没有该条件就不能保证多段期间内容一致。`max_bytes` 是所有采样读取的
 累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
-一个 worker 独占 Magika Session，并串行执行采样和推理。异步 Provider route 通过容量为 1
-的范围读取 bridge 与 worker 协作：调用方 future 异步读取 Provider，Magika 采样和推理仍在
-worker 上完成。managed provider API 会把工作附加到显式 operation scope。旧 MIME trait hooks
-使用同一 worker bridge，但上游 hook 没有 scope 参数，因此不能附加 parent scope。
+一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。同步内容、reader 和本地
+文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待，仓库规则命中时可以直接返回。
+异步 Provider route 通过容量为 1 的范围读取 bridge 与 worker 协作：调用方 future 异步读取
+Provider。旧 `guess_from_content_async` hook 在首次轮询时检查 detector 上限，先预留 runtime
+请求和字节容量，再复制输入，由 worker 采样和推理；future 异步等待结果，且没有 parent scope。
+managed bytes 和 provider API 会把工作附加到显式 operation scope。每个 detector 执行自身的
+请求上限；共用 runtime 的 detector 也共用聚合预算和关闭边界，任一 detector 调用 shutdown
+都会关闭该共享 runtime。
+
+async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
+选择或媒体细化。输入受理后会计入共享 runtime 预算；即使仓库规则原本可以直接决定结果，也会
+统一经过受理。因此 runtime 关闭、容量或预算不足、内容超限都可能产生异步错误，而不是直接
+返回规则结果。
 
 ## 迁移指南
 
@@ -338,8 +347,9 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 ## 错误与诊断
 
 如果 Magika 或 ONNX Runtime 无法初始化，创建 detector 会返回 `MimeError`。检测过程
-中的输入 I/O、内容不完整、后端推理失败或共享 session 锁中毒，也会以 `MimeError`
-返回。
+中的输入 I/O、内容不完整、detector 或 runtime 字节上限、受理拒绝及后端推理失败，也会以
+`MimeError` 返回。async content hook 即使处理可由规则判定的内容也会使用共享 worker，因此可能
+返回受理错误。
 
 `Ok(None)` 表示 detector 没有找到 MIME 候选，不等同于初始化失败或 I/O 错误。应用应
 在启动阶段处理初始化错误，在读取输入的边界处理每次检测的错误。

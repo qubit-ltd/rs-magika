@@ -116,9 +116,21 @@ explicitly when needed. A provider with a media-stream classifier still needs
 explicit registration with `with_media_stream_classifier`.
 Reference the crate in the application (`use qubit_magika as _;`) so the linker
 retains its inventory submission.
-Creating a detector initializes the embedded Magika model and ONNX Runtime
-session. Create it once, share it (for example with `Arc`), and expect inference
-calls on a shared detector to be serialized internally.
+Detector construction synchronously waits for the worker to initialize the
+embedded Magika model and ONNX Runtime session. Build it during application
+startup, create it once, and share it (for example with `Arc`). Inference calls
+on its shared runtime are serialized internally.
+
+Synchronous content, reader, and local-file calls sample on the caller thread;
+model work runs on the worker and the call waits for its result. A matching
+repository rule may return without model work. The `MimeDetectorBackend`
+`guess_from_content_async` hook checks the detector's content limit when first
+polled, reserves the shared runtime's request and byte capacity, then copies
+accepted input for worker sampling and inference. Its future waits asynchronously
+and has no parent operation scope. Managed byte and provider methods add an
+explicit scope. Each detector enforces its own request limit, while detectors
+sharing a runtime also share its aggregate budget and shutdown boundary; calling
+shutdown on any of them closes that shared runtime.
 
 ### Media refinement support
 
@@ -149,12 +161,11 @@ known oversized resources return `MimeError::BufferLimitExceeded`, while an
 overflow discovered during `read_all` returns `MimeError::FileSystem`. Unknown and
 undefined Magika types return `Ok(None)`, allowing the selected
 `MimeDetectionPolicy` to apply filename fallback consistently.
-Synchronous feature sampling runs outside the model session mutex; only model
-inference takes that mutex, so inference stays serialized. The asynchronous
-path awaits filesystem feature extraction first, then performs Magika inference
-synchronously while holding the shared session lock. Inference and waiting for
-the lock can occupy the async executor thread; applications that need isolation
-should move detection to a blocking worker or service boundary.
+Provider-native asynchronous I/O is awaited by the calling future and can remain
+pending if the provider never completes it. Once sampling is ready, Magika
+sampling and inference run on the session-owning worker. Legacy hooks have no
+parent-scope lifecycle observation; use managed APIs when scope tracking is
+required.
 
 ## Learn More
 

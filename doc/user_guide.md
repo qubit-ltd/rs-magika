@@ -258,13 +258,25 @@ consistent cross-segment snapshot. Providers without range support may probe one
 detect overflow and reject oversized resources. Unknown and undefined Magika
 types become `Ok(None)` so filename fallback follows the selected
 `MimeDetectionPolicy`.
-One worker owns the Magika session and serializes both sampling and inference.
-Async provider routes cooperate with that worker through a capacity-one range
-bridge; provider reads are awaited by the calling future, while Magika sampling
-and inference stay on the worker. The managed provider API attaches the work to
-an explicit operation scope. Legacy MIME trait hooks use the same worker bridge
-but cannot attach a parent scope because the upstream hook has no scope
-parameter.
+One worker owns the Magika session and serializes worker sampling and inference.
+Synchronous content, reader, and local-file entry points sample on the caller
+thread, then wait synchronously when model work is needed; repository rules can
+return without model work. Async provider routes cooperate with the worker
+through a capacity-one range bridge; provider reads are awaited by the calling
+future. The legacy `guess_from_content_async` hook checks the detector limit
+when first polled, reserves runtime request and byte capacity before copying
+the input, and runs sampling and inference on the worker. It waits
+asynchronously and has no parent scope. Managed byte and provider methods add
+an explicit scope. Each detector enforces its own request limit; detectors
+sharing a runtime also share its aggregate budget and shutdown boundary. Calling
+shutdown through any such detector closes the shared runtime.
+
+The async content hook returns the backend's raw Magika candidate list, like
+the synchronous content hook. It does not apply high-level MIME selection or
+media refinement. Once accepted, it accounts for the input against the shared
+runtime budget even when a repository rule could determine the result without
+model inference. Closed, full, over-budget, or oversized requests may therefore
+fail asynchronously instead of returning a rule result directly.
 
 ## Migration Guide
 
@@ -383,7 +395,9 @@ The provider names `magika`, `magika-mime-detector`, and
 
 Detector construction returns `MimeError` when Magika or ONNX Runtime cannot
 initialize. Detection returns `MimeError` for input I/O failures, incomplete
-content, backend inference failures, or a poisoned shared session lock.
+content, detector or runtime byte limits, admission rejection, and backend
+inference failures. The async content hook can return admission errors because
+it uses the shared worker even for rule-classifiable content.
 
 `Ok(None)` means that the selected detector found no MIME candidate; it is not
 the same as an initialization or I/O error. Handle initialization errors during
