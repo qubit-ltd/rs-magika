@@ -32,6 +32,9 @@ use qubit_mime::MimeDetectorCore;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
+use qubit_operation::ChildRequirement;
+use qubit_operation::OperationOptions;
+use qubit_operation::OperationOutcome;
 use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 
@@ -210,8 +213,36 @@ impl MagikaMimeDetector {
             });
         }
         let admission = self.runtime.reserve_for_provider(Some(scope), max_bytes)?;
-        self.detect_async_provider_admitted(admission, file_system, path, max_bytes)
-            .await
+        let runtime = std::sync::Arc::clone(&self.runtime);
+        let file_system = file_system.clone();
+        let path = path.clone();
+        let mut options = OperationOptions::default();
+        options.requirement = ChildRequirement::Optional;
+        let mut operation = scope
+            .manager()
+            .as_async()
+            .try_submit(options, move |child_scope| async move {
+                Self::detect_async_provider_admitted(
+                    runtime,
+                    &child_scope,
+                    admission,
+                    &file_system,
+                    &path,
+                    max_bytes,
+                )
+                .await
+            })
+            .map_err(|error| MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}")))?;
+        match operation.wait_outcome().await.map_err(|error| {
+            MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
+        })? {
+            OperationOutcome::Succeeded(result) => Ok(result),
+            OperationOutcome::Failed(error) => Err(error),
+            OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "provider inference stopped")),
+            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend("magika", format!("provider child failed: {summary:?}"))),
+            OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "provider operation panicked")),
+            OperationOutcome::ExecutionFailed(_) => Err(MimeError::detector_backend("magika", "provider executor failed")),
+        }
     }
 
     /// Runs the shared provider route after its request and byte capacity are
@@ -237,12 +268,14 @@ impl MagikaMimeDetector {
     ///
     /// Returns provider, size-limit, admission, Magika, or worker errors.
     async fn detect_async_provider_admitted(
-        &self,
+        runtime: std::sync::Arc<ManagedInferenceRuntime>,
+        scope: &OperationScope,
         mut admission: crate::managed_runtime::request_admission::RequestAdmission,
         file_system: &AsyncFileSystem,
         path: &FsPath,
         max_bytes: usize,
     ) -> MimeResult<Option<String>> {
+        admission.retain_in_scope(scope)?;
         admission.begin_provider_operation()?;
         let open_result = file_system
             .open_random_access_reader(path, ReadOptions::default())
@@ -257,9 +290,8 @@ impl MagikaMimeDetector {
                     .maximum()
                     .and_then(|value| usize::try_from(value).ok());
                 let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
-                return self
-                    .runtime
-                    .detect_async_input_admitted(admission, input, max_bytes, map_provider_magika_error)
+                return runtime
+                    .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
             Err(error)
@@ -301,9 +333,8 @@ impl MagikaMimeDetector {
                     version,
                     max_bytes,
                 );
-                return self
-                    .runtime
-                    .detect_async_input_admitted(admission, input, max_bytes, map_provider_magika_error)
+                return runtime
+                    .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
             if length > max_bytes as u64 {
@@ -317,7 +348,7 @@ impl MagikaMimeDetector {
         let read_result = file_system.read_all(path, ReadOptions::default(), max_bytes).await;
         admission.provider_operation_completed();
         let bytes = read_result?;
-        self.runtime.detect_bytes_admitted(admission, bytes).await
+        runtime.detect_bytes_admitted(admission, bytes).await
     }
 
     /// Stops managed inference admission and observes pending worker jobs.
@@ -761,10 +792,44 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     limit,
                 });
             }
-            let admission = self.runtime.reserve_for_provider(None, max_bytes)?;
-            let result = self
-                .detect_async_provider_admitted(admission, file_system, path, max_bytes)
-                .await?;
+            let runtime = std::sync::Arc::clone(&self.runtime);
+            let admission = runtime.reserve_for_provider(None, max_bytes)?;
+            let group = runtime.service_group();
+            let owned_runtime = std::sync::Arc::clone(&runtime);
+            let owned_file_system = file_system.clone();
+            let owned_path = path.clone();
+            let mut options = OperationOptions::default();
+            options.requirement = ChildRequirement::Optional;
+            let mut operation = group
+                .as_async()
+                .try_submit(options, move |scope| async move {
+                    Self::detect_async_provider_admitted(
+                        owned_runtime,
+                        &scope,
+                        admission,
+                        &owned_file_system,
+                        &owned_path,
+                        max_bytes,
+                    )
+                    .await
+                })
+                .map_err(|error| {
+                    MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
+                })?;
+            let result = match operation.wait_outcome().await.map_err(|error| {
+                MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
+            })? {
+                OperationOutcome::Succeeded(result) => Ok(result),
+                OperationOutcome::Failed(error) => Err(error),
+                OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "provider inference stopped")),
+                OperationOutcome::ChildFailed(summary) => {
+                    Err(MimeError::detector_backend("magika", format!("provider child failed: {summary:?}")))
+                }
+                OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "provider operation panicked")),
+                OperationOutcome::ExecutionFailed(_) => {
+                    Err(MimeError::detector_backend("magika", "provider executor failed"))
+                }
+            }?;
             Ok((result.into_iter().collect(), None))
         })
     }

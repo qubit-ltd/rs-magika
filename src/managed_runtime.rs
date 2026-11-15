@@ -19,12 +19,11 @@ mod managed_inference_shutdown_report;
 pub(super) mod provider_driver_guard;
 pub(super) mod request_admission;
 pub(super) mod request_resource_owner;
+pub(super) mod service_permit;
 pub(super) mod task_control;
 pub(super) mod task_inner;
 pub(super) mod task_state;
 pub(super) mod worker_input;
 
-#[cfg(test)]
-pub(crate) use managed_inference_runtime::ManagedInferenceEngine;
 pub use managed_inference_runtime::ManagedInferenceRuntime;
 pub use managed_inference_shutdown_report::ManagedInferenceShutdownReport;

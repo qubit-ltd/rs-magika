@@ -8,6 +8,7 @@
 //! Test-only worker construction helpers for managed inference runtime.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
@@ -16,6 +17,7 @@ use magika::SyncInput;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
+use qubit_operation::GroupOptions;
 use qubit_operation::OperationManager;
 
 use super::AdmissionGate;
@@ -92,7 +94,7 @@ impl ManagedInferenceRuntime {
                                 "magika",
                                 "inference stopped before execution",
                             )),
-                            ChildBusinessOutcome::Stopped,
+                            ChildOutcomeKind::Stopped,
                         );
                         drop(input);
                     } else {
@@ -121,12 +123,12 @@ impl ManagedInferenceRuntime {
                 before_worker_exit();
             })
             .expect("test inference worker should start");
-        let service_group = supervisor.service_group(2).expect("service group should construct");
+        let service_group = supervisor.group(GroupOptions { capacity: 2 }).expect("operation group should construct");
         Self {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(WorkerState::new(worker)),
             service_group,
-            _supervisor: supervisor,
+            active_requests: Arc::new(AtomicUsize::new(0)),
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks: Arc::new(Mutex::new(Vec::new())),

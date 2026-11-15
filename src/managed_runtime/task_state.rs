@@ -281,13 +281,12 @@ mod tests {
     use std::sync::Arc;
 
     use qubit_operation::ChildOutcomeKind;
-    use qubit_operation::OperationId;
 
     use super::TaskState;
 
     #[test]
     fn test_lifecycle_recovers_a_poisoned_state_lock() {
-        let state = Arc::new(TaskState::new(OperationId::new(2), None));
+        let state = Arc::new(TaskState::new(2, None));
         let poisoned = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
             let _guard = poisoned.inner.lock().unwrap();
@@ -310,7 +309,7 @@ mod tests {
     #[test]
     fn test_stop_closes_existing_and_late_attached_sampling_bridges() {
         let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
-        let state = TaskState::new(OperationId::new(8), Some(Arc::downgrade(&bridge)));
+        let state = TaskState::new(8, Some(Arc::downgrade(&bridge)));
 
         state.request_stop();
         let waker = std::task::Waker::noop();
@@ -328,7 +327,7 @@ mod tests {
     fn test_release_removes_task_from_runtime_registry() {
         let tasks = Arc::new(std::sync::Mutex::new(Vec::new()));
         let state = Arc::new(TaskState::new_registered(
-            OperationId::new(9),
+            9,
             None,
             Some(Arc::downgrade(&tasks)),
             None,
@@ -345,7 +344,7 @@ mod tests {
     fn test_provider_start_rejects_closed_gate_and_expired_gate() {
         let gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
         gate.lock().unwrap().cancelling = true;
-        let state = TaskState::new_registered(OperationId::new(10), None, None, Some(Arc::downgrade(&gate)));
+        let state = TaskState::new_registered(10, None, None, Some(Arc::downgrade(&gate)));
         assert!(!state.try_start_provider_operation());
 
         let poisoned_gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
@@ -358,19 +357,19 @@ mod tests {
             .join()
             .is_err()
         );
-        let state = TaskState::new_registered(OperationId::new(15), None, None, Some(Arc::downgrade(&poisoned_gate)));
+        let state = TaskState::new_registered(15, None, None, Some(Arc::downgrade(&poisoned_gate)));
         assert!(state.try_start_provider_operation());
 
         let expired = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
         let expired_weak = Arc::downgrade(&expired);
         drop(expired);
-        let state = TaskState::new_registered(OperationId::new(11), None, None, Some(expired_weak));
+        let state = TaskState::new_registered(11, None, None, Some(expired_weak));
         assert!(!state.try_start_provider_operation());
     }
 
     #[test]
     fn test_worker_completion_recovers_a_poisoned_lifecycle_lock() {
-        let state = Arc::new(TaskState::new(OperationId::new(16), None));
+        let state = Arc::new(TaskState::new(16, None));
         let poisoned = Arc::clone(&state);
         assert!(
             std::thread::spawn(move || {
@@ -397,7 +396,7 @@ mod tests {
     fn test_provider_start_recovers_poisoned_task_state_lock() {
         let gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
         let state = Arc::new(TaskState::new_registered(
-            OperationId::new(17),
+            17,
             None,
             None,
             Some(Arc::downgrade(&gate)),
@@ -417,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_worker_completion_without_owner_wakes_waiters() {
-        let state = Arc::new(TaskState::new(OperationId::new(12), None));
+        let state = Arc::new(TaskState::new(12, None));
         assert!(!state.wait_worker_done_blocking(std::time::Duration::ZERO));
         let poisoned = Arc::clone(&state);
         assert!(
@@ -438,7 +437,7 @@ mod tests {
     fn test_lifecycle_recovers_poisoned_bridge_owner_and_registry_locks() {
         let tasks = Arc::new(std::sync::Mutex::new(Vec::new()));
         let state = Arc::new(TaskState::new_registered(
-            OperationId::new(13),
+            13,
             None,
             Some(Arc::downgrade(&tasks)),
             None,
@@ -483,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_business_terminal_fact_is_write_once() {
-        let state = TaskState::new(OperationId::new(5), None);
+        let state = TaskState::new(5, None);
         state.finish_business(Ok(Some("first".to_owned())), ChildOutcomeKind::Succeeded);
         state.finish_business(
             Err(qubit_mime::MimeError::detector_backend("test", "later")),
@@ -497,7 +496,7 @@ mod tests {
 
     #[test]
     fn test_requested_stop_classifies_the_terminal_business_fact_as_stopped() {
-        let state = TaskState::new(OperationId::new(6), None);
+        let state = TaskState::new(6, None);
         state.request_stop();
         state.finish_business(
             Err(qubit_mime::MimeError::detector_backend(
@@ -514,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_result_winning_stop_race_keeps_matching_business_outcome() {
-        let state = TaskState::new(OperationId::new(7), None);
+        let state = TaskState::new(7, None);
         state.request_stop();
         state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
 

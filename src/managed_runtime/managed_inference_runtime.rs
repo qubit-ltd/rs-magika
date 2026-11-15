@@ -10,6 +10,7 @@
 use std::future::Future;
 use std::future::poll_fn;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
@@ -25,18 +26,16 @@ use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::GroupOptions;
+use qubit_operation::ChildRequirement;
 use qubit_operation::OperationGroup;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
 use qubit_operation::OperationOutcome;
 use qubit_operation::OperationScope;
-use qubit_operation::ServiceResourceOptions;
 use qubit_operation::ShutdownMode;
 use qubit_operation::ShutdownReport;
 use qubit_operation::ShutdownSnapshot;
 
-#[cfg(test)]
-pub(crate) use self::test_support::ManagedInferenceEngine;
 use super::bridge_sync_input::BridgeSyncInput;
 use super::byte_budget::ByteBudget;
 use super::drive_event::DriveEvent;
@@ -45,12 +44,12 @@ use super::job::Job;
 use super::managed_inference_shutdown_report::ManagedInferenceShutdownReport;
 use super::provider_driver_guard::ProviderDriverGuard;
 use super::request_admission::RequestAdmission;
+use super::service_permit::ServicePermit;
 use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 use super::worker_input::worker_bytes;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
-use crate::internal::AsyncProviderInput;
 use crate::magika_mime_detector::content_type_to_mime;
 use crate::magika_mime_detector::map_magika_error;
 
@@ -98,25 +97,28 @@ fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>
 /// # Examples
 ///
 /// ```no_run
+/// use std::error::Error;
+/// use std::sync::Arc;
 /// use std::time::Duration;
 ///
 /// use qubit_magika::ManagedInferenceRuntime;
-/// use qubit_operation::ManagerOptions;
-/// use qubit_operation::scope::ScopeOptions;
-/// use qubit_operation::supervisor::{OperationManager, ShutdownMode};
+/// use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, ShutdownMode};
 ///
-/// let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-/// let runtime = std::sync::Arc::new(ManagedInferenceRuntime::new(supervisor.clone(), 1_048_576)?);
-/// let service = supervisor.service_group(2)?;
-/// let request_runtime = std::sync::Arc::clone(&runtime);
-/// let mut request = service.start(ScopeOptions::default(), move |scope| async move {
-///     request_runtime.detect_bytes(&scope, b"%PDF-1.7".to_vec()).await
-/// })?;
-/// let _result = request.result_blocking()?;
-/// let _settlement = request.released_blocking()?;
-/// let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
-/// assert!(report.worker_stopped);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// async fn example() -> Result<(), Box<dyn Error>> {
+///     let manager = OperationManager::new(ManagerOptions::default())?;
+///     let runtime = Arc::new(ManagedInferenceRuntime::new(manager.clone(), 1_048_576)?);
+///     let service = manager.group(GroupOptions { capacity: 2 })?;
+///     let request_runtime = Arc::clone(&runtime);
+///     let mut request = service.as_async().try_submit(OperationOptions::default(), move |scope| async move {
+///         request_runtime.detect_bytes(&scope, b"%PDF-1.7".to_vec()).await
+///     })?;
+///     let _outcome = request.wait_outcome().await?;
+///     let _settlement = request.wait_settlement().await;
+///     service.close_admission();
+///     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+///     assert!(report.worker_stopped);
+///     Ok(())
+/// }
 /// ```
 pub struct ManagedInferenceRuntime {
     /// Admission queue whose capacity is shared with the supervisor group.
@@ -125,8 +127,8 @@ pub struct ManagedInferenceRuntime {
     worker: Mutex<WorkerState>,
     /// Finite managed child admission for active and queued jobs.
     service_group: OperationGroup,
-    /// Runtime service slots remain occupied until actual input release.
-    service_resources: qubit_operation::ServiceResourceScope,
+    /// Runtime request slots remain occupied until worker and provider release.
+    active_requests: Arc<AtomicUsize>,
     /// Upper bound for bytes retained by one detector configuration.
     max_in_flight_bytes: usize,
     /// Aggregate bytes reserved by the active and queued jobs.
@@ -245,15 +247,11 @@ impl ManagedInferenceRuntime {
                 ));
             }
         };
-        let service_resources = match service_group.resource_scope(ServiceResourceOptions { capacity: 2 }) {
-            Ok(resources) => resources,
-            Err(error) => return Err(MimeError::detector_backend("magika", format!("could not create service resources: {error}"))),
-        };
         Ok(Self {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(WorkerState::new(worker)),
             service_group,
-            service_resources,
+            active_requests: Arc::new(AtomicUsize::new(0)),
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks: Arc::new(Mutex::new(Vec::new())),
@@ -368,18 +366,30 @@ impl ManagedInferenceRuntime {
                 })
                 .await
             };
+        let mut options = OperationOptions::default();
+        // This operation is an implementation detail behind a MIME Result;
+        // preserve the result for the caller to handle instead of replacing
+        // the parent operation's own outcome with ChildFailed.
+        options.requirement = ChildRequirement::Optional;
         let mut operation = match parent {
-            Some(scope) => scope.manager().as_async().try_submit(OperationOptions::default(), body),
-            None => self.service_group.as_async().try_submit(OperationOptions::default(), body),
+            Some(scope) => scope.manager().as_async().try_submit(options.clone(), body),
+            None => self.service_group.as_async().try_submit(options, body),
         }
         .map_err(|error| MimeError::detector_backend("magika", format!("operation submission failed: {error:?}")))?;
-        match operation.wait_outcome().await.map_err(|error| {
+        let outcome = operation.wait_outcome().await.map_err(|error| {
             MimeError::detector_backend("magika", format!("operation outcome unavailable: {error:?}"))
-        })? {
+        })?;
+        if parent.is_none() {
+            // Legacy unmanaged calls have no public handle through which a
+            // caller can observe eventual settlement, so return only after
+            // this operation's resources have actually been released.
+            let _settlement = operation.wait_settlement().await;
+        }
+        match outcome {
             OperationOutcome::Succeeded(result) => Ok(result),
             OperationOutcome::Failed(error) => Err(error),
             OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "inference stopped")),
-            OperationOutcome::ChildFailed(_) => Err(MimeError::detector_backend("magika", "inference child failed")),
+            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend("magika", format!("inference child failed: {summary:?}"))),
             OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "inference operation panicked")),
             OperationOutcome::ExecutionFailed(_) => Err(MimeError::detector_backend("magika", "inference executor failed")),
         }
@@ -434,64 +444,75 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns provider, admission, Magika, or worker errors.
-    pub(crate) async fn detect_async_input_admitted(
-        self: &Arc<Self>,
+    pub(crate) async fn detect_async_input_admitted<I>(
+        &self,
+        scope: &OperationScope,
         mut admission: RequestAdmission,
-        input: AsyncProviderInput<'static>,
+        input: I,
         max_bytes: usize,
         map_error: fn(MagikaError) -> MimeError,
     ) -> MimeResult<Option<String>>
+    where
+        I: AsyncInput + Send + 'static,
     {
-        let runtime = Arc::clone(self);
-        let parent_manager = admission.parent_manager();
-        let operation_body = move |scope: OperationScope| async move {
-            admission.retain_in_scope(&scope)?;
-            let state = Arc::clone(&admission.state);
-            let state_for_stop = Arc::clone(&state);
-            let worker = async move {
-                admission.begin_provider_operation()?;
-                let length_result = input.length().await;
-                admission.provider_operation_completed();
-                let length = match length_result {
-                    Ok(length) => length,
-                    Err(error) => {
-                        let error = map_error(error);
-                        admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
-                        return Err(error);
-                    }
-                };
-                let bridge = AsyncSampleBridge::new(length);
-                let driver = bridge.driver();
-                let inference = runtime.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-                let guard = ProviderDriverGuard::new(input, driver, state);
-                drive_async_input(guard, inference).await
-            };
-            let mut worker = Box::pin(worker);
-            let mut stop = Box::pin(scope.context().stop_requested());
-            poll_fn(|cx: &mut Context<'_>| {
-                if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
-                    state_for_stop.request_stop();
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+        admission.retain_in_scope(scope)?;
+        let state = Arc::clone(&admission.state);
+        let state_for_stop = Arc::clone(&state);
+        let worker = async move {
+            admission.begin_provider_operation()?;
+            let length_result = input.length().await;
+            admission.provider_operation_completed();
+            let length = match length_result {
+                Ok(length) => length,
+                Err(error) => {
+                    admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
+                    return Err(map_error(error));
                 }
-                worker.as_mut().poll(cx)
-            })
-            .await
+            };
+            let bridge = AsyncSampleBridge::new(length);
+            let driver = bridge.driver();
+            let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
+            let guard = ProviderDriverGuard::new(input, driver, state);
+            drive_async_input(guard, inference).await
         };
-        let mut operation = match parent_manager {
-            Some(manager) => manager.as_async().try_submit(OperationOptions::default(), operation_body),
-            None => self.service_group.as_async().try_submit(OperationOptions::default(), operation_body),
-        }
-        .map_err(|error| MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}")))?;
-        match operation.wait_outcome().await.map_err(|error| {
-            MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
-        })? {
-            OperationOutcome::Succeeded(result) => Ok(result),
-            OperationOutcome::Failed(error) => Err(error),
-            OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "provider inference stopped")),
-            OperationOutcome::ChildFailed(_) => Err(MimeError::detector_backend("magika", "provider child failed")),
-            OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "provider operation panicked")),
-            OperationOutcome::ExecutionFailed(_) => Err(MimeError::detector_backend("magika", "provider executor failed")),
-        }
+        let mut worker = Box::pin(worker);
+        let mut stop = Box::pin(scope.context().stop_requested());
+        poll_fn(|cx: &mut Context<'_>| {
+            if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
+                state_for_stop.request_stop();
+                return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+            }
+            worker.as_mut().poll(cx)
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn detect_async_input_admitted_test<I>(
+        &self,
+        mut admission: RequestAdmission,
+        input: I,
+        max_bytes: usize,
+        map_error: fn(MagikaError) -> MimeError,
+    ) -> MimeResult<Option<String>>
+    where
+        I: AsyncInput + Send,
+    {
+        admission.begin_provider_operation()?;
+        let length_result = input.length().await;
+        admission.provider_operation_completed();
+        let length = match length_result {
+            Ok(length) => length,
+            Err(error) => {
+                admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
+                return Err(map_error(error));
+            }
+        };
+        let bridge = AsyncSampleBridge::new(length);
+        let driver = bridge.driver();
+        let state = Arc::clone(&admission.state);
+        let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
+        drive_async_input(ProviderDriverGuard::new(input, driver, state), inference).await
     }
 
     /// Dispatches owned bytes using capacity reserved by the caller.
@@ -526,6 +547,11 @@ impl ManagedInferenceRuntime {
         self.max_in_flight_bytes
     }
 
+    /// Returns the runtime's bounded group for scope-less managed work.
+    pub(crate) fn service_group(&self) -> OperationGroup {
+        self.service_group.clone()
+    }
+
     /// Runs already extracted features synchronously on the owning worker.
     ///
     /// # Parameters
@@ -546,7 +572,7 @@ impl ManagedInferenceRuntime {
         map_error: fn(MagikaError) -> MimeError,
     ) -> MimeResult<Option<String>> {
         self.submit(None, WorkerInput::Features(features, map_error))?
-            .wait_blocking()
+            .wait_blocking_settled()
     }
 
     /// Reserves operation and byte capacity before sending a job to the worker.
@@ -631,10 +657,8 @@ impl ManagedInferenceRuntime {
             .byte_budget
             .try_acquire(byte_count)
             .ok_or_else(|| MimeError::detector_backend("magika", "runtime in-flight byte budget is full"))?;
-        let admission = self
-            .service_resources
-            .manage(())
-            .map_err(|error| MimeError::detector_backend("magika", format!("runtime admission failed: {error:?}")))?;
+        let admission = ServicePermit::try_acquire(&self.active_requests, 2)
+            .ok_or_else(|| MimeError::detector_backend("magika", "runtime service capacity is full"))?;
         after_service_reservation();
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let state = Arc::new(TaskState::new_registered(
@@ -643,7 +667,6 @@ impl ManagedInferenceRuntime {
             Some(Arc::downgrade(&self.tasks)),
             Some(Arc::downgrade(&self.admission_gate)),
         ));
-        let parent_manager = scope.map(OperationScope::manager);
         self.tasks
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -653,7 +676,6 @@ impl ManagedInferenceRuntime {
             state,
             admission,
             RequestAdmission::scope_resources(scope)?,
-            parent_manager,
             byte_permit,
         ))
     }
@@ -806,7 +828,7 @@ impl ManagedInferenceRuntime {
                 unconfirmed_users: 0,
                 cleaning_resources: 0,
                 recovery_groups: 0,
-                service_resources: group.service_resource_scopes,
+                service_resources: self.active_requests.load(std::sync::atomic::Ordering::Acquire),
             },
         }
     }

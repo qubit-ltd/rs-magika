@@ -28,11 +28,11 @@ use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
-use qubit_operation::protocol::StopReason;
-use qubit_operation::report::ManagerOptions;
-use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::OperationManager;
-use qubit_operation::supervisor::ShutdownMode;
+use qubit_operation::StopReason;
+use qubit_operation::ManagerOptions;
+use qubit_operation::OperationOptions;
+use qubit_operation::OperationManager;
+use qubit_operation::ShutdownMode;
 
 use crate::support::AsyncProviderGate;
 use crate::support::AsyncProviderGatePoint;
@@ -40,6 +40,7 @@ use crate::support::ProviderFileSystemSpi;
 use crate::support::detector;
 use crate::support::run_ready;
 use crate::support::run_until;
+use crate::support::ShutdownBlocking;
 
 const PYTHON: &[u8] = b"#!/usr/bin/env python3\nprint('hello')\n";
 
@@ -70,30 +71,30 @@ fn managed_provider_result(
     max_bytes: usize,
 ) -> Result<Option<String>, MimeError> {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(2).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let mut handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), max_bytes)
                 .await
         })
         .unwrap();
-    let outcome = handle.result_blocking().unwrap();
+    let outcome = run_ready(handle.wait_outcome()).unwrap();
     let result = match outcome {
-        qubit_operation::report::OperationOutcome::Succeeded(mime) => Ok(mime),
-        qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+        qubit_operation::OperationOutcome::Succeeded(mime) => Ok(mime),
+        qubit_operation::OperationOutcome::Failed(error) => Err(error),
         other => panic!("managed provider operation did not complete: {other:?}"),
     };
-    assert!(handle.observer().released_blocking().unwrap().all_released);
+    assert!(run_ready(handle.wait_settlement()).all_released());
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
     result
 }
@@ -243,24 +244,24 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     let managed_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let managed_observations = managed_provider.observations();
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 1 }).unwrap();
     let body_detector = Arc::clone(&detector);
     let file_system = managed_provider.async_file_system();
     let mut handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), 8192)
                 .await;
             Ok::<_, MimeError>(result)
         })
         .unwrap();
-    let outcome = handle.result_blocking().unwrap();
+    let outcome = run_ready(handle.wait_outcome()).unwrap();
     let managed = match outcome {
-        qubit_operation::report::OperationOutcome::Succeeded(result) => result,
-        qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+        qubit_operation::OperationOutcome::Succeeded(result) => result,
+        qubit_operation::OperationOutcome::Failed(error) => Err(error),
         other => panic!("managed admission operation did not complete: {other:?}"),
     };
-    assert!(handle.observer().released_blocking().unwrap().all_released);
+    assert!(run_ready(handle.wait_settlement()).all_released());
     let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
     let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
     assert_eq!(
@@ -284,7 +285,7 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let capacity = detector.max_buffer_size();
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(4).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let first_gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
     let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&first_gate));
     let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -299,7 +300,7 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     if first_managed {
         managed_first = Some(
             service
-                .start(ScopeOptions::default(), move |scope| async move {
+                .as_async().try_submit(OperationOptions::default(), move |scope| async move {
                     first_detector
                         .detect_async_provider_path_managed(
                             &scope,
@@ -337,19 +338,19 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     } else {
         let second_detector = Arc::clone(&detector);
         let mut second = service
-            .start(ScopeOptions::default(), move |scope| async move {
+            .as_async().try_submit(OperationOptions::default(), move |scope| async move {
                 second_detector
                     .detect_async_provider_path_managed(&scope, &second_file_system, &path("/capacity-second.py"), 1)
                     .await
             })
             .unwrap();
-        let outcome = second.result_blocking().unwrap();
+        let outcome = run_ready(second.wait_outcome()).unwrap();
         let result = match outcome {
-            qubit_operation::report::OperationOutcome::Succeeded(mime) => Ok(mime),
-            qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+            qubit_operation::OperationOutcome::Succeeded(mime) => Ok(mime),
+            qubit_operation::OperationOutcome::Failed(error) => Err(error),
             other => panic!("managed capacity rejection did not complete: {other:?}"),
         };
-        assert!(second.observer().released_blocking().unwrap().all_released);
+        assert!(run_ready(second.wait_settlement()).all_released());
         result
     };
 
@@ -357,13 +358,13 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     // worker can settle and release their reserved capacity.
     first_gate.release();
     let first_result = if let Some(mut handle) = managed_first {
-        let outcome = handle.result_blocking().unwrap();
+        let outcome = run_ready(handle.wait_outcome()).unwrap();
         let result = match outcome {
-            qubit_operation::report::OperationOutcome::Succeeded(mime) => Ok(mime),
-            qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+            qubit_operation::OperationOutcome::Succeeded(mime) => Ok(mime),
+            qubit_operation::OperationOutcome::Failed(error) => Err(error),
             other => panic!("managed capacity holder did not complete: {other:?}"),
         };
-        assert!(handle.observer().released_blocking().unwrap().all_released);
+        assert!(run_ready(handle.wait_settlement()).all_released());
         result
     } else {
         legacy_first
@@ -376,12 +377,12 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
     assert!(
         detector
@@ -424,7 +425,7 @@ fn test_async_provider_full_capacity_rejects_both_entrypoint_orders_before_io() 
 #[test]
 fn test_managed_guide_reuses_detector_for_two_requests() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(2).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
     let config = qubit_mime::MimeConfig::default();
     let runtime = Arc::new(
         ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
@@ -448,7 +449,7 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     let first_fs = first_provider.async_file_system();
     let first_detector = Arc::clone(&detector);
     let mut first = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             first_detector
                 .detect_async_provider_path_managed(&scope, &first_fs, &path("/guide/first.py"), 4096)
                 .await
@@ -457,8 +458,8 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     gate.wait_until_entered(Duration::from_secs(5));
 
     let first_wait = async {
-        let outcome = first.result().await.unwrap();
-        let settlement = first.released().await;
+        let outcome = first.wait_outcome().await.unwrap();
+        let settlement = first.wait_settlement().await;
         (outcome, settlement)
     };
     let mut first_wait = Box::pin(first_wait);
@@ -480,32 +481,32 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     let (first_outcome, first_settlement) = run_ready(first_wait);
     assert!(matches!(
         first_outcome,
-        qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
+        qubit_operation::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
     ));
-    assert!(first_settlement.all_released);
+    assert!(first_settlement.all_released());
 
     let second_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let second_fs = second_provider.async_file_system();
     let second_detector = Arc::clone(&detector);
     let mut second = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             second_detector
                 .detect_async_provider_path_managed(&scope, &second_fs, &path("/guide/second.py"), 4096)
                 .await
         })
         .unwrap();
-    let second_outcome = run_ready(second.result()).unwrap();
-    let second_settlement = run_ready(second.released());
+    let second_outcome = run_ready(second.wait_outcome()).unwrap();
+    let second_settlement = run_ready(second.wait_settlement());
     assert!(matches!(
         second_outcome,
-        qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
+        qubit_operation::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
     ));
-    assert!(second_settlement.all_released);
+    assert!(second_settlement.all_released());
 
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
     assert!(
         detector
@@ -515,7 +516,7 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
 }
 
@@ -532,7 +533,7 @@ impl Drop for ReleaseGateOnDrop {
 #[test]
 fn test_shared_runtime_provider_head_of_line() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(2).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let config = qubit_mime::MimeConfig::default();
     let runtime_budget = config.max_buffer_size();
     let runtime = Arc::new(
@@ -555,7 +556,7 @@ fn test_shared_runtime_provider_head_of_line() {
     let first_fs = first_provider.async_file_system();
     let first_detector = Arc::clone(&detector);
     let mut first = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             first_detector
                 .detect_async_provider_path_managed(&scope, &first_fs, &path("/hol/first.py"), 4096)
                 .await
@@ -570,7 +571,7 @@ fn test_shared_runtime_provider_head_of_line() {
     let second_detector = Arc::clone(&detector);
     let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
     let mut second = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, second_bytes));
             std::future::poll_fn(|context| match inference.as_mut().poll(context) {
                 Poll::Ready(result) => Poll::Ready(result),
@@ -590,7 +591,7 @@ fn test_shared_runtime_provider_head_of_line() {
     // polled; that call reserves runtime capacity and dispatches before it
     // waits for the shared worker. Now explicitly observe Pending at the
     // operation result boundary while the first provider read is gated.
-    let mut second_result = Box::pin(second.result());
+    let mut second_result = Box::pin(second.wait_outcome());
     let observed = run_ready(std::future::poll_fn(|context| {
         Poll::Ready(second_result.as_mut().poll(context))
     }));
@@ -598,24 +599,24 @@ fn test_shared_runtime_provider_head_of_line() {
     drop(second_result);
 
     gate.release();
-    let first_outcome = run_ready(first.result());
-    let first_settlement = run_ready(first.released());
-    let second_outcome = run_ready(second.result());
-    let second_settlement = run_ready(second.released());
+    let first_outcome = run_ready(first.wait_outcome());
+    let first_settlement = run_ready(first.wait_settlement());
+    let second_outcome = run_ready(second.wait_outcome());
+    let second_settlement = run_ready(second.wait_settlement());
     assert!(matches!(
         first_outcome,
-        Ok(qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
+        Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
     ));
     assert!(matches!(
         second_outcome,
-        Ok(qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
+        Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
     ));
-    assert!(first_settlement.all_released);
-    assert!(second_settlement.all_released);
+    assert!(first_settlement.all_released());
+    assert!(second_settlement.all_released());
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
     assert!(
         detector
@@ -625,14 +626,14 @@ fn test_shared_runtime_provider_head_of_line() {
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .is_complete()
+            .snapshot.active_operations == 0
     );
 }
 
 #[test]
 fn test_shared_runtime_provider_head_of_line_cancellation() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(2).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
     let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
@@ -642,7 +643,7 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut first = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/hol/cancelled.py"), 4096)
                 .await
@@ -650,16 +651,16 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(30));
     let first_observer = first.observer();
-    first.request_cancel(StopReason::UserCancelled);
-    let first_result = run_ready(first.result());
+    let _ = first.request_stop(StopReason::UserCancelled);
+    let first_result = run_ready(first.wait_outcome());
     assert!(matches!(
         first_result,
-        Ok(qubit_operation::report::OperationOutcome::Stopped(_))
+        Ok(qubit_operation::OperationOutcome::Stopped(_))
     ));
 
     // Cancellation stops local polling, but the gated provider read has no
     // completion signal yet, so the first managed release remains Pending.
-    let mut first_release = Box::pin(first_observer.released());
+    let mut first_release = Box::pin(first_observer.wait_settlement());
     let release_state = run_ready(std::future::poll_fn(|context| {
         Poll::Ready(first_release.as_mut().poll(context))
     }));
@@ -670,24 +671,30 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     let second_detector = Arc::clone(&detector);
     let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
     let mut second = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, bytes));
             std::future::poll_fn(|context| match inference.as_mut().poll(context) {
-                Poll::Ready(result) => Poll::Ready(result),
+                Poll::Ready(result) => {
+                    let _ = admitted_tx.send(format!("completed: {result:?}"));
+                    Poll::Ready(result)
+                }
                 Poll::Pending => {
-                    admitted_tx.send(()).expect("test receiver remains alive");
+                    let _ = admitted_tx.send("pending".to_owned());
                     Poll::Pending
                 }
             })
             .await
         })
         .unwrap();
-    admitted_rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("second owned-byte request should be admitted and queued");
+    let admission_state = admitted_rx.recv_timeout(Duration::from_secs(30));
+    if let Ok(state) = admission_state.as_ref() {
+        assert_eq!(state, "pending", "second owned-byte request ended before queueing");
+    } else {
+        panic!("second owned-byte request body ended before its queue handshake: {admission_state:?}; outcome={:?}", run_ready(second.wait_outcome()));
+    }
     // The second operation must still be waiting on the shared worker before
     // releasing the provider read.
-    let mut second_result = Box::pin(second.result());
+    let mut second_result = Box::pin(second.wait_outcome());
     let result_state = run_ready(std::future::poll_fn(|context| {
         Poll::Ready(second_result.as_mut().poll(context))
     }));
@@ -696,13 +703,13 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
 
     // Releasing the read lets the second owned-byte request progress.
     gate.release();
-    let second_result = run_ready(second.result());
-    let second_settlement = run_ready(second.released());
+    let second_result = run_ready(second.wait_outcome());
+    let second_settlement = run_ready(second.wait_settlement());
     assert!(matches!(
         second_result,
-        Ok(qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
+        Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
     ));
-    assert!(second_settlement.all_released);
+    assert!(second_settlement.all_released());
     // Even though the gate is released and the second request completes, the
     // first provider future was dropped while pending. Its native completion
     // cannot be observed through this fixture, so managed release stays
@@ -712,14 +719,14 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     }));
     assert!(release_state.is_pending());
     let shutdown = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
-    assert!(!shutdown.admission.is_complete());
+    assert!(!shutdown.worker_stopped);
 }
 
 #[test]
 fn test_managed_provider_session_api_classifies_and_settles_worker() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let file_system = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_random_access()
         .async_file_system();
@@ -729,7 +736,7 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
         .async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let rejected = body_detector
                 .detect_async_provider_path_managed(
                     &scope,
@@ -751,11 +758,11 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
         })
         .unwrap();
     assert!(matches!(
-        handle.result_blocking().unwrap(),
-        qubit_operation::report::OperationOutcome::Succeeded((session_mime, fallback_mime))
+        run_ready(handle.wait_outcome()).unwrap(),
+        qubit_operation::OperationOutcome::Succeeded((session_mime, fallback_mime))
             if session_mime == "text/x-python" && fallback_mime == "text/x-python"
     ));
-    assert!(handle.observer().released_blocking().unwrap().all_released);
+    assert!(run_ready(handle.wait_settlement()).all_released());
     let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
 }
@@ -764,14 +771,14 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
 fn test_managed_provider_admission_rejects_cancelled_scope_before_provider_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 1 }).unwrap();
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
-            scope.request_cancel(qubit_operation::protocol::StopReason::UserCancelled);
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+            let _ = scope.request_stop(qubit_operation::StopReason::UserCancelled);
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/cancelled.py"), 4096)
                 .await;
@@ -779,7 +786,7 @@ fn test_managed_provider_admission_rejects_cancelled_scope_before_provider_io() 
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = handle.result_blocking();
+    let _ = run_ready(handle.wait_outcome());
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
@@ -793,13 +800,13 @@ fn test_managed_provider_admission_rejects_closed_runtime_before_provider_io() {
     let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 1 }).unwrap();
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/closed.py"), 4096)
                 .await;
@@ -807,7 +814,7 @@ fn test_managed_provider_admission_rejects_closed_runtime_before_provider_io() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = handle.result_blocking();
+    let _ = run_ready(handle.wait_outcome());
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
@@ -818,7 +825,7 @@ fn test_managed_provider_admission_rejects_closed_runtime_before_provider_io() {
 fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(4).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 6 }).unwrap();
     let gates = [
         crate::support::AsyncProviderGate::new(AsyncProviderGatePoint::Open),
         crate::support::AsyncProviderGate::new(AsyncProviderGatePoint::Open),
@@ -832,7 +839,7 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
         let body_detector = Arc::clone(&detector);
         handles.push(
             service
-                .start(ScopeOptions::default(), move |scope| async move {
+                .as_async().try_submit(OperationOptions::default(), move |scope| async move {
                     body_detector
                         .detect_async_provider_path_managed(&scope, &file_system, &path("/full.py"), 4096)
                         .await
@@ -850,7 +857,7 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
     let file_system = rejected.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut rejected_handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/over-capacity.py"), 4096)
                 .await;
@@ -858,7 +865,7 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = rejected_handle.result_blocking();
+    let _ = run_ready(rejected_handle.wait_outcome());
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
@@ -867,7 +874,7 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
         gate.release();
     }
     for handle in &mut handles {
-        let _ = handle.result_blocking();
+        let _ = run_ready(handle.wait_outcome());
     }
     let _ = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
 }
@@ -876,7 +883,7 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
 fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Open);
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation)
@@ -885,18 +892,18 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/cancel-between-ops.py"), 4096)
                 .await
         })
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(5));
-    handle.request_cancel(StopReason::UserCancelled);
+    let _ = handle.request_stop(StopReason::UserCancelled);
     gate.release();
     let mut handle = handle;
-    let _ = handle.result_blocking();
-    assert_eq!(1, observations.random_opens.load(Ordering::SeqCst));
+    let _ = run_ready(handle.wait_outcome());
+    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
@@ -907,7 +914,7 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
 fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_random_access()
@@ -915,7 +922,7 @@ fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close()
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/pending.py"), 4096)
                 .await
@@ -923,14 +930,14 @@ fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close()
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(30));
     let observer = handle.observer();
-    handle.request_cancel(StopReason::UserCancelled);
+    let _ = handle.request_stop(StopReason::UserCancelled);
     let mut handle = handle;
-    let _ = handle.result_blocking();
+    let _ = run_ready(handle.wait_outcome());
     let (released_tx, released_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || released_tx.send(observer.released_blocking().unwrap()).unwrap());
+    std::thread::spawn(move || released_tx.send(run_ready(observer.wait_settlement())).unwrap());
     assert!(released_rx.recv_timeout(Duration::from_millis(50)).is_err());
     let report = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
-    assert!(!report.admission.is_complete());
+    assert!(report.admission.snapshot.service_resources != 0);
     // The async fs contract does not let us certify provider-native completion.
     gate.release();
 }
@@ -1809,8 +1816,8 @@ fn test_managed_owned_bytes_preserve_public_result_and_release_contract() {
     let zero_budget = qubit_magika::ManagedInferenceRuntime::new(supervisor.clone(), 0)
         .expect_err("a managed runtime must reject a zero byte budget");
     assert!(zero_budget.to_string().contains("runtime byte budget must be nonzero"));
-    let builder = qubit_magika::MagikaMimeDetectorBuilder::default().operation_supervisor(supervisor.clone());
-    assert!(format!("{builder:?}").contains("supervisor_configured"));
+    let builder = qubit_magika::MagikaMimeDetectorBuilder::default().operation_manager(supervisor.clone());
+    assert!(format!("{builder:?}").contains("manager_configured"));
     let builder_detector = builder.build().unwrap();
     assert!(
         builder_detector
@@ -1832,19 +1839,19 @@ fn test_managed_owned_bytes_preserve_public_result_and_release_contract() {
             .unwrap(),
     );
     let request_detector = Arc::clone(&detector);
-    let service = supervisor.service_group(2).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
     let mut request = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             request_detector.detect_bytes_managed(&scope, PYTHON.to_vec()).await
         })
         .unwrap();
 
-    let outcome = request.result_blocking().unwrap();
+    let outcome = run_ready(request.wait_outcome()).unwrap();
     assert!(matches!(
         outcome,
-        qubit_operation::report::OperationOutcome::Succeeded(Some(value)) if value == "text/x-python"
+        qubit_operation::OperationOutcome::Succeeded(Some(value)) if value == "text/x-python"
     ));
-    assert!(request.observer().released_blocking().unwrap().all_released);
+    assert!(run_ready(request.wait_settlement()).all_released());
 
     let bytes = (0..512)
         .map(|index| ((index * 37 + 11) % 256) as u8)
@@ -1867,10 +1874,10 @@ fn test_managed_owned_bytes_preserve_public_result_and_release_contract() {
     assert_eq!(reader.position(), 7);
 
     let rejected_detector = Arc::clone(&detector);
-    let mut rejected_options = ScopeOptions::default();
+    let mut rejected_options = OperationOptions::default();
     rejected_options.limits.child_operations = 0;
     let mut rejected_request = service
-        .start(rejected_options, move |scope| async move {
+        .as_async().try_submit(rejected_options, move |scope| async move {
             assert!(
                 rejected_detector
                     .detect_bytes_managed(&scope, Vec::new())
@@ -1880,9 +1887,10 @@ fn test_managed_owned_bytes_preserve_public_result_and_release_contract() {
             Ok::<(), ()>(())
         })
         .unwrap();
-    let _ = rejected_request.result_blocking().unwrap();
+    let _ = run_ready(rejected_request.wait_outcome()).unwrap();
+    assert!(run_ready(rejected_request.wait_settlement()).all_released());
 
     let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
-    assert!(report.admission.is_complete());
+    assert!(report.admission.snapshot.active_operations == 0);
 }

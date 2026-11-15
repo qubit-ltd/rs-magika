@@ -114,7 +114,7 @@ impl MagikaMimeDetectorBuilder {
     /// Shares an application-managed inference runtime with this detector.
     ///
     /// When this runtime is set, it takes precedence over any supervisor set
-    /// with [`Self::operation_supervisor`], regardless of setter order. The
+    /// with [`Self::operation_manager`], regardless of setter order. The
     /// runtime is reused as-is; `build` does not initialize another Magika
     /// session for it. Its byte budget must be at least the configured MIME
     /// buffer limit.
@@ -224,18 +224,18 @@ mod tests {
 
         let runtime_then_supervisor = MagikaMimeDetectorBuilder::default()
             .managed_runtime(Arc::clone(&runtime_a))
-            .operation_supervisor(supervisor_b.clone())
+            .operation_manager(supervisor_b.clone())
             .build()
             .expect("runtime should take precedence over supervisor");
         let supervisor_then_runtime = MagikaMimeDetectorBuilder::default()
-            .operation_supervisor(supervisor_b.clone())
+            .operation_manager(supervisor_b.clone())
             .managed_runtime(Arc::clone(&runtime_a))
             .build()
             .expect("runtime should take precedence over supervisor");
         assert!(Arc::ptr_eq(&runtime_a, &runtime_then_supervisor.runtime));
         assert!(Arc::ptr_eq(&runtime_a, &supervisor_then_runtime.runtime));
 
-        supervisor_b.close();
+        supervisor_b.close_admission();
         assert!(block_on(runtime_a.detect_bytes_unmanaged(b"%PDF-1.7".to_vec())).is_ok());
 
         assert!(
@@ -259,7 +259,7 @@ mod tests {
     fn test_builder_debug_and_application_supervisor_configuration() {
         let builder = MagikaMimeDetectorBuilder::default()
             .media_stream_classifier(None)
-            .operation_supervisor(OperationManager::new(ManagerOptions::default()).unwrap());
+            .operation_manager(OperationManager::new(ManagerOptions::default()).unwrap());
         assert!(format!("{builder:?}").contains("MagikaMimeDetectorBuilder"));
         let detector = builder.build().expect("configured detector should initialize");
         assert!(

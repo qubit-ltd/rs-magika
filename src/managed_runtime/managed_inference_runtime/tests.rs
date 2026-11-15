@@ -19,9 +19,11 @@ use std::time::Duration;
 
 use qubit_mime::MimeError;
 use qubit_operation::ChildOutcomeKind;
+use qubit_operation::GroupOptions;
 use qubit_operation::StopReason;
 use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
+use qubit_operation::OperationOptions;
 use qubit_operation::ShutdownMode;
 
 use super::super::worker_input::WorkerBytes;
@@ -119,7 +121,7 @@ fn test_cancelled_input_drops_before_worker_release() {
     probe_gate_cleanup.release();
     assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(state.wait_released_blocking(Duration::from_secs(2)));
-    assert!(runtime.reserve_for_provider(None, 0).is_ok());
+    assert!(runtime.byte_budget.try_acquire(8).is_some());
     let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
 }
 
@@ -147,15 +149,20 @@ fn test_cancelled_queued_bytes_restore_byte_budget() {
 
     let _first = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let first_state = runtime.tasks.lock().unwrap()[0].clone();
     let queued = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
-    let state = runtime.tasks.lock().unwrap()[1].clone();
+    let queued_state = runtime.tasks.lock().unwrap()[1].clone();
     drop(queued);
+    // Dropping the result waiter requests stop, but the queued worker still
+    // owns the bytes until it dequeues and confirms the input was discarded.
     assert!(runtime.reserve_for_provider(None, 1).is_err());
 
     gate_cleanup.release();
-    assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
-    assert!(state.wait_released_blocking(Duration::from_secs(2)));
-    assert!(runtime.reserve_for_provider(None, 8).is_ok());
+    assert!(first_state.wait_worker_done_blocking(Duration::from_secs(2)));
+    assert!(first_state.wait_released_blocking(Duration::from_secs(2)));
+    assert!(queued_state.wait_worker_done_blocking(Duration::from_secs(2)));
+    assert!(queued_state.wait_released_blocking(Duration::from_secs(2)));
+    assert!(runtime.byte_budget.try_acquire(8).is_some());
     let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
 }
 
@@ -195,7 +202,7 @@ fn test_provider_read_error_is_mapped_and_settled() {
     let mapped_error = map_provider_test_error(magika::Error::IOError(std::io::Error::other("test mapping")));
     assert!(matches!(mapped_error, MimeError::DetectorBackend { .. }));
     let length_admission = runtime.reserve_for_provider(None, 8192).unwrap();
-    let length_result = block_on(runtime.detect_async_input_admitted(
+    let length_result = block_on(runtime.detect_async_input_admitted_test(
         length_admission,
         FailedLengthInput,
         8192,
@@ -205,11 +212,11 @@ fn test_provider_read_error_is_mapped_and_settled() {
 
     let admission = runtime.reserve_for_provider(None, 8192).unwrap();
     let result =
-        block_on(runtime.detect_async_input_admitted(admission, FailedReadInput, 8192, map_provider_test_error));
+        block_on(runtime.detect_async_input_admitted_test(admission, FailedReadInput, 8192, map_provider_test_error));
 
     assert!(matches!(result, Err(MimeError::Io(_))));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
-    assert!(report.admission.is_complete());
+    assert!(report.admission.snapshot.active_operations == 0);
     assert!(report.worker_stopped);
 }
 
@@ -275,7 +282,7 @@ fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registratio
 #[test]
 fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(2).unwrap();
+    let service = supervisor.group(GroupOptions { capacity: 2 }).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         8,
@@ -285,33 +292,29 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
 
     let first_runtime = Arc::clone(&runtime);
     let mut first = service
-        .start(
-            qubit_operation::scope::ScopeOptions::default(),
-            move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
                 let mut admission = first_runtime.reserve_for_provider(Some(&scope), 8)?;
-                scope.request_cancel(StopReason::UserCancelled);
+                let _ = scope.request_stop(StopReason::UserCancelled);
                 assert!(admission.begin_provider_operation().is_err());
                 Ok::<_, MimeError>(())
-            },
-        )
+            })
         .unwrap();
-    let _ = first.result_blocking();
+    let _ = block_on(first.wait_outcome());
 
     let later_runtime = Arc::clone(&runtime);
     let mut later = service
-        .start(
-            qubit_operation::scope::ScopeOptions::default(),
-            move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
                 let mut admission = later_runtime.reserve_for_provider(Some(&scope), 8)?;
                 admission.begin_provider_operation()?;
                 admission.provider_operation_completed();
-                scope.request_cancel(StopReason::UserCancelled);
+                let _ = scope.request_stop(StopReason::UserCancelled);
                 assert!(admission.begin_provider_operation().is_err());
                 Ok::<_, MimeError>(())
-            },
-        )
+            })
         .unwrap();
-    let _ = later.result_blocking();
+    let _ = block_on(later.wait_outcome());
 
     let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
 }
@@ -355,7 +358,7 @@ fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
     let body_runtime = Arc::clone(&runtime);
     let mut future = Box::pin(async move {
         body_runtime
-            .detect_async_input_admitted(admission, input, 8, map_error)
+            .detect_async_input_admitted_test(admission, input, 8, map_error)
             .await
     });
     let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
@@ -420,23 +423,41 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
     let body_runtime = Arc::clone(&runtime);
     let mut future = Box::pin(async move {
         body_runtime
-            .detect_async_input_admitted(admission, ReadyInput, 8, map_provider_test_error)
+            .detect_async_input_admitted_test(admission, ReadyInput, 8, map_provider_test_error)
             .await
     });
     let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while worker_rx.try_recv().is_err() {
+    let mut worker_gate_entered = false;
+    loop {
+        match worker_rx.try_recv() {
+            Ok(()) => {
+                worker_gate_entered = true;
+                break;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => panic!("worker stopped before reaching its gate"),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
         assert!(std::time::Instant::now() < deadline, "worker did not reach its gate");
-        assert!(future.as_mut().poll(&mut context).is_pending());
+        if matches!(future.as_mut().poll(&mut context), Poll::Ready(_)) {
+            // The provider read error may publish the business result before
+            // the worker's after-business gate sends its handshake.
+            break;
+        }
         std::thread::park_timeout(Duration::from_millis(1));
     }
+    if !worker_gate_entered {
+        worker_rx.recv_timeout(Duration::from_secs(2)).expect("worker should be waiting at the release gate");
+    }
+    let state = runtime.tasks.lock().unwrap().first().unwrap().clone();
+    assert!(!state.wait_worker_done_blocking(Duration::ZERO));
     drop(future);
     gate_cleanup.release();
     let state = runtime.tasks.lock().unwrap().first().unwrap().clone();
     assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(state.wait_released_blocking(Duration::from_secs(2)));
-    assert!(runtime.reserve_for_provider(None, 8).is_ok());
+    assert!(runtime.byte_budget.try_acquire(8).is_some());
     let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
 }
 
@@ -504,7 +525,7 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     let second_reads = Arc::clone(&reads);
     let mut second = Box::pin(async move {
         second_runtime
-            .detect_async_input_admitted(second_admission, CountedInput(second_reads), 8, map_provider_test_error)
+            .detect_async_input_admitted_test(second_admission, CountedInput(second_reads), 8, map_provider_test_error)
             .await
     });
     assert!(second.as_mut().poll(&mut context).is_pending());
@@ -528,14 +549,14 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
         assert!(state.wait_released_blocking(Duration::from_secs(2)));
     }
     assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(runtime.reserve_for_provider(None, 8).is_ok());
+    assert!(runtime.byte_budget.try_acquire(8).is_some());
     let success_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let success_admission = runtime.reserve_for_provider(None, 8).unwrap();
     let success_runtime = Arc::clone(&runtime);
     let success_input = Arc::clone(&success_reads);
     let mut success = Box::pin(async move {
         success_runtime
-            .detect_async_input_admitted(
+            .detect_async_input_admitted_test(
                 success_admission,
                 CountedInput(success_input),
                 8,
@@ -558,7 +579,7 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     assert_eq!(1, success_reads.load(std::sync::atomic::Ordering::SeqCst));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
-    assert!(report.admission.is_complete());
+    assert!(report.admission.snapshot.active_operations == 0);
 }
 
 #[test]
@@ -571,12 +592,12 @@ fn test_admitted_owned_bytes_return_worker_result() {
     }
 
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let runtime = ManagedInferenceRuntime::with_engine(
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         8,
         Box::new(|bytes| Ok(Some(format!("application/x-bytes-{}", bytes.len())))),
         Box::new(|| {}),
-    );
+    ));
     let admission = runtime.reserve_for_provider(None, 3).unwrap();
     let mut future = Box::pin(runtime.detect_bytes_admitted(admission, vec![1, 2, 3]));
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
@@ -599,11 +620,11 @@ fn test_admitted_owned_bytes_return_worker_result() {
 fn test_shared_worker_classification_covers_success_and_panic() {
     let (result, outcome) = execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
     assert!(matches!(result, Ok(Some(value)) if value == "text/plain"));
-    assert_eq!(outcome, ChildBusinessOutcome::Succeeded);
+    assert_eq!(outcome, ChildOutcomeKind::Succeeded);
 
     let (result, outcome): (qubit_mime::MimeResult<()>, _) = execute_classified(|| panic!("engine panic"));
     assert!(result.is_err());
-    assert_eq!(outcome, ChildBusinessOutcome::Panicked);
+    assert_eq!(outcome, ChildOutcomeKind::Panicked);
 }
 
 #[test]
@@ -611,12 +632,12 @@ fn test_unmanaged_detection_enforces_limit_and_shutdown_joins_worker() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     assert!(ManagedInferenceRuntime::new(supervisor.clone(), 0).is_err());
 
-    let runtime = ManagedInferenceRuntime::with_engine(
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         8,
         Box::new(|bytes| Ok(Some(format!("application/x-{}", bytes.len())))),
         Box::new(|| {}),
-    );
+    ));
     assert!(format!("{runtime:?}").contains("ManagedInferenceRuntime"));
     assert_eq!(runtime.max_in_flight_bytes(), 8);
     assert!(matches!(
@@ -629,7 +650,7 @@ fn test_unmanaged_detection_enforces_limit_and_shutdown_joins_worker() {
     );
 
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
-    assert!(report.admission.is_complete());
+    assert!(report.admission.snapshot.active_operations == 0);
     assert!(report.worker_stopped);
     assert!(!report.worker_panicked);
 }
@@ -708,7 +729,7 @@ fn test_shutdown_recovers_poisoned_runtime_mutexes() {
     .join();
 
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
-    assert!(report.admission.is_complete());
+    assert!(report.admission.snapshot.active_operations == 0);
     assert!(report.worker_stopped);
 }
 

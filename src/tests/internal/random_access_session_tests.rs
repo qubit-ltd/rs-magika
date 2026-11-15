@@ -60,7 +60,8 @@ use qubit_fs::spi::StatResponse;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
 use qubit_operation::ManagerOptions;
-use qubit_operation::scope::ScopeOptions;
+use qubit_operation::GroupOptions;
+use qubit_operation::OperationOptions;
 use qubit_operation::OperationManager;
 
 const ID: &str = "magika-session-adapter-test";
@@ -376,7 +377,7 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
 #[test]
 fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(GroupOptions { capacity: 2 }).unwrap();
     let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2));
     let expected = b"sample".to_vec();
     let engine = Box::new(move |bytes: Vec<u8>| {
@@ -400,7 +401,7 @@ fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live
     let body_detector = Arc::clone(&detector);
     let body_heartbeats = Arc::clone(&heartbeats);
     let mut handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
             let path = Path::parse("/bridge/sample").unwrap();
             let mut detection =
@@ -417,7 +418,7 @@ fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live
         })
         .unwrap();
     assert!(matches!(
-        handle.result_blocking().unwrap(),
+        block_on(handle.wait_outcome()).unwrap(),
         qubit_operation::OperationOutcome::Succeeded(())
     ));
     assert!(heartbeats.load(Ordering::SeqCst) > 1);
@@ -482,7 +483,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
 #[test]
 fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_completion() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let service = supervisor.service_group(1).unwrap();
+    let service = supervisor.group(GroupOptions { capacity: 2 }).unwrap();
     let provider_gate = Arc::new(TestAsyncReadGate::new());
     let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2)).with_async_read_gate(Arc::clone(&provider_gate));
     let (worker_held_tx, worker_held_rx) = std::sync::mpsc::channel();
@@ -512,7 +513,7 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
     let body_detector = Arc::clone(&detector);
     let body_gate = Arc::clone(&provider_gate);
     let mut handle = service
-        .start(ScopeOptions::default(), move |scope| async move {
+        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
             let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
             let path = Path::parse("/bridge/cancel").unwrap();
             let mut detection = Some(Box::pin(body_detector.detect_async_provider_path_managed(
@@ -540,7 +541,7 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
         .unwrap();
 
     worker_held_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-    let _terminal = handle.result_blocking().unwrap();
+    let _terminal = block_on(handle.wait_outcome()).unwrap();
     let (lock, ready) = &*release_gate;
     *lock.lock().unwrap() = true;
     ready.notify_all();
@@ -548,7 +549,7 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
         qubit_operation::ShutdownMode::Cancel,
         Duration::from_millis(50),
     );
-    assert!(!report.admission.is_complete());
+    assert!(report.admission.snapshot.service_resources != 0);
     assert!(!report.worker_stopped);
 }
 

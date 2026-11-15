@@ -69,6 +69,19 @@ impl InferenceFuture {
                 .unwrap_or_else(|error| error.into_inner());
         }
     }
+
+    /// Waits for the business result and then for the worker to release the
+    /// admitted input. Synchronous detector paths preserve their legacy
+    /// guarantee that returning the result also releases caller-owned capacity.
+    pub(super) fn wait_blocking_settled(self) -> MimeResult<Option<String>> {
+        let state = Arc::clone(&self.state);
+        let result = self.wait_blocking();
+        let mut inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
+        while !inner.released {
+            inner = state.released.wait(inner).unwrap_or_else(|error| error.into_inner());
+        }
+        result
+    }
 }
 
 impl Future for InferenceFuture {
@@ -121,30 +134,26 @@ mod tests {
     use std::task::Waker;
     use std::time::Duration;
 
-    use qubit_operation::protocol::ManagedOperationControl;
     use qubit_operation::ChildOutcomeKind;
-    use qubit_operation::OperationId;
 
     use super::InferenceFuture;
-    use crate::managed_runtime::task_control::TaskControl;
     use crate::managed_runtime::task_state::TaskState;
 
     #[test]
     fn test_future_registers_until_result_is_published() {
-        let state = Arc::new(TaskState::new(OperationId::new(99), None));
+        let state = Arc::new(TaskState::new(99, None));
         let poisoned_state = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
             let _guard = poisoned_state.inner.lock().unwrap();
             panic!("poison task result lock before future polling");
         })
         .join();
-        let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
-        let mut future = Box::pin(InferenceFuture::new(Arc::clone(&state), control));
+        let mut future = Box::pin(InferenceFuture::new(Arc::clone(&state)));
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
 
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
-        state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
         assert!(matches!(
             future.as_mut().poll(&mut context),
             Poll::Ready(Ok(Some(mime))) if mime == "text/plain"
@@ -154,14 +163,14 @@ mod tests {
     #[test]
     fn test_blocking_wait_observes_result_published_after_wait_begins() {
         for (operation_id, result, business) in [
-            (102, Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded),
+            (102, Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded),
             (
                 103,
                 Err(qubit_mime::MimeError::detector_backend("test", "failed")),
-                ChildBusinessOutcome::Failed,
+                ChildOutcomeKind::Failed,
             ),
         ] {
-            let state = Arc::new(TaskState::new(OperationId::new(operation_id), None));
+            let state = Arc::new(TaskState::new(operation_id, None));
             let (started, observed, worker_done, released, released_pending, waiter_panicked) =
                 std::thread::scope(|scope| {
                     struct CompleteOnDrop(Arc<TaskState>);
@@ -172,7 +181,7 @@ mod tests {
                             // otherwise missing result during cleanup.
                             self.0.finish_business(
                                 Err(qubit_mime::MimeError::detector_backend("test", "waiter cleanup")),
-                                ChildBusinessOutcome::Failed,
+                                ChildOutcomeKind::Failed,
                             );
                             self.0.mark_worker_done();
                             self.0.mark_released();
@@ -180,10 +189,9 @@ mod tests {
                     }
 
                     let completion = CompleteOnDrop(Arc::clone(&state));
-                    let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
                     let (started_tx, started_rx) = mpsc::channel();
                     let (result_tx, result_rx) = mpsc::channel();
-                    let mut future = InferenceFuture::new(Arc::clone(&state), control);
+                    let mut future = InferenceFuture::new(Arc::clone(&state));
                     future.wait_started = Some(started_tx);
                     let waiter = scope.spawn(move || {
                         let _ = result_tx.send(future.wait_blocking());
@@ -200,12 +208,7 @@ mod tests {
                         let inner = state.inner.lock().unwrap();
                         (inner.worker_done, inner.released)
                     };
-                    let waker = Waker::noop();
-                    let mut context = Context::from_waker(waker);
-                    let released_pending = matches!(
-                        TaskControl(Arc::clone(&state)).poll_released(&mut context),
-                        Poll::Pending
-                    );
+                    let released_pending = !state.inner.lock().unwrap().released;
                     drop(completion);
                     let waiter_panicked = waiter.join().is_err();
                     (
@@ -235,33 +238,29 @@ mod tests {
                     "MIME detector backend 'test' failed: failed"
                 ),
             }
-            let waker = Waker::noop();
-            let mut context = Context::from_waker(waker);
-            assert!(matches!(TaskControl(state).poll_released(&mut context), Poll::Ready(_)));
+            assert!(state.inner.lock().unwrap().released);
         }
     }
 
     #[test]
     fn test_dropping_pending_future_requests_cooperative_stop() {
-        let state = Arc::new(TaskState::new(OperationId::new(100), None));
-        let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
-        let future = InferenceFuture::new(Arc::clone(&state), control);
+        let state = Arc::new(TaskState::new(100, None));
+        let future = InferenceFuture::new(Arc::clone(&state));
         drop(future);
         assert!(state.stop_requested());
     }
 
     #[test]
     fn test_blocking_wait_recovers_a_poisoned_result_lock() {
-        let state = Arc::new(TaskState::new(OperationId::new(101), None));
+        let state = Arc::new(TaskState::new(101, None));
         let poisoned_state = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
             let _guard = poisoned_state.inner.lock().unwrap();
             panic!("poison task result lock before blocking wait");
         })
         .join();
-        state.finish_business(Ok(None), ChildBusinessOutcome::Succeeded);
-        let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
-        let future = InferenceFuture::new(state, control);
+        state.finish_business(Ok(None), ChildOutcomeKind::Succeeded);
+        let future = InferenceFuture::new(state);
         assert!(matches!(future.wait_blocking(), Ok(None)));
     }
 }

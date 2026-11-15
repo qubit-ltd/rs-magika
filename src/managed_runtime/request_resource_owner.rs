@@ -8,6 +8,7 @@
 //! Aggregate release of runtime and byte reservations.
 
 use qubit_operation::ResourceRef;
+use super::service_permit::ServicePermit;
 
 use super::byte_permit::BytePermit;
 use super::task_state::TaskState;
@@ -20,7 +21,7 @@ pub(super) struct RequestResourceOwner {
     /// Weak task state notified on aggregate release.
     state: std::sync::Weak<TaskState>,
     /// Runtime and byte permits retained until both participants finish.
-    resources: std::sync::Mutex<Option<(ResourceRef<()>, BytePermit, Vec<ResourceRef<()>>)>>,
+    resources: std::sync::Mutex<Option<(ServicePermit, BytePermit, Vec<ResourceRef<()>>)>>,
     /// Driver completion, worker completion, and release publication.
     facts: std::sync::Mutex<(bool, bool, bool)>,
 }
@@ -36,7 +37,7 @@ impl RequestResourceOwner {
     /// * `driver_required` - Whether provider sampling must also finish.
     pub(super) fn new(
         state: std::sync::Weak<TaskState>,
-        service: ResourceRef<()>,
+        service: ServicePermit,
         bytes: BytePermit,
         scope_resources: Vec<ResourceRef<()>>,
         driver_required: bool,
@@ -93,22 +94,21 @@ impl RequestResourceOwner {
 mod tests {
     use std::sync::Arc;
 
-    use qubit_operation::OperationId;
-    use qubit_operation::ManagerOptions;
-    use qubit_operation::OperationManager;
-
     use super::RequestResourceOwner;
     use crate::managed_runtime::byte_budget::ByteBudget;
     use crate::managed_runtime::task_state::TaskState;
 
     #[test]
     fn test_resource_completion_recovers_poisoned_fact_and_permit_locks() {
-        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-        let service = supervisor.service_group(1).unwrap().try_admit().unwrap();
+        let service = super::super::service_permit::ServicePermit::try_acquire(
+            &Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            1,
+        )
+        .unwrap();
         let budget = Arc::new(ByteBudget::new(4));
         let permit = budget.try_acquire(4).unwrap();
-        let state = Arc::new(TaskState::new(OperationId::new(14), None));
-        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, None, true));
+        let state = Arc::new(TaskState::new(14, None));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, Vec::new(), true));
 
         let poisoned_facts = Arc::clone(&owner);
         assert!(
