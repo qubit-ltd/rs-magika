@@ -583,6 +583,72 @@ fn test_managed_bytes_respects_detector_limit() {
 }
 
 #[test]
+fn test_content_limit_contract_rejects_owned_async_and_managed_bytes() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let limit = MimeConfig::default().max_buffer_size();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine_calls = Arc::clone(&calls);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        limit.saturating_mul(2),
+        Box::new(move |_bytes| {
+            engine_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("text/plain".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = Arc::new(
+        crate::MagikaMimeDetector::builder()
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .unwrap(),
+    );
+    let oversized = vec![0; limit + 1];
+    let error = block_on_content(MimeDetectorBackend::guess_from_content_async(
+        &*detector,
+        &oversized,
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        qubit_mime::MimeError::BufferLimitExceeded { requested, limit: actual }
+            if requested == limit + 1 && actual == limit
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(block_on_content(MimeDetectorBackend::guess_from_content_async(
+        &*detector,
+        &vec![0; limit],
+    ))
+    .is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let service = supervisor.service_group(1).unwrap();
+    let request_detector = Arc::clone(&detector);
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let error = request_detector
+                .detect_bytes_managed(&scope, oversized)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                qubit_mime::MimeError::BufferLimitExceeded { requested, limit: actual }
+                    if requested == limit + 1 && actual == limit
+            ));
+            Ok::<(), qubit_mime::MimeError>(())
+        })
+        .unwrap();
+    assert!(matches!(
+        handle.result_blocking().unwrap(),
+        qubit_operation::report::OperationOutcome::Succeeded(())
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(runtime
+        .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+        .worker_stopped);
+}
+
+#[test]
 fn test_async_content_yields_while_worker_is_gated() {
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());
     let gate = Arc::new((Mutex::new(false), Condvar::new()));

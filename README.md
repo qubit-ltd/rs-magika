@@ -121,16 +121,22 @@ embedded Magika model and ONNX Runtime session. Build it during application
 startup, create it once, and share it (for example with `Arc`). Inference calls
 on its shared runtime are serialized internally.
 
-Synchronous content, reader, and local-file calls sample on the caller thread;
-model work runs on the worker and the call waits for its result. A matching
-repository rule may return without model work. The `MimeDetectorBackend`
-`guess_from_content_async` hook checks the detector's content limit when first
-polled, reserves the shared runtime's request and byte capacity, then copies
-accepted input for worker sampling and inference. Its future waits asynchronously
-and has no parent operation scope. Managed byte and provider methods add an
-explicit scope. Each detector enforces its own request limit, while detectors
-sharing a runtime also share its aggregate budget and shutdown boundary; calling
-shutdown on any of them closes that shared runtime.
+Synchronous borrowed content, reader, and local-file calls sample on the caller
+thread; model work runs on the worker and the call waits for its result. A
+matching repository rule may return without model work. Borrowed sync content
+is sampled without rejecting it solely because its logical length exceeds
+`MimeConfig::max_buffer_size()`. The `MimeDetectorBackend`
+`guess_from_content_async` hook checks the detector's per-request owned-payload
+limit when first polled, reserves the shared runtime's request and aggregate
+owned-payload byte capacity, then copies accepted input for worker sampling and
+inference. Its future waits asynchronously and has no parent operation scope.
+`detect_bytes_managed` applies the same per-request and runtime aggregate
+budgets while tracking its explicit scope. Provider `max_bytes` limits
+cumulative logical sample and fallback-read bytes. These logical budgets,
+sampled lengths, and copied payload bytes do not guarantee a total process
+memory bound; provider buffers and transient allocations may add memory. After
+shutdown, ruled sync inputs can still return directly without using the closed
+worker; requests requiring model inference fail through the closed runtime.
 
 ### Media refinement support
 

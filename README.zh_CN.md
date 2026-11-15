@@ -107,13 +107,16 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 构造 detector 时会同步等待 worker 初始化内嵌 Magika 模型和 ONNX Runtime Session。
 应用应在启动阶段构造一次并共享（例如使用 `Arc`）；共享 runtime 上的推理调用会在内部串行执行。
 
-同步内容、reader 和本地文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待。
-匹配的仓库规则可以直接返回。`MimeDetectorBackend` 的
-`guess_from_content_async` hook 在首次轮询时检查 detector 内容上限，再预留共享 runtime
-请求及字节容量，然后复制已受理的输入，由 worker 采样和推理。该 future 异步等待结果，且
-没有 parent operation scope。managed bytes 和 provider 方法额外绑定显式 scope。每个
-detector 执行自身的单请求上限；共享 runtime 的 detector 共用聚合预算和关闭边界，任一
-detector 调用 shutdown 都会关闭该共享 runtime。
+同步借用内容、reader 和本地文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待。
+匹配的仓库规则可以直接返回。借用同步内容不会仅因逻辑长度超过
+`MimeConfig::max_buffer_size()` 而拒绝。`MimeDetectorBackend` 的
+`guess_from_content_async` hook 在首次轮询时检查 detector 的单请求 owned payload 上限，再预留
+共享 runtime 的请求容量和聚合 owned payload 字节预算，然后复制已受理的输入，由 worker 采样和推理。
+该 future 异步等待结果，且没有 parent operation scope。`detect_bytes_managed` 在追踪显式 scope
+时执行相同的单请求和 runtime 聚合预算。Provider 的 `max_bytes` 限制累计逻辑采样和回退读取字节。
+这些逻辑预算、采样长度和复制的 payload 字节都不保证是总进程内存上限；Provider 缓冲区和临时分配
+可能增加内存。关闭 runtime 后，规则分类的同步输入仍可直接返回而不使用已关闭 worker；需要模型推理
+的请求则会经由已关闭 runtime 返回错误。
 
 ### Media refinement 支持范围
 

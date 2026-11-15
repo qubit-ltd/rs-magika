@@ -259,24 +259,31 @@ detect overflow and reject oversized resources. Unknown and undefined Magika
 types become `Ok(None)` so filename fallback follows the selected
 `MimeDetectionPolicy`.
 One worker owns the Magika session and serializes worker sampling and inference.
-Synchronous content, reader, and local-file entry points sample on the caller
-thread, then wait synchronously when model work is needed; repository rules can
-return without model work. Async provider routes cooperate with the worker
-through a capacity-one range bridge; provider reads are awaited by the calling
-future. The legacy `guess_from_content_async` hook checks the detector limit
-when first polled, reserves runtime request and byte capacity before copying
-the input, and runs sampling and inference on the worker. It waits
-asynchronously and has no parent scope. Managed byte and provider methods add
-an explicit scope. Each detector enforces its own request limit; detectors
-sharing a runtime also share its aggregate budget and shutdown boundary. Calling
-shutdown through any such detector closes the shared runtime.
+Synchronous borrowed content, reader, and local-file entry points sample on the
+caller thread, then wait synchronously when model work is needed; repository
+rules can return without model work. Borrowed content is not rejected solely
+because its logical length exceeds `MimeConfig::max_buffer_size()`. Async
+provider routes cooperate with the worker through a capacity-one range bridge;
+provider reads are awaited by the calling future. The legacy
+`guess_from_content_async` hook checks the detector's per-request owned-payload
+limit when first polled, reserves runtime request capacity and aggregate
+owned-payload byte capacity before copying the input, and runs sampling and
+inference on the worker. It waits asynchronously and has no parent scope.
+`detect_bytes_managed` applies the same per-request and shared runtime budgets
+while tracking its explicit scope. Provider `max_bytes` is a cumulative logical
+sampling and fallback-read budget. These logical budgets and copied payload
+lengths do not cap total process memory, including provider buffers and
+transient allocations. After shutdown, ruled sync inputs can still return
+directly; requests needing model inference use the closed runtime and fail.
 
 The async content hook returns the backend's raw Magika candidate list, like
 the synchronous content hook. It does not apply high-level MIME selection or
-media refinement. Once accepted, it accounts for the input against the shared
-runtime budget even when a repository rule could determine the result without
-model inference. Closed, full, over-budget, or oversized requests may therefore
-fail asynchronously instead of returning a rule result directly.
+media refinement. Once accepted, it accounts for the owned input against the
+shared runtime aggregate byte budget even when a repository rule could
+determine the result without model inference. Closed, full, over-budget, or
+oversized requests may therefore fail asynchronously instead of returning a
+rule result directly. Neither this aggregate payload accounting nor provider
+sampling accounting is a total process-memory limit.
 
 ## Migration Guide
 

@@ -227,19 +227,21 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 附带相同的条件 ETag；没有该条件就不能保证多段期间内容一致。`max_bytes` 是所有采样读取的
 累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
-一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。同步内容、reader 和本地
+一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。同步借用内容、reader 和本地
 文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待，仓库规则命中时可以直接返回。
-异步 Provider route 通过容量为 1 的范围读取 bridge 与 worker 协作：调用方 future 异步读取
-Provider。旧 `guess_from_content_async` hook 在首次轮询时检查 detector 上限，先预留 runtime
-请求和字节容量，再复制输入，由 worker 采样和推理；future 异步等待结果，且没有 parent scope。
-managed bytes 和 provider API 会把工作附加到显式 operation scope。每个 detector 执行自身的
-请求上限；共用 runtime 的 detector 也共用聚合预算和关闭边界，任一 detector 调用 shutdown
-都会关闭该共享 runtime。
+借用内容不会仅因逻辑长度超过 `MimeConfig::max_buffer_size()` 而拒绝。异步 Provider route
+通过容量为 1 的范围读取 bridge 与 worker 协作：调用方 future 异步读取 Provider。旧
+`guess_from_content_async` hook 在首次轮询时检查 detector 的单请求 owned payload 上限，先预留
+runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由 worker 采样和推理；future
+异步等待结果，且没有 parent scope。`detect_bytes_managed` 在追踪显式 scope 时执行相同的单请求
+和共享 runtime 预算。Provider `max_bytes` 是累计逻辑采样和回退读取预算。这些逻辑预算和复制的
+payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
+分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
 
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
-选择或媒体细化。输入受理后会计入共享 runtime 预算；即使仓库规则原本可以直接决定结果，也会
-统一经过受理。因此 runtime 关闭、容量或预算不足、内容超限都可能产生异步错误，而不是直接
-返回规则结果。
+选择或媒体细化。输入受理后会按 owned payload 计入共享 runtime 聚合字节预算；即使仓库规则原本
+可以直接决定结果，也会统一经过受理。因此 runtime 关闭、容量或预算不足、内容超限都可能产生异步
+错误，而不是直接返回规则结果。该聚合 payload 记账和 Provider 采样记账都不是总进程内存上限。
 
 ## 迁移指南
 

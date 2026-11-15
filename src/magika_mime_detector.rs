@@ -144,8 +144,9 @@ impl MagikaMimeDetector {
     /// # Errors
     ///
     /// Returns [`MimeError::BufferLimitExceeded`] when `content` exceeds this
-    /// detector's configured maximum, or an admission, runtime budget,
-    /// Magika, or worker error.
+    /// detector's per-request owned-payload maximum, or an admission, shared
+    /// runtime aggregate byte budget, Magika, or worker error. These logical
+    /// payload budgets do not guarantee a total process-memory limit.
     pub async fn detect_bytes_managed(&self, scope: &OperationScope, content: Vec<u8>) -> MimeResult<Option<String>> {
         let limit = self.max_test_bytes();
         if content.len() > limit {
@@ -182,7 +183,10 @@ impl MagikaMimeDetector {
     /// * `scope` - Parent operation scope for cancellation and settlement.
     /// * `file_system` - Async provider serving bounded range reads.
     /// * `path` - Provider path used to open or read the resource.
-    /// * `max_bytes` - Cumulative sample and fallback read limit.
+    /// * `max_bytes` - Cumulative logical sampling and fallback-read budget.
+    ///   It is checked against this detector's request limit and the shared
+    ///   runtime aggregate budget; it does not cap total process memory or
+    ///   provider-owned buffering.
     ///
     /// # Returns
     ///
@@ -318,7 +322,10 @@ impl MagikaMimeDetector {
 
     /// Gets content candidates from a Magika-compatible synchronous input.
     ///
-    /// `I` is any input implementing [`SyncInput`]. Sampling and feature
+    /// `I` is any input implementing [`SyncInput`]. Borrowed synchronous
+    /// content is sampled in the calling sync path and is not rejected merely
+    /// because its logical length exceeds `MimeConfig::max_buffer_size()`;
+    /// this avoids copying the complete payload. Sampling and feature
     /// extraction run in the calling sync path; model inference is serialized
     /// by the shared worker. Rule-classified inputs do not use the session.
     ///
@@ -488,7 +495,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// The returned vector contains zero or more MIME candidates. Filename and
+    /// The returned vector contains zero or more MIME candidates. Borrowed
+    /// input is sampled without applying the owned-content length limit, so
+    /// the input's logical length is not a process-memory bound. Filename and
     /// policy selection are handled by the higher-level detector API.
     ///
     /// # Errors
@@ -503,7 +512,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// worker performs feature sampling and inference, so polling this future
     /// does not wait for model execution. Unlike managed APIs, this legacy
     /// hook has no parent operation scope. It uses both this detector's
-    /// per-request limit and the shared runtime's aggregate byte budget.
+    /// per-request owned-payload limit and the shared runtime's aggregate
+    /// owned-payload byte budget. These logical byte budgets do not bound all
+    /// process memory, provider buffers, or transient allocations.
     ///
     /// # Parameters
     ///
@@ -977,6 +988,19 @@ mod tests {
                 .guess_from_content(b"#!/usr/bin/env python3\nprint('ok')\n")
                 .expect("content should classify")
         );
+        let limit = detector.max_buffer_size();
+        let at_limit_borrowed = vec![0; limit];
+        let oversized_borrowed = vec![0; limit + 1];
+        let at_limit_result = MimeDetector::detect_by_content(&detector, &at_limit_borrowed);
+        assert!(
+            !matches!(at_limit_result, Err(MimeError::BufferLimitExceeded { .. })),
+            "borrowed synchronous high-level content at the limit must complete"
+        );
+        let high_level_result = MimeDetector::detect_by_content(&detector, &oversized_borrowed);
+        assert!(
+            !matches!(high_level_result, Err(MimeError::BufferLimitExceeded { .. })),
+            "borrowed synchronous high-level content must not be rejected by the owned-payload limit"
+        );
         let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
         assert_eq!(
             vec!["text/x-python"],
@@ -1076,6 +1100,18 @@ mod tests {
         assert_eq!(
             content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
             detector.guess_from_magika_input(&b""[..]).unwrap()
+        );
+        assert!(detector
+            .runtime
+            .shutdown_blocking(
+                qubit_operation::supervisor::ShutdownMode::Drain,
+                std::time::Duration::from_secs(30),
+            )
+            .worker_stopped);
+        assert_eq!(
+            content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
+            detector.guess_from_magika_input(&b""[..]).unwrap(),
+            "ruled empty content remains available after runtime shutdown"
         );
     }
 
