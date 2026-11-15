@@ -1,1 +1,2 @@
-# Registry dependencies are resolved by Cargo.lock.
+# relative git root	repository URL	fixed commit SHA
+../rs-operation	https://github.com/qubit-ltd/rs-operation.git	127ef9cc0bcbcb782881048db52928a35609a3bc
