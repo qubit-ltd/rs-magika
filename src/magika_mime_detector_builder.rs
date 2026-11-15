@@ -113,6 +113,12 @@ impl MagikaMimeDetectorBuilder {
 
     /// Shares an application-managed inference runtime with this detector.
     ///
+    /// When this runtime is set, it takes precedence over any supervisor set
+    /// with [`Self::operation_supervisor`], regardless of setter order. The
+    /// runtime is reused as-is; `build` does not initialize another Magika
+    /// session for it. Its byte budget must be at least the configured MIME
+    /// buffer limit.
+    ///
     /// # Parameters
     ///
     /// * `runtime` - Runtime whose bounded worker and supervisor are shared.
@@ -127,6 +133,10 @@ impl MagikaMimeDetectorBuilder {
     }
 
     /// Uses an application-owned supervisor for the detector's managed runtime.
+    ///
+    /// This supervisor is used only when no runtime was set with
+    /// [`Self::managed_runtime`]. If both are configured, the supplied runtime
+    /// takes precedence regardless of setter order.
     ///
     /// # Parameters
     ///
@@ -146,10 +156,14 @@ impl MagikaMimeDetectorBuilder {
     /// # Returns
     ///
     /// A detector configured with the builder's MIME settings and classifier.
+    /// A supplied runtime is reused, or a new runtime and Magika session are
+    /// initialized using the supplied supervisor (or a default supervisor).
     ///
     /// # Errors
     ///
-    /// Returns an error if Magika cannot initialize its session.
+    /// Returns an error if a supplied runtime's byte budget is smaller than
+    /// the MIME buffer limit, or if a new runtime or Magika session cannot be
+    /// initialized.
     pub fn build(self) -> MimeResult<MagikaMimeDetector> {
         let max_buffer_size = self.mime_config.max_buffer_size();
         let runtime = match self.runtime {
@@ -179,13 +193,66 @@ impl MagikaMimeDetectorBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Wake;
+    use std::task::Waker;
     use std::time::Duration;
 
+    use qubit_mime::MimeConfig;
     use qubit_operation::report::SupervisorLimits;
     use qubit_operation::supervisor::OperationSupervisor;
     use qubit_operation::supervisor::ShutdownMode;
 
     use super::MagikaMimeDetectorBuilder;
+    use crate::managed_runtime::ManagedInferenceRuntime;
+
+    #[test]
+    fn test_builder_runtime_precedence() {
+        let supervisor_a = OperationSupervisor::new(SupervisorLimits::default());
+        let runtime_a = Arc::new(
+            ManagedInferenceRuntime::new(supervisor_a.clone(), MimeConfig::default().max_buffer_size())
+                .expect("runtime A should initialize"),
+        );
+        let supervisor_b = OperationSupervisor::new(SupervisorLimits::default());
+
+        let runtime_then_supervisor = MagikaMimeDetectorBuilder::default()
+            .managed_runtime(Arc::clone(&runtime_a))
+            .operation_supervisor(supervisor_b.clone())
+            .build()
+            .expect("runtime should take precedence over supervisor");
+        let supervisor_then_runtime = MagikaMimeDetectorBuilder::default()
+            .operation_supervisor(supervisor_b.clone())
+            .managed_runtime(Arc::clone(&runtime_a))
+            .build()
+            .expect("runtime should take precedence over supervisor");
+        assert!(Arc::ptr_eq(&runtime_a, &runtime_then_supervisor.runtime));
+        assert!(Arc::ptr_eq(&runtime_a, &supervisor_then_runtime.runtime));
+
+        supervisor_b.close();
+        assert!(block_on(runtime_a.detect_bytes_unmanaged(b"%PDF-1.7".to_vec())).is_ok());
+
+        assert!(
+            runtime_a
+                .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1))
+                .worker_stopped,
+            "runtime A worker should exit after shutdown"
+        );
+
+        let too_small = Arc::new(
+            ManagedInferenceRuntime::new(supervisor_a, 1).expect("nonzero runtime should initialize"),
+        );
+        let error = MagikaMimeDetectorBuilder::default()
+            .managed_runtime(too_small.clone())
+            .build()
+            .expect_err("build should preserve the configured runtime budget error");
+        assert!(error.to_string().contains("managed runtime byte budget"));
+        too_small
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+    }
 
     #[test]
     fn test_builder_debug_and_application_supervisor_configuration() {
@@ -199,5 +266,24 @@ mod tests {
                 .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1))
                 .worker_stopped
         );
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        struct ThreadWaker(std::thread::Thread);
+        impl Wake for ThreadWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut future = pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::park(),
+            }
+        }
     }
 }
