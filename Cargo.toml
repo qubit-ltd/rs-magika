@@ -41,7 +41,7 @@ qubit-fs = { version = "^0.3", default-features = false, features = ["async"] }
 
 qubit-spi = { version = "^0.14" }
 qubit-mime = "^0.21"
-qubit-operation = { path = "../rs-operation", version = "^0.1" }
+qubit-operation = { path = "../rs-operation", version = "^0.2" }
 
 [dependencies.ort]
 version = ">=2.0.0-rc.12,<2.1"

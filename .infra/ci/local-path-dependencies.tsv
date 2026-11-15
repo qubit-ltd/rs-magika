@@ -1,2 +1,2 @@
-# relative git root<TAB>repository URL<TAB>fixed commit SHA
-../rs-operation\thttps://github.com/qubit-ltd/rs-operation.git\tceba551e5fc15b6816da74118490688f4f147aa4
+# relative git root	repository URL	fixed commit SHA
+../rs-operation	https://github.com/qubit-ltd/rs-operation.git	ceba551e5fc15b6816da74118490688f4f147aa4
