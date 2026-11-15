@@ -138,7 +138,10 @@ impl TaskState {
     ///
     /// * `bridge` - Weak reference to the sampling bridge.
     pub(super) fn attach_bridge(&self, bridge: Weak<AsyncSampleBridge>) {
-        *self.bridge.lock().unwrap_or_else(|error| error.into_inner()) = Some(bridge);
+        *self
+            .bridge
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(bridge);
         if self.stop_requested()
             && let Some(bridge) = self
                 .bridge
@@ -175,7 +178,10 @@ impl TaskState {
 
     /// Records completion of the worker and wakes blocking observers.
     pub(super) fn mark_worker_done(&self) {
-        self.inner.lock().unwrap_or_else(|error| error.into_inner()).worker_done = true;
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .worker_done = true;
         self.released.notify_all();
     }
 
@@ -223,16 +229,25 @@ impl TaskState {
 
     /// Records that the inference worker has begun this job.
     pub(super) fn mark_started(&self) {
-        self.inner.lock().unwrap_or_else(|error| error.into_inner()).started = true;
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .started = true;
     }
 
-    /// Stores the business result and wakes result observers.
+    /// Stores the business result and wakes synchronous and asynchronous result
+    /// observers. This notification does not mark worker completion or resource
+    /// release; those lifecycle transitions remain independent.
     ///
     /// # Parameters
     ///
     /// * `result` - MIME inference result produced by the worker.
     /// * `business` - Worker outcome corresponding to the stored result.
-    pub(super) fn finish_business(&self, result: MimeResult<Option<String>>, business: ChildBusinessOutcome) {
+    pub(super) fn finish_business(
+        &self,
+        result: MimeResult<Option<String>>,
+        business: ChildBusinessOutcome,
+    ) {
         let wakers = {
             let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
             if inner.business.is_none() {
@@ -241,6 +256,7 @@ impl TaskState {
             }
             std::mem::take(&mut inner.wakers)
         };
+        self.released.notify_all();
         wake_all(wakers);
     }
 
@@ -253,7 +269,10 @@ impl TaskState {
         };
         wake_all(wakers);
         self.released.notify_all();
-        self.owner.lock().unwrap_or_else(|error| error.into_inner()).take();
+        self.owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         if let Some(active_tasks) = self.active_tasks.as_ref().and_then(Weak::upgrade) {
             active_tasks
                 .lock()
@@ -299,7 +318,10 @@ mod tests {
         state.mark_started();
         state.finish_business(Ok(None), ChildBusinessOutcome::Stopped);
         state.mark_released();
-        let inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         assert!(inner.started);
         assert!(inner.released);
         assert!(inner.business.is_some());
@@ -335,7 +357,12 @@ mod tests {
 
         state.mark_released();
 
-        assert!(tasks.lock().unwrap_or_else(|error| error.into_inner()).is_empty());
+        assert!(
+            tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
         assert!(state.inner.lock().unwrap().released);
     }
 
@@ -343,7 +370,12 @@ mod tests {
     fn test_provider_start_rejects_closed_gate_and_expired_gate() {
         let gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
         gate.lock().unwrap().cancelling = true;
-        let state = TaskState::new_registered(OperationId::new(10), None, None, Some(Arc::downgrade(&gate)));
+        let state = TaskState::new_registered(
+            OperationId::new(10),
+            None,
+            None,
+            Some(Arc::downgrade(&gate)),
+        );
         assert!(!state.try_start_provider_operation());
 
         let poisoned_gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
@@ -356,7 +388,12 @@ mod tests {
             .join()
             .is_err()
         );
-        let state = TaskState::new_registered(OperationId::new(15), None, None, Some(Arc::downgrade(&poisoned_gate)));
+        let state = TaskState::new_registered(
+            OperationId::new(15),
+            None,
+            None,
+            Some(Arc::downgrade(&poisoned_gate)),
+        );
         assert!(state.try_start_provider_operation());
 
         let expired = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
@@ -476,13 +513,21 @@ mod tests {
         state.mark_released();
 
         assert!(state.inner.lock().unwrap().released);
-        assert!(tasks.lock().unwrap_or_else(|error| error.into_inner()).is_empty());
+        assert!(
+            tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
     }
 
     #[test]
     fn test_business_terminal_fact_is_write_once() {
         let state = TaskState::new(OperationId::new(5), None);
-        state.finish_business(Ok(Some("first".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(
+            Ok(Some("first".to_owned())),
+            ChildBusinessOutcome::Succeeded,
+        );
         state.finish_business(
             Err(qubit_mime::MimeError::detector_backend("test", "later")),
             ChildBusinessOutcome::Failed,
@@ -514,7 +559,10 @@ mod tests {
     fn test_result_winning_stop_race_keeps_matching_business_outcome() {
         let state = TaskState::new(OperationId::new(7), None);
         state.request_stop();
-        state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(
+            Ok(Some("text/plain".to_owned())),
+            ChildBusinessOutcome::Succeeded,
+        );
 
         let inner = state.inner.lock().unwrap();
         assert_eq!(inner.business, Some(ChildBusinessOutcome::Succeeded));

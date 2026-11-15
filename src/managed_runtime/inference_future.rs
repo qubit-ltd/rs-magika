@@ -10,6 +10,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::mpsc::Sender;
 use std::task::Context;
 use std::task::Poll;
 
@@ -28,6 +30,9 @@ pub(super) struct InferenceFuture {
     control: Arc<dyn ManagedOperationControl>,
     /// Whether this future has already returned its business result.
     completed: bool,
+    /// Test handshake sent after the blocking waiter owns the state lock.
+    #[cfg(test)]
+    wait_started: Option<Sender<()>>,
 }
 
 impl InferenceFuture {
@@ -42,16 +47,27 @@ impl InferenceFuture {
             state,
             control,
             completed: false,
+            #[cfg(test)]
+            wait_started: None,
         }
     }
 
-    /// Waits synchronously for the result while preserving the same state path.
+    /// Waits synchronously until the business result is published. This result
+    /// notification is independent of worker completion and resource release.
     ///
     /// # Returns
     ///
     /// The MIME inference result produced by the worker.
     pub(super) fn wait_blocking(mut self) -> MimeResult<Option<String>> {
-        let mut inner = self.state.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self
+            .state
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        #[cfg(test)]
+        if let Some(wait_started) = self.wait_started.take() {
+            let _ = wait_started.send(());
+        }
         loop {
             if let Some(result) = inner.result.take() {
                 self.completed = true;
@@ -82,7 +98,11 @@ impl Future for InferenceFuture {
     /// `Ready` with the result, or `Pending` until worker completion.
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let result = {
-            let mut inner = self.state.inner.lock().unwrap_or_else(|error| error.into_inner());
+            let mut inner = self
+                .state
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let result = inner.result.take();
             if result.is_none() {
                 register_waker(&mut inner.wakers, cx.waker());
@@ -110,9 +130,11 @@ impl Drop for InferenceFuture {
 mod tests {
     use std::future::Future;
     use std::sync::Arc;
+    use std::sync::mpsc;
     use std::task::Context;
     use std::task::Poll;
     use std::task::Waker;
+    use std::time::Duration;
 
     use qubit_operation::protocol::ManagedOperationControl;
     use qubit_operation::report::ChildBusinessOutcome;
@@ -137,7 +159,10 @@ mod tests {
         let mut context = Context::from_waker(waker);
 
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
-        state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(
+            Ok(Some("text/plain".to_owned())),
+            ChildBusinessOutcome::Succeeded,
+        );
         assert!(matches!(
             future.as_mut().poll(&mut context),
             Poll::Ready(Ok(Some(mime))) if mime == "text/plain"
@@ -146,17 +171,58 @@ mod tests {
 
     #[test]
     fn test_blocking_wait_observes_result_published_after_wait_begins() {
-        let state = Arc::new(TaskState::new(OperationId::new(102), None));
-        let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
-        let future = InferenceFuture::new(Arc::clone(&state), control);
-        let worker_state = Arc::clone(&state);
-        let worker = std::thread::spawn(move || {
-            worker_state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
-            worker_state.mark_released();
-        });
+        for (operation_id, result, business) in [
+            (
+                102,
+                Ok(Some("text/plain".to_owned())),
+                ChildBusinessOutcome::Succeeded,
+            ),
+            (
+                103,
+                Err(qubit_mime::MimeError::detector_backend("test", "failed")),
+                ChildBusinessOutcome::Failed,
+            ),
+        ] {
+            let state = Arc::new(TaskState::new(OperationId::new(operation_id), None));
+            let control: Arc<dyn ManagedOperationControl> =
+                Arc::new(TaskControl(Arc::clone(&state)));
+            let (started_tx, started_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            let mut future = InferenceFuture::new(Arc::clone(&state), control);
+            future.wait_started = Some(started_tx);
+            let waiter =
+                std::thread::spawn(move || result_tx.send(future.wait_blocking()).unwrap());
 
-        assert_eq!(future.wait_blocking().unwrap().as_deref(), Some("text/plain"));
-        worker.join().unwrap();
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("waiter entered Condvar wait");
+            state.finish_business(result, business);
+            let observed = result_rx.recv_timeout(Duration::from_secs(2));
+            {
+                let inner = state.inner.lock().unwrap();
+                assert!(!inner.worker_done);
+                assert!(!inner.released);
+            }
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            assert!(matches!(
+                TaskControl(Arc::clone(&state)).poll_released(&mut context),
+                Poll::Pending
+            ));
+
+            state.mark_worker_done();
+            state.mark_released();
+            waiter.join().unwrap();
+            let observed = observed.expect("result notification wakes waiter before release");
+            match operation_id {
+                102 => assert_eq!(observed.unwrap().as_deref(), Some("text/plain")),
+                _ => assert!(observed.is_err()),
+            }
+            assert!(matches!(
+                TaskControl(state).poll_released(&mut context),
+                Poll::Ready(_)
+            ));
+        }
     }
 
     #[test]
