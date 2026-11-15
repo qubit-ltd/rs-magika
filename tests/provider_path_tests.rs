@@ -230,7 +230,9 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     assert_eq!(0, managed_observations.read_bytes.load(Ordering::SeqCst));
 }
 
-fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool) -> String {
+fn assert_full_capacity_rejects_second_async_provider_route(
+    first_managed: bool,
+) -> (String, String) {
     let detector = Arc::new(
         qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
     );
@@ -320,17 +322,21 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
             .expect("scope-less capacity holder should not panic")
             .map(|(candidates, _)| candidates.into_iter().next())
     };
-    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10));
-    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10));
-    let _ = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    assert!(service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10)).is_complete());
+    assert!(supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10)).is_complete());
+    assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
 
     assert_eq!(
         Some("text/x-python".to_owned()),
         first_result.expect("first capacity holder should classify the fixture")
     );
     let second_error = second_result.expect_err("second request should be rejected by full capacity");
-    let second_error = format!("{second_error:?}");
-    assert!(second_error.contains("budget"), "unexpected admission error: {second_error}");
+    let (backend, reason) = match second_error {
+        MimeError::DetectorBackend { backend, reason } => (backend, reason),
+        other => panic!("expected a detector budget error, got {other:?}"),
+    };
+    assert_eq!("magika", backend);
+    assert_eq!("runtime in-flight byte budget is full", reason);
     assert_eq!(0, second_observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, second_observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, second_observations.random_opens.load(Ordering::SeqCst));
@@ -339,7 +345,7 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     assert!(second_observations.options.lock().unwrap().is_empty());
     assert_eq!(1, first_observations.random_opens.load(Ordering::SeqCst));
     assert!(first_observations.random_reads.load(Ordering::SeqCst) > 0);
-    second_error
+    (backend, reason)
 }
 
 #[test]
