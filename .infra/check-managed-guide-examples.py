@@ -103,17 +103,6 @@ edition = "2024"
 
 [dependencies]
 qubit-magika = {{ path = {toml_string(project_root)} }}
-qubit-fs = {{ path = {toml_string(project_root.parent / 'rs-fs')}, version = "^0.3", default-features = false, features = ["async"] }}
-qubit-mime = {{ path = {toml_string(project_root.parent / 'rs-mime')}, version = "^0.21" }}
-qubit-operation = {{ path = {toml_string(project_root.parent / 'rs-operation')}, version = "^0.1" }}
-
-[patch.crates-io]
-qubit-fs = {{ path = {toml_string(project_root.parent / 'rs-fs')} }}
-qubit-command = {{ path = {toml_string(project_root.parent / 'rs-command')} }}
-qubit-config = {{ path = {toml_string(project_root.parent / 'rs-config')} }}
-qubit-local-files = {{ path = {toml_string(project_root.parent / 'rs-local-files')} }}
-qubit-redact = {{ path = {toml_string(project_root.parent / 'rs-redact')} }}
-qubit-json = {{ path = {toml_string(project_root.parent / 'rs-json')} }}
 """
         (consumer / "Cargo.toml").write_text(manifest, encoding="utf-8")
         print(f"Compiling guide examples extracted from {', '.join(GUIDES)}")
