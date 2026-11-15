@@ -440,7 +440,8 @@ impl MagikaMimeDetector {
     /// # Errors
     ///
     /// Returns [`MimeError::Io`] for file metadata/read failures or unsupported
-    /// local file types, or [`MimeError::DetectorBackend`] when inference fails.
+    /// local file types, or [`MimeError::DetectorBackend`] when inference
+    /// fails.
     fn guess_from_magika_file(&self, file: &Path) -> MimeResult<Vec<String>> {
         let metadata = std::fs::symlink_metadata(file)?;
         let file_type = if metadata.file_type().is_symlink() {

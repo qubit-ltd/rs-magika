@@ -1,12 +1,26 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus};
-use std::time::{Duration, Instant};
+use std::process::Child;
+use std::process::Command;
+use std::process::ExitStatus;
+use std::time::Duration;
+use std::time::Instant;
 
 use qubit_magika::MagikaMimeDetector;
-use qubit_mime::{MimeDetectionPolicy, MimeDetector, MimeDetectorBackend, MimeError};
+use qubit_mime::MimeDetectionPolicy;
+use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorBackend;
+use qubit_mime::MimeError;
 use tempfile::tempdir;
 
 const FIFO_PATH: &str = "QUBIT_MAGIKA_FIFO_CHILD_PATH";
@@ -37,9 +51,7 @@ fn test_fifo_content_child() {
             .expect_err("FIFO content detection should be rejected"),
         other => panic!("unknown child mode: {other}"),
     };
-    assert!(
-        matches!(error, MimeError::Io(ref error) if error.kind() == std::io::ErrorKind::Unsupported)
-    );
+    assert!(matches!(error, MimeError::Io(ref error) if error.kind() == std::io::ErrorKind::Unsupported));
 }
 
 struct ChildGuard(Child);
@@ -65,10 +77,7 @@ impl Drop for ChildGuard {
 fn test_fifo_content_rejected_without_writer() {
     let directory = tempdir().expect("temporary directory should be created");
     let fifo = directory.path().join("content.fifo");
-    let status = Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("mkfifo should run");
+    let status = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo should run");
     assert!(status.success(), "mkfifo failed with {status}");
 
     for mode in ["backend", "high_level"] {
@@ -90,10 +99,7 @@ fn test_fifo_content_rejected_without_writer() {
         let mut init_exit = None;
         while Instant::now() < init_deadline {
             if ready.exists() {
-                assert_eq!(
-                    fs::read(&ready).expect("readiness marker should be readable"),
-                    b"ready"
-                );
+                assert_eq!(fs::read(&ready).expect("readiness marker should be readable"), b"ready");
                 ready_seen = true;
                 break;
             }
@@ -122,10 +128,7 @@ fn test_fifo_content_rejected_without_writer() {
             std::thread::sleep(Duration::from_millis(20));
         };
         assert!(!timed_out, "{mode} FIFO detection hung after readiness");
-        assert!(
-            status.expect("child should exit").success(),
-            "{mode} child should pass"
-        );
+        assert!(status.expect("child should exit").success(), "{mode} child should pass");
     }
 }
 
@@ -134,19 +137,14 @@ fn test_socket_content_is_rejected() {
     let directory = tempdir().expect("temporary directory should be created");
     let socket = directory.path().join("content.sock");
     let _listener = UnixListener::bind(&socket).expect("Unix socket should bind");
-    assert_unsupported(
-        MimeDetectorBackend::guess_from_file(crate::support::detector(), &socket).unwrap_err(),
-    );
+    assert_unsupported(MimeDetectorBackend::guess_from_file(crate::support::detector(), &socket).unwrap_err());
 }
 
 #[test]
 fn test_symlink_to_fifo_is_not_followed() {
     let directory = tempdir().expect("temporary directory should be created");
     let fifo = directory.path().join("content.fifo");
-    let status = Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("mkfifo should run");
+    let status = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo should run");
     assert!(status.success(), "mkfifo failed with {status}");
     let link = directory.path().join("content-link");
     symlink(&fifo, &link).expect("symlink should be created");
@@ -156,7 +154,5 @@ fn test_symlink_to_fifo_is_not_followed() {
 }
 
 fn assert_unsupported(error: MimeError) {
-    assert!(
-        matches!(error, MimeError::Io(ref error) if error.kind() == std::io::ErrorKind::Unsupported)
-    );
+    assert!(matches!(error, MimeError::Io(ref error) if error.kind() == std::io::ErrorKind::Unsupported));
 }
