@@ -56,6 +56,172 @@ fn large_provider(range: bool) -> ProviderFileSystemSpi {
     }
 }
 
+fn managed_provider_result(
+    detector: &'static qubit_magika::MagikaMimeDetector,
+    file_system: qubit_fs::AsyncFileSystem,
+    max_bytes: usize,
+) -> Result<Option<String>, MimeError> {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(2).unwrap();
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), max_bytes)
+                .await
+        })
+        .unwrap();
+    let outcome = handle.result_blocking().unwrap();
+    let result = match outcome {
+        qubit_operation::report::OperationOutcome::Succeeded(mime) => Ok(mime),
+        qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+        other => panic!("managed provider operation did not complete: {other:?}"),
+    };
+    assert!(handle.observer().released_blocking().unwrap().all_released);
+    assert!(service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
+    assert!(supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
+    result
+}
+
+fn assert_provider_observations_equal(
+    legacy: &crate::support::ProviderObservations,
+    managed: &crate::support::ProviderObservations,
+) {
+    assert_eq!(legacy.stats.load(Ordering::SeqCst), managed.stats.load(Ordering::SeqCst));
+    assert_eq!(legacy.opens.load(Ordering::SeqCst), managed.opens.load(Ordering::SeqCst));
+    assert_eq!(legacy.random_opens.load(Ordering::SeqCst), managed.random_opens.load(Ordering::SeqCst));
+    assert_eq!(legacy.random_reads.load(Ordering::SeqCst), managed.random_reads.load(Ordering::SeqCst));
+    assert_eq!(legacy.session_read_lengths.lock().unwrap().as_slice(), managed.session_read_lengths.lock().unwrap().as_slice());
+    assert_eq!(legacy.session_drops.load(Ordering::SeqCst), managed.session_drops.load(Ordering::SeqCst));
+    assert_eq!(legacy.read_bytes.load(Ordering::SeqCst), managed.read_bytes.load(Ordering::SeqCst));
+    let options = |observations: &crate::support::ProviderObservations| {
+        observations.options.lock().unwrap().iter().map(|options| {
+            (options.offset(), options.length(), options.if_match().map(|etag| etag.as_str().to_owned()))
+        }).collect::<Vec<_>>()
+    };
+    assert_eq!(options(legacy), options(managed));
+}
+
+fn assert_legacy_managed_provider_equivalent(
+    make_provider: impl Fn() -> ProviderFileSystemSpi,
+    max_bytes: usize,
+    expected_etag: Option<&str>,
+) {
+    let legacy_provider = make_provider();
+    let legacy_observations = legacy_provider.observations();
+    let legacy = run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+        detector(),
+        &legacy_provider.async_file_system(),
+        &path("/matrix.py"),
+        max_bytes,
+    ))
+    .map(|(candidates, _)| candidates.into_iter().next());
+
+    let managed_provider = make_provider();
+    let managed_observations = managed_provider.observations();
+    let managed = managed_provider_result(
+        detector(),
+        managed_provider.async_file_system(),
+        max_bytes,
+    );
+    let normalized = |result: Result<Option<String>, MimeError>| {
+        result.map_err(|error| format!("{error:?}"))
+    };
+    let legacy = legacy.map_err(|error| format!("{error:?}"));
+    assert_eq!(legacy, normalized(managed));
+    assert_provider_observations_equal(&legacy_observations, &managed_observations);
+    if let Some(expected_etag) = expected_etag {
+        for observations in [&legacy_observations, &managed_observations] {
+            let options = observations.options.lock().unwrap();
+            assert!(!options.is_empty());
+            assert!(options.iter().all(|options| {
+                options.if_match().is_some_and(|etag| etag.as_str() == expected_etag)
+            }));
+        }
+    }
+}
+
+#[test]
+fn test_async_provider_admitted_flow_matches_legacy_and_managed_entrances() {
+    assert_legacy_managed_provider_equivalent(
+        || ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access(),
+        8192,
+        None,
+    );
+    assert_legacy_managed_provider_equivalent(
+        || large_provider(true).with_conditional().with_max_read_range_bytes(2),
+        8192,
+        Some("v1"),
+    );
+    assert_legacy_managed_provider_equivalent(
+        || ProviderFileSystemSpi::new(PYTHON.to_vec()).without_range(),
+        8192,
+        None,
+    );
+    assert_legacy_managed_provider_equivalent(
+        || ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .random_open_error(qubit_fs::error::FsErrorKind::PermissionDenied),
+        8192,
+        None,
+    );
+    assert_legacy_managed_provider_equivalent(|| large_provider(false), 8192, None);
+    assert_legacy_managed_provider_equivalent(
+        || ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access().fail_reads(),
+        8192,
+        None,
+    );
+}
+
+#[test]
+fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
+    let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
+    assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
+
+    let legacy_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let legacy_observations = legacy_provider.observations();
+    let legacy = run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+        detector.as_ref(),
+        &legacy_provider.async_file_system(),
+        &path("/matrix.py"),
+        8192,
+    ))
+    .map(|(candidates, _)| candidates.into_iter().next());
+
+    let managed_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let managed_observations = managed_provider.observations();
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(1).unwrap();
+    let body_detector = Arc::clone(&detector);
+    let file_system = managed_provider.async_file_system();
+    let mut handle = service.start(ScopeOptions::default(), move |scope| async move {
+        let result = body_detector
+            .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), 8192)
+            .await;
+        Ok::<_, MimeError>(result)
+    }).unwrap();
+    let outcome = handle.result_blocking().unwrap();
+    let managed = match outcome {
+        qubit_operation::report::OperationOutcome::Succeeded(result) => result,
+        qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+        other => panic!("managed admission operation did not complete: {other:?}"),
+    };
+    assert!(handle.observer().released_blocking().unwrap().all_released);
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    assert_eq!(legacy.map_err(|error| format!("{error:?}")), managed.map_err(|error| format!("{error:?}")));
+    assert_provider_observations_equal(&legacy_observations, &managed_observations);
+    assert_eq!(0, legacy_observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, legacy_observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, legacy_observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, legacy_observations.random_reads.load(Ordering::SeqCst));
+    assert_eq!(0, legacy_observations.read_bytes.load(Ordering::SeqCst));
+    assert_eq!(0, managed_observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, managed_observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, managed_observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, managed_observations.random_reads.load(Ordering::SeqCst));
+    assert_eq!(0, managed_observations.read_bytes.load(Ordering::SeqCst));
+}
+
 #[test]
 fn test_managed_guide_reuses_detector_for_two_requests() {
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());

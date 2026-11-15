@@ -21,6 +21,7 @@ pub(crate) use failing_read_seek::FailingReadSeek;
 pub(crate) use provider_file_system_spi::AsyncProviderGate;
 pub(crate) use provider_file_system_spi::AsyncProviderGatePoint;
 pub(crate) use provider_file_system_spi::ProviderFileSystemSpi;
+pub(crate) use provider_file_system_spi::ProviderObservations;
 pub(crate) use real_file_case::RealFileCase;
 pub(crate) use sparse_read_seek::SparseReadSeek;
 pub(crate) use static_media_stream_classifier::StaticMediaStreamClassifier;
