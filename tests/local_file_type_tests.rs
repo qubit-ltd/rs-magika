@@ -23,7 +23,11 @@ fn test_fifo_content_child() {
         return;
     };
     let detector = MagikaMimeDetector::new().expect("detector should initialize");
-    fs::write(ready, b"ready").expect("ready marker should be written");
+    let ready = PathBuf::from(ready);
+    let mut pending_ready = ready.clone();
+    pending_ready.set_extension("ready.tmp");
+    fs::write(&pending_ready, b"ready").expect("pending ready marker should be written");
+    fs::rename(&pending_ready, &ready).expect("ready marker should be published atomically");
     let path = PathBuf::from(path);
     let error = match mode.to_str().expect("mode should be UTF-8") {
         "backend" => MimeDetectorBackend::guess_from_file(&detector, &path)
