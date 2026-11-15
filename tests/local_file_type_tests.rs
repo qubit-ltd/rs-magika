@@ -9,6 +9,7 @@
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
@@ -26,6 +27,119 @@ use tempfile::tempdir;
 const FIFO_PATH: &str = "QUBIT_MAGIKA_FIFO_CHILD_PATH";
 const READY_PATH: &str = "QUBIT_MAGIKA_FIFO_CHILD_READY";
 const MODE: &str = "QUBIT_MAGIKA_FIFO_CHILD_MODE";
+
+fn observe_ready_or_exit(
+    ready: &mut impl FnMut() -> bool,
+    child_exit: &mut impl FnMut() -> Option<ExitStatus>,
+) -> (bool, Option<ExitStatus>) {
+    if ready() {
+        return (true, None);
+    }
+    let status = child_exit();
+    if status.is_some() {
+        (ready(), status)
+    } else {
+        (false, None)
+    }
+}
+
+#[test]
+fn test_readiness_observation_exit_after_marker_check() {
+    let ready_results = [false, true];
+    let mut ready_calls = 0;
+    let mut ready = || {
+        let result = ready_results[ready_calls];
+        ready_calls += 1;
+        result
+    };
+    let mut exit_calls = 0;
+    let mut child_exit = || {
+        exit_calls += 1;
+        Some(ExitStatus::from_raw(0))
+    };
+
+    let (ready_seen, status) = observe_ready_or_exit(&mut ready, &mut child_exit);
+
+    assert!(ready_seen);
+    assert!(status.expect("exit status should be preserved").success());
+    assert_eq!(ready_calls, 2);
+    assert_eq!(exit_calls, 1);
+}
+
+#[test]
+fn test_readiness_observation_ready_without_exit_check() {
+    let mut ready_calls = 0;
+    let mut ready = || {
+        ready_calls += 1;
+        true
+    };
+    let mut child_exit = || panic!("exit should not be checked after readiness");
+
+    let (ready_seen, status) = observe_ready_or_exit(&mut ready, &mut child_exit);
+
+    assert!(ready_seen);
+    assert!(status.is_none());
+    assert_eq!(ready_calls, 1);
+}
+
+#[test]
+fn test_readiness_observation_child_still_running() {
+    let ready_results = [false];
+    let mut ready_calls = 0;
+    let mut ready = || {
+        let result = ready_results[ready_calls];
+        ready_calls += 1;
+        result
+    };
+    let mut exit_calls = 0;
+    let mut child_exit = || {
+        exit_calls += 1;
+        None
+    };
+
+    let (ready_seen, status) = observe_ready_or_exit(&mut ready, &mut child_exit);
+
+    assert!(!ready_seen);
+    assert!(status.is_none());
+    assert_eq!(ready_calls, 1);
+    assert_eq!(exit_calls, 1);
+}
+
+#[test]
+fn test_readiness_observation_exit_without_marker() {
+    let ready_results = [false, false];
+    let mut ready_calls = 0;
+    let mut ready = || {
+        let result = ready_results[ready_calls];
+        ready_calls += 1;
+        result
+    };
+    let mut child_exit = || Some(ExitStatus::from_raw(0));
+
+    let (ready_seen, status) = observe_ready_or_exit(&mut ready, &mut child_exit);
+
+    assert!(!ready_seen);
+    assert!(status.expect("exit status should be preserved").success());
+    assert_eq!(ready_calls, 2);
+}
+
+#[test]
+fn test_readiness_observation_nonzero_exit_after_marker() {
+    let ready_results = [false, true];
+    let mut ready_calls = 0;
+    let mut ready = || {
+        let result = ready_results[ready_calls];
+        ready_calls += 1;
+        result
+    };
+    let mut child_exit = || Some(ExitStatus::from_raw(1 << 8));
+
+    let (ready_seen, status) = observe_ready_or_exit(&mut ready, &mut child_exit);
+
+    assert!(ready_seen);
+    assert!(!status.expect("exit status should be preserved").success());
+    assert_eq!(ready_calls, 2);
+}
 
 #[test]
 fn test_fifo_content_child() {
@@ -98,13 +212,23 @@ fn test_fifo_content_rejected_without_writer() {
         let mut ready_seen = false;
         let mut init_exit = None;
         while Instant::now() < init_deadline {
-            if ready.exists() {
-                assert_eq!(fs::read(&ready).expect("readiness marker should be readable"), b"ready");
-                ready_seen = true;
-                break;
-            }
-            init_exit = child.try_wait().expect("child status should be available");
-            if init_exit.is_some() {
+            let (ready, exit) = observe_ready_or_exit(
+                &mut || {
+                    if ready.exists() {
+                        assert_eq!(
+                            fs::read(&ready).expect("readiness marker should be readable"),
+                            b"ready"
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                },
+                &mut || child.try_wait().expect("child status should be available"),
+            );
+            ready_seen = ready;
+            init_exit = exit;
+            if ready_seen || init_exit.is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -116,16 +240,20 @@ fn test_fifo_content_rejected_without_writer() {
 
         let content_deadline = Instant::now() + Duration::from_secs(5);
         let mut timed_out = false;
-        let status = loop {
-            if let Some(status) = child.try_wait().expect("child status should be available") {
-                break Some(status);
+        let status = if init_exit.is_some() {
+            init_exit
+        } else {
+            loop {
+                if let Some(status) = child.try_wait().expect("child status should be available") {
+                    break Some(status);
+                }
+                if Instant::now() >= content_deadline {
+                    timed_out = true;
+                    child.kill_and_wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            if Instant::now() >= content_deadline {
-                timed_out = true;
-                child.kill_and_wait();
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
         };
         assert!(!timed_out, "{mode} FIFO detection hung after readiness");
         assert!(status.expect("child should exit").success(), "{mode} child should pass");
