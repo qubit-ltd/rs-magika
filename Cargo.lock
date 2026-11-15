@@ -137,7 +137,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -585,6 +585,8 @@ dependencies = [
 [[package]]
 name = "qubit-command"
 version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e55d140ac24554304e83d82f4140ea4de1db0d05a632b51546de13b95115f79"
 dependencies = [
  "libc",
  "log",
@@ -598,6 +600,8 @@ dependencies = [
 [[package]]
 name = "qubit-config"
 version = "0.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb000f21a0058a0f714c3361e65df32df94589bb947e453bc867c7bf7cc84071"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
@@ -627,6 +631,8 @@ dependencies = [
 [[package]]
 name = "qubit-fs"
 version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9a33da41769effbc67acbe34227f81360a77107e65849aa33d17507b2f371aa"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
@@ -637,6 +643,8 @@ dependencies = [
 [[package]]
 name = "qubit-fs-local"
 version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0d3f69807608b26a4c5a0cc818be3ed688debe5e702186bf8405dd01e480f17"
 dependencies = [
  "qubit-fs",
  "qubit-io",
@@ -655,6 +663,8 @@ dependencies = [
 [[package]]
 name = "qubit-json"
 version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea8a293d7f923000f17a2ada7fc66e42b1e4eb12842f81efba2915d0da82f523"
 dependencies = [
  "qubit-budget",
  "qubit-io",
@@ -667,6 +677,8 @@ dependencies = [
 [[package]]
 name = "qubit-local-files"
 version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13bbb3eb69b794590262e4f3ef7573bc4ec3fe9924d7e46d6f51f82c2290906a"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -696,6 +708,8 @@ dependencies = [
 [[package]]
 name = "qubit-mime"
 version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49fb48bf119bbbcb854587f7d7b7b3d16d87bf85a0219a99855af2e78a8627c2"
 dependencies = [
  "blocking",
  "qubit-codec-misc",
@@ -713,11 +727,16 @@ dependencies = [
 
 [[package]]
 name = "qubit-operation"
-version = "0.1.0"
+version = "0.2.0"
+dependencies = [
+ "qubit-budget",
+]
 
 [[package]]
 name = "qubit-redact"
-version = "0.10.4"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d217d6f987adc5f32b9daa5d506e99c5a435f99b1493d5ab3ef55caf27a3c86"
 dependencies = [
  "fluent-uri",
  "qubit-budget",
@@ -871,7 +890,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1047,7 +1066,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1186,7 +1205,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
