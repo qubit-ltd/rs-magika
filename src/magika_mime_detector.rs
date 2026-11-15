@@ -209,7 +209,17 @@ impl MagikaMimeDetector {
                 limit,
             });
         }
-        let mut admission = self.runtime.reserve_for_provider(Some(scope), max_bytes)?;
+        let admission = self.runtime.reserve_for_provider(Some(scope), max_bytes)?;
+        self.detect_async_provider_admitted(admission, file_system, path, max_bytes).await
+    }
+
+    async fn detect_async_provider_admitted(
+        &self,
+        mut admission: crate::managed_runtime::request_admission::RequestAdmission,
+        file_system: &AsyncFileSystem,
+        path: &FsPath,
+        max_bytes: usize,
+    ) -> MimeResult<Option<String>> {
         admission.begin_provider_operation()?;
         let open_result = file_system
             .open_random_access_reader(path, ReadOptions::default())
@@ -706,111 +716,11 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     limit,
                 });
             }
-            let mut admission = self.runtime.reserve_for_provider(None, max_bytes)?;
-            admission.begin_provider_operation()?;
-            let open_result = file_system
-                .open_random_access_reader(path, ReadOptions::default())
-                .await;
-            admission.provider_operation_completed();
-            match open_result {
-                Ok(reader) => {
-                    let max_segment = file_system
-                        .properties()
-                        .limits()
-                        .max_read_range_bytes()
-                        .maximum()
-                        .and_then(|value| usize::try_from(value).ok());
-                    let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
-                    let candidates = guess_from_async_input(self, admission, input, max_bytes).await?;
-                    return Ok((candidates, None));
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
-                    ) => {}
-                Err(error) => return Err(error.into()),
-            }
-            admission.begin_provider_operation()?;
-            let stat_result = file_system.stat(path).await;
-            admission.provider_operation_completed();
-            let metadata = match stat_result {
-                Ok(metadata) => Some(metadata),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
-                    ) =>
-                {
-                    None
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let capabilities = file_system.properties().capabilities();
-            if let Some(metadata) = metadata.as_ref()
-                && let Some(length) = metadata.len()
-            {
-                if capabilities.supports(FileSystemCapability::RangeRead) {
-                    let version = capabilities
-                        .supports(FileSystemCapability::ConditionalRead)
-                        .then(|| metadata.etag().cloned())
-                        .flatten();
-                    let input = AsyncProviderInput::new(file_system, path, length, version, max_bytes);
-                    let candidates = guess_from_async_input(self, admission, input, max_bytes).await?;
-                    return Ok((candidates, None));
-                }
-                let requested = usize::try_from(length).unwrap_or(usize::MAX);
-                if length > max_bytes as u64 {
-                    return Err(MimeError::BufferLimitExceeded {
-                        requested,
-                        limit: max_bytes,
-                    });
-                }
-            }
-            admission.begin_provider_operation()?;
-            let read_result = file_system.read_all(path, ReadOptions::default(), max_bytes).await;
-            admission.provider_operation_completed();
-            let bytes = read_result?;
-            let candidates = self
-                .runtime
-                .detect_bytes_admitted(admission, bytes)
-                .await?
-                .into_iter()
-                .collect();
-            Ok((candidates, None))
+            let admission = self.runtime.reserve_for_provider(None, max_bytes)?;
+            let result = self.detect_async_provider_admitted(admission, file_system, path, max_bytes).await?;
+            Ok((result.into_iter().collect(), None))
         })
     }
-}
-
-/// Extracts features through asynchronous provider reads, then runs inference.
-///
-/// Feature extraction is asynchronous; model inference is delegated to the
-/// detector's session-owning worker.
-///
-/// # Parameters
-///
-/// * `detector` - Detector whose managed runtime performs model inference.
-/// * `input` - Asynchronous provider input to sample.
-///
-/// # Returns
-///
-/// Zero or one MIME type candidates.
-///
-/// # Errors
-///
-/// Returns I/O, budget, or backend errors from sampling and inference.
-async fn guess_from_async_input(
-    detector: &MagikaMimeDetector,
-    admission: crate::managed_runtime::request_admission::RequestAdmission,
-    input: AsyncProviderInput<'_>,
-    max_bytes: usize,
-) -> MimeResult<Vec<String>> {
-    Ok(detector
-        .runtime
-        .detect_async_input_admitted(admission, input, max_bytes, map_provider_magika_error)
-        .await?
-        .into_iter()
-        .collect())
 }
 
 /// Converts a Magika content type to a MIME type name.
