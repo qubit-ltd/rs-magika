@@ -180,8 +180,7 @@ mod tests {
                     }
 
                     let completion = CompleteOnDrop(Arc::clone(&state));
-                    let control: Arc<dyn ManagedOperationControl> =
-                        Arc::new(TaskControl(Arc::clone(&state)));
+                    let control: Arc<dyn ManagedOperationControl> = Arc::new(TaskControl(Arc::clone(&state)));
                     let (started_tx, started_rx) = mpsc::channel();
                     let (result_tx, result_rx) = mpsc::channel();
                     let mut future = InferenceFuture::new(Arc::clone(&state), control);
@@ -220,7 +219,10 @@ mod tests {
                 });
 
             assert!(started.is_ok(), "waiter entered Condvar wait: {started:?}");
-            assert!(observed.is_ok(), "result notification wakes waiter before release: {observed:?}");
+            assert!(
+                observed.is_ok(),
+                "result notification wakes waiter before release: {observed:?}"
+            );
             assert!(!worker_done);
             assert!(!released);
             assert!(released_pending);
