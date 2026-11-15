@@ -91,7 +91,7 @@ impl Future for InferenceFuture {
     ///
     /// # Returns
     ///
-    /// `Ready` with the result, or `Pending` until worker completion.
+    /// `Ready` with the result, or `Pending` until the result is published.
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let result = {
             let mut inner = self.state.inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -174,6 +174,16 @@ mod tests {
                     struct CompleteOnDrop(Arc<TaskState>);
                     impl Drop for CompleteOnDrop {
                         fn drop(&mut self) {
+                            // Ensure every exit path wakes a blocked waiter. Result
+                            // publication is write-once, so this only fills an
+                            // otherwise missing result during cleanup.
+                            self.0.finish_business(
+                                Err(qubit_mime::MimeError::detector_backend(
+                                    "test",
+                                    "waiter cleanup",
+                                )),
+                                ChildBusinessOutcome::Failed,
+                            );
                             self.0.mark_worker_done();
                             self.0.mark_released();
                         }
