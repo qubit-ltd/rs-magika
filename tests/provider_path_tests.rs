@@ -43,6 +43,14 @@ use crate::support::run_until;
 
 const PYTHON: &[u8] = b"#!/usr/bin/env python3\nprint('hello')\n";
 
+struct ReleaseProviderGateOnDrop(Arc<AsyncProviderGate>);
+
+impl Drop for ReleaseProviderGateOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 fn path(value: &str) -> Path {
     Path::parse(value).expect("test path should be valid")
 }
@@ -220,6 +228,128 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     assert_eq!(0, managed_observations.random_opens.load(Ordering::SeqCst));
     assert_eq!(0, managed_observations.random_reads.load(Ordering::SeqCst));
     assert_eq!(0, managed_observations.read_bytes.load(Ordering::SeqCst));
+}
+
+fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool) -> String {
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
+    );
+    let capacity = detector.max_buffer_size();
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(4).unwrap();
+    let first_gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&first_gate));
+    let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&first_gate));
+    let first_observations = first_provider.observations();
+    let first_file_system = first_provider.async_file_system();
+    let first_detector = Arc::clone(&detector);
+    let mut managed_first = None;
+    let mut legacy_first = None;
+
+    if first_managed {
+        managed_first = Some(
+            service
+                .start(ScopeOptions::default(), move |scope| async move {
+                    first_detector
+                        .detect_async_provider_path_managed(&scope, &first_file_system, &path("/capacity-first.py"), capacity)
+                        .await
+                })
+                .unwrap(),
+        );
+    } else {
+        legacy_first = Some(std::thread::spawn(move || {
+            run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+                first_detector.as_ref(),
+                &first_file_system,
+                &path("/capacity-first.py"),
+                capacity,
+            ))
+        }));
+    }
+
+    first_gate.wait_until_entered(Duration::from_secs(10));
+    let second_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let second_observations = second_provider.observations();
+    let second_file_system = second_provider.async_file_system();
+    let second_result = if first_managed {
+        let result = run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+            detector.as_ref(),
+            &second_file_system,
+            &path("/capacity-second.py"),
+            1,
+        ));
+        result.map(|(candidates, _)| candidates.into_iter().next())
+    } else {
+        let second_detector = Arc::clone(&detector);
+        let mut second = service
+            .start(ScopeOptions::default(), move |scope| async move {
+                second_detector
+                    .detect_async_provider_path_managed(&scope, &second_file_system, &path("/capacity-second.py"), 1)
+                    .await
+            })
+            .unwrap();
+        let outcome = second.result_blocking().unwrap();
+        let result = match outcome {
+            qubit_operation::report::OperationOutcome::Succeeded(mime) => Ok(mime),
+            qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+            other => panic!("managed capacity rejection did not complete: {other:?}"),
+        };
+        assert!(second.observer().released_blocking().unwrap().all_released);
+        result
+    };
+
+    // Always wake the admitted request before asserting so its driver and
+    // worker can settle and release their reserved capacity.
+    first_gate.release();
+    let first_result = if let Some(mut handle) = managed_first {
+        let outcome = handle.result_blocking().unwrap();
+        let result = match outcome {
+            qubit_operation::report::OperationOutcome::Succeeded(mime) => Ok(mime),
+            qubit_operation::report::OperationOutcome::Failed(error) => Err(error),
+            other => panic!("managed capacity holder did not complete: {other:?}"),
+        };
+        assert!(handle.observer().released_blocking().unwrap().all_released);
+        result
+    } else {
+        legacy_first
+            .take()
+            .unwrap()
+            .join()
+            .expect("scope-less capacity holder should not panic")
+            .map(|(candidates, _)| candidates.into_iter().next())
+    };
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10));
+    let _ = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+
+    assert_eq!(
+        Some("text/x-python".to_owned()),
+        first_result.expect("first capacity holder should classify the fixture")
+    );
+    let second_error = second_result.expect_err("second request should be rejected by full capacity");
+    let second_error = format!("{second_error:?}");
+    assert!(second_error.contains("budget"), "unexpected admission error: {second_error}");
+    assert_eq!(0, second_observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, second_observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, second_observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, second_observations.random_reads.load(Ordering::SeqCst));
+    assert_eq!(0, second_observations.read_bytes.load(Ordering::SeqCst));
+    assert!(second_observations.options.lock().unwrap().is_empty());
+    assert_eq!(1, first_observations.random_opens.load(Ordering::SeqCst));
+    assert!(first_observations.random_reads.load(Ordering::SeqCst) > 0);
+    second_error
+}
+
+#[test]
+fn test_async_provider_full_capacity_rejects_both_entrypoint_orders_before_io() {
+    // Cancellation is scope-specific and cannot be applied to the legacy
+    // scope-less entrance; cancelled-scope and pending-capacity behavior stay
+    // covered by their dedicated managed and scope-less tests.
+    let managed_first = assert_full_capacity_rejects_second_async_provider_route(true);
+    let legacy_first = assert_full_capacity_rejects_second_async_provider_route(false);
+    assert_eq!(managed_first, legacy_first);
 }
 
 #[test]
