@@ -258,6 +258,15 @@ consistent cross-segment snapshot. Providers without range support may probe one
 detect overflow and reject oversized resources. Unknown and undefined Magika
 types become `Ok(None)` so filename fallback follows the selected
 `MimeDetectionPolicy`.
+
+Local content detection opens regular files. Directories and symlinks keep
+Magika's existing file-type behavior; other local types such as FIFOs and Unix
+sockets return `MimeError::Io` with `ErrorKind::Unsupported`. A high-level
+`detect_file` call using `PreferFilename` can return a unique filename match
+without inspecting the path or its type. The metadata check and subsequent
+open are separate operations, so replacing a path between them is outside this
+check's protection.
+
 One worker owns the Magika session and serializes worker sampling and inference.
 For asynchronous provider paths, the worker can wait for provider reads while
 sampling; that wait can delay other requests sharing the same runtime. This is

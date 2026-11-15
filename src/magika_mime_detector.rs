@@ -431,18 +431,29 @@ impl MagikaMimeDetector {
     ///
     /// Zero or one MIME type candidates.
     ///
+    /// Only regular files are opened for content detection. Symlinks and
+    /// directories retain Magika's file-type handling; other local file types
+    /// return [`MimeError::Io`] with [`std::io::ErrorKind::Unsupported`].
+    /// Metadata inspection and opening are separate operations, so this check
+    /// does not prevent a path from being replaced between them.
+    ///
     /// # Errors
     ///
-    /// Returns [`MimeError::Io`] for file metadata/read failures, or
-    /// [`MimeError::DetectorBackend`] when inference fails.
+    /// Returns [`MimeError::Io`] for file metadata/read failures or unsupported
+    /// local file types, or [`MimeError::DetectorBackend`] when inference fails.
     fn guess_from_magika_file(&self, file: &Path) -> MimeResult<Vec<String>> {
         let metadata = std::fs::symlink_metadata(file)?;
         let file_type = if metadata.file_type().is_symlink() {
             FileType::Symlink
         } else if metadata.is_dir() {
             FileType::Directory
-        } else {
+        } else if metadata.is_file() {
             return self.guess_from_magika_input(std::fs::File::open(file)?);
+        } else {
+            return Err(MimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "local MIME content detection requires a regular file",
+            )));
         };
         Ok(file_type
             .content_type()
@@ -620,8 +631,12 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// # Errors
     ///
     /// Returns [`MimeError::Io`] when file metadata or content cannot be read,
-    /// or [`MimeError::DetectorBackend`] when Magika inference fails or the
-    /// worker inference fails.
+    /// or when the local path is neither a regular file, symlink, nor
+    /// directory. Non-regular file types return `ErrorKind::Unsupported`.
+    /// Metadata inspection and opening are separate operations, so path
+    /// replacement between them is not prevented. Returns
+    /// [`MimeError::DetectorBackend`] when inference fails or worker inference
+    /// fails.
     fn guess_from_file(&self, file: &Path) -> MimeResult<(Vec<String>, Vec<u8>)> {
         Ok((self.guess_from_magika_file(file)?, Vec::new()))
     }

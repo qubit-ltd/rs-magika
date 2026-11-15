@@ -227,6 +227,11 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 附带相同的条件 ETag；没有该条件就不能保证多段期间内容一致。`max_bytes` 是所有采样读取的
 累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
+
+本地内容检测只打开普通文件。目录和符号链接保留 Magika 现有的文件类型处理；FIFO、Unix
+socket 等其他本地类型返回 `MimeError::Io`，其 `ErrorKind` 为 `Unsupported`。高层
+`detect_file` 使用 `PreferFilename` 且文件名只有一个候选时，可能直接返回文件名结果，不检查路径或类型。
+元数据检查与后续打开是两个独立操作，因此无法防止路径在两者之间被替换。
 一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。异步 Provider path 采样时，worker
 可能等待 Provider 读取；这会延迟共享同一 runtime 的其他请求，形成共同的等待和故障域。若应用需要隔离
 延迟，可以为调用方使用独立 runtime，但每个 runtime 都会额外占用一个 Magika Session。同步借用内容、reader 和本地
