@@ -85,8 +85,16 @@ fn managed_provider_result(
         other => panic!("managed provider operation did not complete: {other:?}"),
     };
     assert!(handle.observer().released_blocking().unwrap().all_released);
-    assert!(service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
-    assert!(supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
+    assert!(
+        service
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .is_complete()
+    );
+    assert!(
+        supervisor
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .is_complete()
+    );
     result
 }
 
@@ -94,17 +102,48 @@ fn assert_provider_observations_equal(
     legacy: &crate::support::ProviderObservations,
     managed: &crate::support::ProviderObservations,
 ) {
-    assert_eq!(legacy.stats.load(Ordering::SeqCst), managed.stats.load(Ordering::SeqCst));
-    assert_eq!(legacy.opens.load(Ordering::SeqCst), managed.opens.load(Ordering::SeqCst));
-    assert_eq!(legacy.random_opens.load(Ordering::SeqCst), managed.random_opens.load(Ordering::SeqCst));
-    assert_eq!(legacy.random_reads.load(Ordering::SeqCst), managed.random_reads.load(Ordering::SeqCst));
-    assert_eq!(legacy.session_read_lengths.lock().unwrap().as_slice(), managed.session_read_lengths.lock().unwrap().as_slice());
-    assert_eq!(legacy.session_drops.load(Ordering::SeqCst), managed.session_drops.load(Ordering::SeqCst));
-    assert_eq!(legacy.read_bytes.load(Ordering::SeqCst), managed.read_bytes.load(Ordering::SeqCst));
+    assert_eq!(
+        legacy.stats.load(Ordering::SeqCst),
+        managed.stats.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        legacy.opens.load(Ordering::SeqCst),
+        managed.opens.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        legacy.random_opens.load(Ordering::SeqCst),
+        managed.random_opens.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        legacy.random_reads.load(Ordering::SeqCst),
+        managed.random_reads.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        legacy.session_read_lengths.lock().unwrap().as_slice(),
+        managed.session_read_lengths.lock().unwrap().as_slice()
+    );
+    assert_eq!(
+        legacy.session_drops.load(Ordering::SeqCst),
+        managed.session_drops.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        legacy.read_bytes.load(Ordering::SeqCst),
+        managed.read_bytes.load(Ordering::SeqCst)
+    );
     let options = |observations: &crate::support::ProviderObservations| {
-        observations.options.lock().unwrap().iter().map(|options| {
-            (options.offset(), options.length(), options.if_match().map(|etag| etag.as_str().to_owned()))
-        }).collect::<Vec<_>>()
+        observations
+            .options
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|options| {
+                (
+                    options.offset(),
+                    options.length(),
+                    options.if_match().map(|etag| etag.as_str().to_owned()),
+                )
+            })
+            .collect::<Vec<_>>()
     };
     assert_eq!(options(legacy), options(managed));
 }
@@ -126,14 +165,8 @@ fn assert_legacy_managed_provider_equivalent(
 
     let managed_provider = make_provider();
     let managed_observations = managed_provider.observations();
-    let managed = managed_provider_result(
-        detector(),
-        managed_provider.async_file_system(),
-        max_bytes,
-    );
-    let normalized = |result: Result<Option<String>, MimeError>| {
-        result.map_err(|error| format!("{error:?}"))
-    };
+    let managed = managed_provider_result(detector(), managed_provider.async_file_system(), max_bytes);
+    let normalized = |result: Result<Option<String>, MimeError>| result.map_err(|error| format!("{error:?}"));
     let legacy = legacy.map_err(|error| format!("{error:?}"));
     assert_eq!(legacy, normalized(managed));
     assert_provider_observations_equal(&legacy_observations, &managed_observations);
@@ -141,9 +174,11 @@ fn assert_legacy_managed_provider_equivalent(
         for observations in [&legacy_observations, &managed_observations] {
             let options = observations.options.lock().unwrap();
             assert!(!options.is_empty());
-            assert!(options.iter().all(|options| {
-                options.if_match().is_some_and(|etag| etag.as_str() == expected_etag)
-            }));
+            assert!(
+                options
+                    .iter()
+                    .all(|options| { options.if_match().is_some_and(|etag| etag.as_str() == expected_etag) })
+            );
         }
     }
 }
@@ -166,15 +201,21 @@ fn test_async_provider_admitted_flow_matches_legacy_and_managed_entrances() {
         None,
     );
     assert_legacy_managed_provider_equivalent(
-        || ProviderFileSystemSpi::new(PYTHON.to_vec())
-            .with_range()
-            .random_open_error(qubit_fs::error::FsErrorKind::PermissionDenied),
+        || {
+            ProviderFileSystemSpi::new(PYTHON.to_vec())
+                .with_range()
+                .random_open_error(qubit_fs::error::FsErrorKind::PermissionDenied)
+        },
         8192,
         None,
     );
     assert_legacy_managed_provider_equivalent(|| large_provider(false), 8192, None);
     assert_legacy_managed_provider_equivalent(
-        || ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access().fail_reads(),
+        || {
+            ProviderFileSystemSpi::new(PYTHON.to_vec())
+                .with_random_access()
+                .fail_reads()
+        },
         8192,
         None,
     );
@@ -183,7 +224,11 @@ fn test_async_provider_admitted_flow_matches_legacy_and_managed_entrances() {
 #[test]
 fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
-    assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
 
     let legacy_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let legacy_observations = legacy_provider.observations();
@@ -201,12 +246,14 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     let service = supervisor.service_group(1).unwrap();
     let body_detector = Arc::clone(&detector);
     let file_system = managed_provider.async_file_system();
-    let mut handle = service.start(ScopeOptions::default(), move |scope| async move {
-        let result = body_detector
-            .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), 8192)
-            .await;
-        Ok::<_, MimeError>(result)
-    }).unwrap();
+    let mut handle = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let result = body_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), 8192)
+                .await;
+            Ok::<_, MimeError>(result)
+        })
+        .unwrap();
     let outcome = handle.result_blocking().unwrap();
     let managed = match outcome {
         qubit_operation::report::OperationOutcome::Succeeded(result) => result,
@@ -216,7 +263,10 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     assert!(handle.observer().released_blocking().unwrap().all_released);
     let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
     let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
-    assert_eq!(legacy.map_err(|error| format!("{error:?}")), managed.map_err(|error| format!("{error:?}")));
+    assert_eq!(
+        legacy.map_err(|error| format!("{error:?}")),
+        managed.map_err(|error| format!("{error:?}"))
+    );
     assert_provider_observations_equal(&legacy_observations, &managed_observations);
     assert_eq!(0, legacy_observations.random_opens.load(Ordering::SeqCst));
     assert_eq!(0, legacy_observations.stats.load(Ordering::SeqCst));
@@ -230,12 +280,8 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     assert_eq!(0, managed_observations.read_bytes.load(Ordering::SeqCst));
 }
 
-fn assert_full_capacity_rejects_second_async_provider_route(
-    first_managed: bool,
-) -> (String, String) {
-    let detector = Arc::new(
-        qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"),
-    );
+fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool) -> (String, String) {
+    let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let capacity = detector.max_buffer_size();
     let supervisor = OperationSupervisor::new(SupervisorLimits::default());
     let service = supervisor.service_group(4).unwrap();
@@ -255,7 +301,12 @@ fn assert_full_capacity_rejects_second_async_provider_route(
             service
                 .start(ScopeOptions::default(), move |scope| async move {
                     first_detector
-                        .detect_async_provider_path_managed(&scope, &first_file_system, &path("/capacity-first.py"), capacity)
+                        .detect_async_provider_path_managed(
+                            &scope,
+                            &first_file_system,
+                            &path("/capacity-first.py"),
+                            capacity,
+                        )
                         .await
                 })
                 .unwrap(),
@@ -322,9 +373,21 @@ fn assert_full_capacity_rejects_second_async_provider_route(
             .expect("scope-less capacity holder should not panic")
             .map(|(candidates, _)| candidates.into_iter().next())
     };
-    assert!(service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10)).is_complete());
-    assert!(supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10)).is_complete());
-    assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
+    assert!(
+        service
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10))
+            .is_complete()
+    );
+    assert!(
+        supervisor
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10))
+            .is_complete()
+    );
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
 
     assert_eq!(
         Some("text/x-python".to_owned()),
@@ -549,9 +612,21 @@ fn test_shared_runtime_provider_head_of_line() {
     ));
     assert!(first_settlement.all_released);
     assert!(second_settlement.all_released);
-    assert!(service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
-    assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
-    assert!(supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
+    assert!(
+        service
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .is_complete()
+    );
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
+    assert!(
+        supervisor
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .is_complete()
+    );
 }
 
 #[test]
@@ -577,7 +652,10 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     let first_observer = first.observer();
     first.request_cancel(StopReason::UserCancelled);
     let first_result = run_ready(first.result());
-    assert!(matches!(first_result, Ok(qubit_operation::report::OperationOutcome::Stopped(_))));
+    assert!(matches!(
+        first_result,
+        Ok(qubit_operation::report::OperationOutcome::Stopped(_))
+    ));
 
     // Cancellation stops local polling, but the gated provider read has no
     // completion signal yet, so the first managed release remains Pending.

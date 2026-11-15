@@ -183,8 +183,8 @@ impl MagikaMimeDetector {
     /// * `scope` - Parent operation scope for cancellation and settlement.
     /// * `file_system` - Async provider serving bounded range reads.
     /// * `path` - Provider path used to open or read the resource.
-    /// * `max_bytes` - Cumulative logical sampling and fallback-read budget.
-    ///   It is checked against this detector's request limit and the shared
+    /// * `max_bytes` - Cumulative logical sampling and fallback-read budget. It
+    ///   is checked against this detector's request limit and the shared
     ///   runtime aggregate budget; it does not cap total process memory or
     ///   provider-owned buffering.
     ///
@@ -210,9 +210,32 @@ impl MagikaMimeDetector {
             });
         }
         let admission = self.runtime.reserve_for_provider(Some(scope), max_bytes)?;
-        self.detect_async_provider_admitted(admission, file_system, path, max_bytes).await
+        self.detect_async_provider_admitted(admission, file_system, path, max_bytes)
+            .await
     }
 
+    /// Runs the shared provider route after its request and byte capacity are
+    /// reserved.
+    ///
+    /// The admission remains owned through sampling and worker inference so
+    /// provider operation accounting and cancellation release semantics stay
+    /// attached to the accepted request.
+    ///
+    /// # Parameters
+    ///
+    /// * `admission` - Capacity reservation created by the selected public
+    ///   entry point.
+    /// * `file_system` - Async provider serving the requested path.
+    /// * `path` - Provider path used for sampling or fallback reading.
+    /// * `max_bytes` - Cumulative sampling and fallback-read budget.
+    ///
+    /// # Returns
+    ///
+    /// A MIME mapping or `None` when Magika has no MIME mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider, size-limit, admission, Magika, or worker errors.
     async fn detect_async_provider_admitted(
         &self,
         mut admission: crate::managed_runtime::request_admission::RequestAdmission,
@@ -717,7 +740,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 });
             }
             let admission = self.runtime.reserve_for_provider(None, max_bytes)?;
-            let result = self.detect_async_provider_admitted(admission, file_system, path, max_bytes).await?;
+            let result = self
+                .detect_async_provider_admitted(admission, file_system, path, max_bytes)
+                .await?;
             Ok((result.into_iter().collect(), None))
         })
     }
@@ -1011,13 +1036,15 @@ mod tests {
             content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
             detector.guess_from_magika_input(&b""[..]).unwrap()
         );
-        assert!(detector
-            .runtime
-            .shutdown_blocking(
-                qubit_operation::supervisor::ShutdownMode::Drain,
-                std::time::Duration::from_secs(30),
-            )
-            .worker_stopped);
+        assert!(
+            detector
+                .runtime
+                .shutdown_blocking(
+                    qubit_operation::supervisor::ShutdownMode::Drain,
+                    std::time::Duration::from_secs(30),
+                )
+                .worker_stopped
+        );
         assert_eq!(
             content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
             detector.guess_from_magika_input(&b""[..]).unwrap(),

@@ -242,16 +242,14 @@ mod tests {
             "runtime A worker should exit after shutdown"
         );
 
-        let too_small = Arc::new(
-            ManagedInferenceRuntime::new(supervisor_a, 1).expect("nonzero runtime should initialize"),
-        );
+        let too_small =
+            Arc::new(ManagedInferenceRuntime::new(supervisor_a, 1).expect("nonzero runtime should initialize"));
         let error = MagikaMimeDetectorBuilder::default()
             .managed_runtime(too_small.clone())
             .build()
             .expect_err("build should preserve the configured runtime budget error");
         assert!(error.to_string().contains("managed runtime byte budget"));
-        too_small
-            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+        too_small.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
     }
 
     #[test]

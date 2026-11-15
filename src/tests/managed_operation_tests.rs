@@ -604,22 +604,20 @@ fn test_content_limit_contract_rejects_owned_async_and_managed_bytes() {
             .unwrap(),
     );
     let oversized = vec![0; limit + 1];
-    let error = block_on_content(MimeDetectorBackend::guess_from_content_async(
-        &*detector,
-        &oversized,
-    ))
-    .unwrap_err();
+    let error = block_on_content(MimeDetectorBackend::guess_from_content_async(&*detector, &oversized)).unwrap_err();
     assert!(matches!(
         error,
         qubit_mime::MimeError::BufferLimitExceeded { requested, limit: actual }
             if requested == limit + 1 && actual == limit
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(block_on_content(MimeDetectorBackend::guess_from_content_async(
-        &*detector,
-        &vec![0; limit],
-    ))
-    .is_ok());
+    assert!(
+        block_on_content(MimeDetectorBackend::guess_from_content_async(
+            &*detector,
+            &vec![0; limit],
+        ))
+        .is_ok()
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let service = supervisor.service_group(1).unwrap();
@@ -643,9 +641,11 @@ fn test_content_limit_contract_rejects_owned_async_and_managed_bytes() {
         qubit_operation::report::OperationOutcome::Succeeded(())
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(runtime
-        .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
-        .worker_stopped);
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
 }
 
 #[test]

@@ -1,3 +1,11 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -52,9 +60,7 @@ impl Drop for PausedDropProbe {
         let (lock, changed) = &*self.gate;
         let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
         while !*released {
-            released = changed
-                .wait(released)
-                .unwrap_or_else(|error| error.into_inner());
+            released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
         }
     }
 }
@@ -73,9 +79,7 @@ fn test_cancelled_input_drops_before_worker_release() {
             let (lock, changed) = &*first_gate_worker;
             let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
             while !*released {
-                released = changed
-                    .wait(released)
-                    .unwrap_or_else(|error| error.into_inner());
+                released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
             }
             Ok(None)
         }),
@@ -83,12 +87,8 @@ fn test_cancelled_input_drops_before_worker_release() {
     ));
     let first_gate_cleanup = ReleaseWorkerGate(Arc::clone(&first_gate));
 
-    let _first = runtime
-        .submit(None, WorkerInput::Bytes(vec![b'a'].into()))
-        .unwrap();
-    first_started_rx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap();
+    let _first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
+    first_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let (probe_entered_tx, probe_entered_rx) = mpsc::sync_channel(1);
     let probe_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let probe_gate_cleanup = ReleaseWorkerGate(Arc::clone(&probe_gate));
@@ -137,9 +137,7 @@ fn test_cancelled_queued_bytes_restore_byte_budget() {
             let (lock, changed) = &*worker_gate_copy;
             let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
             while !*released {
-                released = changed
-                    .wait(released)
-                    .unwrap_or_else(|error| error.into_inner());
+                released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
             }
             Ok(None)
         }),
@@ -147,13 +145,9 @@ fn test_cancelled_queued_bytes_restore_byte_budget() {
     ));
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
 
-    let _first = runtime
-        .submit(None, WorkerInput::Bytes(vec![0; 4].into()))
-        .unwrap();
+    let _first = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    let queued = runtime
-        .submit(None, WorkerInput::Bytes(vec![0; 4].into()))
-        .unwrap();
+    let queued = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
     let state = runtime.tasks.lock().unwrap()[1].clone();
     drop(queued);
     assert!(runtime.reserve_for_provider(None, 1).is_err());
@@ -171,16 +165,10 @@ fn test_provider_read_error_is_mapped_and_settled() {
 
     impl magika::AsyncInput for FailedLengthInput {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
-            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
-                "test length failed",
-            ))))
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test length failed"))))
         }
 
-        fn read_at(
-            &mut self,
-            _buffer: &mut [u8],
-            _offset: u64,
-        ) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
             std::future::ready(Ok(()))
         }
     }
@@ -192,14 +180,8 @@ fn test_provider_read_error_is_mapped_and_settled() {
             std::future::ready(Ok(8192))
         }
 
-        fn read_at(
-            &mut self,
-            _buffer: &mut [u8],
-            _offset: u64,
-        ) -> impl Future<Output = Result<(), magika::Error>> {
-            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
-                "test read failed",
-            ))))
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test read failed"))))
         }
     }
 
@@ -210,9 +192,7 @@ fn test_provider_read_error_is_mapped_and_settled() {
         Box::new(|_| Ok(None)),
         Box::new(|| {}),
     ));
-    let mapped_error = map_provider_test_error(magika::Error::IOError(std::io::Error::other(
-        "test mapping",
-    )));
+    let mapped_error = map_provider_test_error(magika::Error::IOError(std::io::Error::other("test mapping")));
     assert!(matches!(mapped_error, MimeError::DetectorBackend { .. }));
     let length_admission = runtime.reserve_for_provider(None, 8192).unwrap();
     let length_result = block_on(runtime.detect_async_input_admitted(
@@ -221,18 +201,11 @@ fn test_provider_read_error_is_mapped_and_settled() {
         8192,
         map_provider_test_error,
     ));
-    assert!(matches!(
-        length_result,
-        Err(MimeError::DetectorBackend { .. })
-    ));
+    assert!(matches!(length_result, Err(MimeError::DetectorBackend { .. })));
 
     let admission = runtime.reserve_for_provider(None, 8192).unwrap();
-    let result = block_on(runtime.detect_async_input_admitted(
-        admission,
-        FailedReadInput,
-        8192,
-        map_provider_test_error,
-    ));
+    let result =
+        block_on(runtime.detect_async_input_admitted(admission, FailedReadInput, 8192, map_provider_test_error));
 
     assert!(matches!(result, Err(MimeError::Io(_))));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
@@ -274,15 +247,11 @@ fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registratio
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
         shutdown_started_tx.send(()).unwrap();
-        shutdown_runtime.shutdown_blocking_with_hook(
-            ShutdownMode::Cancel,
-            Duration::from_millis(250),
-            move || scan_tx.send(()).unwrap(),
-        )
+        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Cancel, Duration::from_millis(250), move || {
+            scan_tx.send(()).unwrap()
+        })
     });
-    shutdown_started_rx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap();
+    shutdown_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let scanned_before_registration = scan_rx.recv_timeout(Duration::from_millis(50)).is_ok();
 
     let (lock, changed) = &*reservation_gate;
@@ -360,11 +329,7 @@ fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
             std::future::ready(Ok(1))
         }
-        fn read_at(
-            &mut self,
-            _buffer: &mut [u8],
-            _offset: u64,
-        ) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
             let started = self.0.clone();
             async move {
                 started.send(()).unwrap();
@@ -425,15 +390,9 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
             std::future::ready(Ok(1))
         }
-        fn read_at(
-            &mut self,
-            buffer: &mut [u8],
-            _offset: u64,
-        ) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
             let _ = buffer;
-            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
-                "test read failed",
-            ))))
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test read failed"))))
         }
     }
 
@@ -468,10 +427,7 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
     let mut context = Context::from_waker(&waker);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while worker_rx.try_recv().is_err() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "worker did not reach its gate"
-        );
+        assert!(std::time::Instant::now() < deadline, "worker did not reach its gate");
         assert!(future.as_mut().poll(&mut context).is_pending());
         std::thread::park_timeout(Duration::from_millis(1));
     }
@@ -497,11 +453,7 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
             std::future::ready(Ok(1))
         }
-        fn read_at(
-            &mut self,
-            buffer: &mut [u8],
-            _offset: u64,
-        ) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             buffer[0] = b'x';
             std::future::ready(Ok(()))
@@ -533,11 +485,7 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
     let first_admission = runtime.reserve_for_provider(None, 8).unwrap();
     let first_runtime = Arc::clone(&runtime);
-    let mut first = Box::pin(async move {
-        first_runtime
-            .detect_bytes_admitted(first_admission, vec![b'a'])
-            .await
-    });
+    let mut first = Box::pin(async move { first_runtime.detect_bytes_admitted(first_admission, vec![b'a']).await });
     let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -556,12 +504,7 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     let second_reads = Arc::clone(&reads);
     let mut second = Box::pin(async move {
         second_runtime
-            .detect_async_input_admitted(
-                second_admission,
-                CountedInput(second_reads),
-                8,
-                map_provider_test_error,
-            )
+            .detect_async_input_admitted(second_admission, CountedInput(second_reads), 8, map_provider_test_error)
             .await
     });
     assert!(second.as_mut().poll(&mut context).is_pending());
@@ -578,10 +521,7 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
             result.unwrap();
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "first request did not finish"
-        );
+        assert!(std::time::Instant::now() < deadline, "first request did not finish");
         std::thread::park_timeout(Duration::from_millis(1));
     }
     for state in states {
@@ -657,13 +597,11 @@ fn test_admitted_owned_bytes_return_worker_result() {
 
 #[test]
 fn test_shared_worker_classification_covers_success_and_panic() {
-    let (result, outcome) =
-        execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
+    let (result, outcome) = execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
     assert!(matches!(result, Ok(Some(value)) if value == "text/plain"));
     assert_eq!(outcome, ChildBusinessOutcome::Succeeded);
 
-    let (result, outcome): (qubit_mime::MimeResult<()>, _) =
-        execute_classified(|| panic!("engine panic"));
+    let (result, outcome): (qubit_mime::MimeResult<()>, _) = execute_classified(|| panic!("engine panic"));
     assert!(result.is_err());
     assert_eq!(outcome, ChildBusinessOutcome::Panicked);
 }
@@ -732,11 +670,7 @@ fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
         .submit(None, WorkerInput::Bytes(vec![0; 5].into()))
         .expect("first job should fit the byte budget");
     started_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-    assert!(
-        runtime
-            .submit(None, WorkerInput::Bytes(vec![0; 5].into()))
-            .is_err()
-    );
+    assert!(runtime.submit(None, WorkerInput::Bytes(vec![0; 5].into())).is_err());
 
     let (lock, ready) = &*gate;
     *lock.lock().unwrap() = true;

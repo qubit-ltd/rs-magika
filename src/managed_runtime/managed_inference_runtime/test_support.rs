@@ -29,8 +29,7 @@ use super::map_magika_error;
 use super::worker_state::WorkerState;
 
 /// Owned byte classifier used by the worker thread.
-pub(crate) type ManagedInferenceEngine =
-    Box<dyn Fn(Vec<u8>) -> MimeResult<Option<String>> + Send + 'static>;
+pub(crate) type ManagedInferenceEngine = Box<dyn Fn(Vec<u8>) -> MimeResult<Option<String>> + Send + 'static>;
 
 impl ManagedInferenceRuntime {
     /// Creates a deterministic worker for lifecycle tests.
@@ -54,13 +53,7 @@ impl ManagedInferenceRuntime {
         engine: ManagedInferenceEngine,
         after_business: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
-        Self::with_engine_and_worker_exit_hook(
-            supervisor,
-            max_in_flight_bytes,
-            engine,
-            after_business,
-            Box::new(|| {}),
-        )
+        Self::with_engine_and_worker_exit_hook(supervisor, max_in_flight_bytes, engine, after_business, Box::new(|| {}))
     }
 
     /// Creates a deterministic worker with a hook after all jobs are released.
@@ -92,11 +85,7 @@ impl ManagedInferenceRuntime {
             .name("magika-test-inference".to_owned())
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
-                    let Job {
-                        input,
-                        state,
-                        owner,
-                    } = job;
+                    let Job { input, state, owner } = job;
                     if state.stop_requested() {
                         state.finish_business(
                             Err(MimeError::detector_backend(
@@ -132,9 +121,7 @@ impl ManagedInferenceRuntime {
                 before_worker_exit();
             })
             .expect("test inference worker should start");
-        let service_group = supervisor
-            .service_group(2)
-            .expect("service group should construct");
+        let service_group = supervisor.service_group(2).expect("service group should construct");
         Self {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(WorkerState::new(worker)),
