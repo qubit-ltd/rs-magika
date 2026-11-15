@@ -29,9 +29,9 @@ use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
 use qubit_operation::protocol::StopReason;
-use qubit_operation::report::SupervisorLimits;
+use qubit_operation::report::ManagerOptions;
 use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::OperationSupervisor;
+use qubit_operation::supervisor::OperationManager;
 use qubit_operation::supervisor::ShutdownMode;
 
 use crate::support::AsyncProviderGate;
@@ -69,7 +69,7 @@ fn managed_provider_result(
     file_system: qubit_fs::AsyncFileSystem,
     max_bytes: usize,
 ) -> Result<Option<String>, MimeError> {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(2).unwrap();
     let mut handle = service
         .start(ScopeOptions::default(), move |scope| async move {
@@ -242,7 +242,7 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
 
     let managed_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let managed_observations = managed_provider.observations();
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let body_detector = Arc::clone(&detector);
     let file_system = managed_provider.async_file_system();
@@ -283,7 +283,7 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
 fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool) -> (String, String) {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let capacity = detector.max_buffer_size();
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(4).unwrap();
     let first_gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
     let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&first_gate));
@@ -423,7 +423,7 @@ fn test_async_provider_full_capacity_rejects_both_entrypoint_orders_before_io() 
 
 #[test]
 fn test_managed_guide_reuses_detector_for_two_requests() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(2).unwrap();
     let config = qubit_mime::MimeConfig::default();
     let runtime = Arc::new(
@@ -531,7 +531,7 @@ impl Drop for ReleaseGateOnDrop {
 
 #[test]
 fn test_shared_runtime_provider_head_of_line() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(2).unwrap();
     let config = qubit_mime::MimeConfig::default();
     let runtime_budget = config.max_buffer_size();
@@ -631,7 +631,7 @@ fn test_shared_runtime_provider_head_of_line() {
 
 #[test]
 fn test_shared_runtime_provider_head_of_line_cancellation() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(2).unwrap();
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
@@ -718,7 +718,7 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
 #[test]
 fn test_managed_provider_session_api_classifies_and_settles_worker() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let file_system = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_random_access()
@@ -763,7 +763,7 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
 #[test]
 fn test_managed_provider_admission_rejects_cancelled_scope_before_provider_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();
@@ -792,7 +792,7 @@ fn test_managed_provider_admission_rejects_closed_runtime_before_provider_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();
@@ -817,7 +817,7 @@ fn test_managed_provider_admission_rejects_closed_runtime_before_provider_io() {
 #[test]
 fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(4).unwrap();
     let gates = [
         crate::support::AsyncProviderGate::new(AsyncProviderGatePoint::Open),
@@ -875,7 +875,7 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
 #[test]
 fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Open);
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -906,7 +906,7 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
 #[test]
 fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -1805,7 +1805,7 @@ fn test_provider_async_path_rejects_requested_limit_above_detector_limit() {
 
 #[test]
 fn test_managed_owned_bytes_preserve_public_result_and_release_contract() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let zero_budget = qubit_magika::ManagedInferenceRuntime::new(supervisor.clone(), 0)
         .expect_err("a managed runtime must reject a zero byte budget");
     assert!(zero_budget.to_string().contains("runtime byte budget must be nonzero"));

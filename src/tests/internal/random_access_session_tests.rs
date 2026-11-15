@@ -59,9 +59,9 @@ use qubit_fs::spi::StatRequest;
 use qubit_fs::spi::StatResponse;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
-use qubit_operation::report::SupervisorLimits;
+use qubit_operation::ManagerOptions;
 use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::OperationSupervisor;
+use qubit_operation::OperationManager;
 
 const ID: &str = "magika-session-adapter-test";
 
@@ -375,7 +375,7 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
 
 #[test]
 fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2));
     let expected = b"sample".to_vec();
@@ -418,11 +418,11 @@ fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live
         .unwrap();
     assert!(matches!(
         handle.result_blocking().unwrap(),
-        qubit_operation::report::OperationOutcome::Succeeded(())
+        qubit_operation::OperationOutcome::Succeeded(())
     ));
     assert!(heartbeats.load(Ordering::SeqCst) > 1);
     let report = detector.shutdown_blocking(
-        qubit_operation::supervisor::ShutdownMode::Drain,
+        qubit_operation::ShutdownMode::Drain,
         Duration::from_secs(30),
     );
     assert!(report.worker_stopped);
@@ -430,7 +430,7 @@ fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live
 
 #[test]
 fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2));
     let expected = b"sample".to_vec();
     let engine_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
@@ -481,7 +481,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
 
 #[test]
 fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_completion() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let provider_gate = Arc::new(TestAsyncReadGate::new());
     let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2)).with_async_read_gate(Arc::clone(&provider_gate));
@@ -545,7 +545,7 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
     *lock.lock().unwrap() = true;
     ready.notify_all();
     let report = detector.shutdown_blocking(
-        qubit_operation::supervisor::ShutdownMode::Cancel,
+        qubit_operation::ShutdownMode::Cancel,
         Duration::from_millis(50),
     );
     assert!(!report.admission.is_complete());

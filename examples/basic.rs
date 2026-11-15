@@ -19,9 +19,9 @@ use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorRegistry;
 use qubit_mime::MimeResult;
-use qubit_operation::report::SupervisorLimits;
+use qubit_operation::report::ManagerOptions;
 use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::OperationSupervisor;
+use qubit_operation::supervisor::OperationManager;
 use qubit_operation::supervisor::ShutdownMode;
 use qubit_spi::ProviderSelection;
 
@@ -75,8 +75,8 @@ fn library_detect_filename(detector: &dyn MimeDetector) -> MimeResult<Option<Str
 /// Prepares one operation-aware detector and keeps its supervisor available
 /// for request scopes. Building the detector starts its shared worker/session.
 #[allow(dead_code)]
-fn prepare_managed_detector() -> Result<(Arc<MagikaMimeDetector>, OperationSupervisor), Box<dyn Error>> {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+fn prepare_managed_detector() -> Result<(Arc<MagikaMimeDetector>, OperationManager), Box<dyn Error>> {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let config = MimeConfig::default();
     let runtime = Arc::new(qubit_magika::ManagedInferenceRuntime::new(
         supervisor.clone(),
@@ -96,7 +96,7 @@ fn prepare_managed_detector() -> Result<(Arc<MagikaMimeDetector>, OperationSuper
 #[allow(dead_code)]
 fn managed_provider_path(
     detector: Arc<MagikaMimeDetector>,
-    supervisor: &OperationSupervisor,
+    supervisor: &OperationManager,
     file_system: Arc<AsyncFileSystem>,
     path: Path,
 ) -> Result<(), Box<dyn Error>> {
@@ -115,7 +115,7 @@ fn managed_provider_path(
 
 /// Drains inference before shutting down the application-owned supervisor.
 #[allow(dead_code)]
-fn shutdown_managed(detector: &MagikaMimeDetector, supervisor: &OperationSupervisor) {
+fn shutdown_managed(detector: &MagikaMimeDetector, supervisor: &OperationManager) {
     let detector_report = detector.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));
     assert!(detector_report.worker_stopped);
     let _supervisor_report = supervisor.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));

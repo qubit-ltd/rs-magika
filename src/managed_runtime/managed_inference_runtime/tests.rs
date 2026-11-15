@@ -18,11 +18,11 @@ use std::task::Waker;
 use std::time::Duration;
 
 use qubit_mime::MimeError;
-use qubit_operation::report::ChildBusinessOutcome;
-use qubit_operation::report::StopReason;
-use qubit_operation::report::SupervisorLimits;
-use qubit_operation::supervisor::OperationSupervisor;
-use qubit_operation::supervisor::ShutdownMode;
+use qubit_operation::ChildOutcomeKind;
+use qubit_operation::StopReason;
+use qubit_operation::ManagerOptions;
+use qubit_operation::OperationManager;
+use qubit_operation::ShutdownMode;
 
 use super::super::worker_input::WorkerBytes;
 use super::ManagedInferenceRuntime;
@@ -67,7 +67,7 @@ impl Drop for PausedDropProbe {
 
 #[test]
 fn test_cancelled_input_drops_before_worker_release() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let first_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let first_gate_worker = Arc::clone(&first_gate);
     let (first_started_tx, first_started_rx) = mpsc::sync_channel(1);
@@ -125,7 +125,7 @@ fn test_cancelled_input_drops_before_worker_release() {
 
 #[test]
 fn test_cancelled_queued_bytes_restore_byte_budget() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let worker_gate_copy = Arc::clone(&worker_gate);
     let (started_tx, started_rx) = mpsc::sync_channel(1);
@@ -185,7 +185,7 @@ fn test_provider_read_error_is_mapped_and_settled() {
         }
     }
 
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         8192,
@@ -215,7 +215,7 @@ fn test_provider_read_error_is_mapped_and_settled() {
 
 #[test]
 fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registration() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         8,
@@ -274,7 +274,7 @@ fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registratio
 
 #[test]
 fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(2).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
@@ -342,7 +342,7 @@ fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
         MimeError::detector_backend("magika", "test input failed")
     }
 
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         8,
@@ -396,7 +396,7 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
         }
     }
 
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let (worker_tx, worker_rx) = mpsc::sync_channel(1);
     let worker_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let callback_gate = Arc::clone(&worker_gate);
@@ -459,7 +459,7 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
             std::future::ready(Ok(()))
         }
     }
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let (worker_tx, worker_rx) = mpsc::sync_channel(1);
     let worker_signaled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let callback_signaled = Arc::clone(&worker_signaled);
@@ -570,7 +570,7 @@ fn test_admitted_owned_bytes_return_worker_result() {
         }
     }
 
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = ManagedInferenceRuntime::with_engine(
         supervisor,
         8,
@@ -608,7 +608,7 @@ fn test_shared_worker_classification_covers_success_and_panic() {
 
 #[test]
 fn test_unmanaged_detection_enforces_limit_and_shutdown_joins_worker() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     assert!(ManagedInferenceRuntime::new(supervisor.clone(), 0).is_err());
 
     let runtime = ManagedInferenceRuntime::with_engine(
@@ -636,7 +636,7 @@ fn test_unmanaged_detection_enforces_limit_and_shutdown_joins_worker() {
 
 #[test]
 fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let engine_gate = Arc::clone(&gate);
     let (started_tx, started_rx) = mpsc::channel();
@@ -683,7 +683,7 @@ fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
 #[test]
 fn test_shutdown_recovers_poisoned_runtime_mutexes() {
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
-        OperationSupervisor::new(SupervisorLimits::default()),
+        OperationManager::new(ManagerOptions::default()).unwrap(),
         1,
         Box::new(|_| Ok(None)),
         Box::new(|| {}),

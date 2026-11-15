@@ -17,18 +17,18 @@ use std::time::Duration;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
 use qubit_operation::protocol::StopReason;
-use qubit_operation::report::ChildBusinessOutcome;
-use qubit_operation::report::SupervisorLimits;
+use qubit_operation::ChildOutcomeKind;
+use qubit_operation::ManagerOptions;
 use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::OperationSupervisor;
-use qubit_operation::supervisor::ShutdownMode;
+use qubit_operation::OperationManager;
+use qubit_operation::ShutdownMode;
 
 use crate::managed_runtime::ManagedInferenceEngine;
 use crate::managed_runtime::ManagedInferenceRuntime;
 
 #[test]
 fn test_managed_inference_keeps_release_pending_and_executor_heartbeats_until_worker_exits() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let compute_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
@@ -93,7 +93,7 @@ fn test_managed_inference_keeps_release_pending_and_executor_heartbeats_until_wo
     business_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     assert!(matches!(
         handle.result_blocking().unwrap(),
-        qubit_operation::report::OperationOutcome::Succeeded(())
+        qubit_operation::OperationOutcome::Succeeded(())
     ));
 
     let observer = handle.observer();
@@ -114,7 +114,7 @@ fn test_managed_inference_keeps_release_pending_and_executor_heartbeats_until_wo
 
 #[test]
 fn test_cancelling_managed_inference_does_not_report_release_before_worker_exit() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (started_tx, started_rx) = mpsc::channel();
@@ -159,7 +159,7 @@ fn test_cancelling_managed_inference_does_not_report_release_before_worker_exit(
 
 #[test]
 fn test_byte_budget_rejects_aggregate_payload_and_shutdown_joins_worker() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (started_tx, started_rx) = mpsc::channel();
@@ -216,7 +216,7 @@ fn test_byte_budget_rejects_aggregate_payload_and_shutdown_joins_worker() {
 
 #[test]
 fn test_managed_engine_error_is_delivered_and_reported_as_failed_child() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let engine: ManagedInferenceEngine = Box::new(|_bytes| {
         Err(qubit_mime::MimeError::detector_backend(
@@ -242,7 +242,7 @@ fn test_managed_engine_error_is_delivered_and_reported_as_failed_child() {
         .expect("managed operation should be admitted");
 
     let outcome = handle.result_blocking().unwrap();
-    let qubit_operation::report::OperationOutcome::Failed(error) = outcome else {
+    let qubit_operation::OperationOutcome::Failed(error) = outcome else {
         panic!("operation should return the inference error");
     };
     assert!(error.to_string().contains("original engine error"));
@@ -253,7 +253,7 @@ fn test_managed_engine_error_is_delivered_and_reported_as_failed_child() {
 
 #[test]
 fn test_service_group_rejects_inference_when_running_and_queued_capacity_is_full() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (started_tx, started_rx) = mpsc::channel();
@@ -321,7 +321,7 @@ fn test_service_group_rejects_inference_when_running_and_queued_capacity_is_full
     );
     assert!(matches!(
         handle.result_blocking().unwrap(),
-        qubit_operation::report::OperationOutcome::Succeeded(())
+        qubit_operation::OperationOutcome::Succeeded(())
     ));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.admission.is_complete());
@@ -354,7 +354,7 @@ fn test_sync_provider_backend_classifies_a_rooted_local_file() {
 
 #[test]
 fn test_cancel_shutdown_reports_blocked_worker_until_real_release() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (started_tx, started_rx) = mpsc::channel();
@@ -398,7 +398,7 @@ fn test_cancel_shutdown_reports_blocked_worker_until_real_release() {
 
 #[test]
 fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.service_group(1).unwrap();
     let worker_exit_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (worker_exit_tx, worker_exit_rx) = mpsc::channel();
@@ -426,7 +426,7 @@ fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
         .unwrap();
     let operation_succeeded = matches!(
         handle.result_blocking(),
-        Ok(qubit_operation::report::OperationOutcome::Succeeded(()))
+        Ok(qubit_operation::OperationOutcome::Succeeded(()))
     );
     let resources_released = handle
         .observer()
@@ -495,7 +495,7 @@ fn test_shutdown_timeout_includes_worker_exit_after_child_release() {
 
 #[test]
 fn test_public_runtime_detection_preserves_result_release_and_shutdown() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor.clone(),
         MimeConfig::default().max_buffer_size(),
@@ -520,7 +520,7 @@ fn test_public_runtime_detection_preserves_result_release_and_shutdown() {
     let outcome = handle.result_blocking().unwrap();
     assert!(matches!(
         outcome,
-        qubit_operation::report::OperationOutcome::Succeeded(Some(value)) if value == "application/x-3"
+        qubit_operation::OperationOutcome::Succeeded(Some(value)) if value == "application/x-3"
     ));
     assert!(handle.observer().released_blocking().unwrap().all_released);
     let shutdown = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
@@ -530,7 +530,7 @@ fn test_public_runtime_detection_preserves_result_release_and_shutdown() {
 
 #[test]
 fn test_managed_bytes_respects_detector_limit() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let limit = MimeConfig::default().max_buffer_size();
     let calls = Arc::new(AtomicUsize::new(0));
     let engine_calls = Arc::clone(&calls);
@@ -571,7 +571,7 @@ fn test_managed_bytes_respects_detector_limit() {
         .unwrap();
     assert!(matches!(
         handle.result_blocking().unwrap(),
-        qubit_operation::report::OperationOutcome::Succeeded(())
+        qubit_operation::OperationOutcome::Succeeded(())
     ));
     assert!(handle.observer().released_blocking().unwrap().all_released);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -584,7 +584,7 @@ fn test_managed_bytes_respects_detector_limit() {
 
 #[test]
 fn test_content_limit_contract_rejects_owned_async_and_managed_bytes() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let limit = MimeConfig::default().max_buffer_size();
     let calls = Arc::new(AtomicUsize::new(0));
     let engine_calls = Arc::clone(&calls);
@@ -638,7 +638,7 @@ fn test_content_limit_contract_rejects_owned_async_and_managed_bytes() {
         .unwrap();
     assert!(matches!(
         handle.result_blocking().unwrap(),
-        qubit_operation::report::OperationOutcome::Succeeded(())
+        qubit_operation::OperationOutcome::Succeeded(())
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
@@ -650,7 +650,7 @@ fn test_content_limit_contract_rejects_owned_async_and_managed_bytes() {
 
 #[test]
 fn test_async_content_yields_while_worker_is_gated() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let engine_gate = Arc::clone(&gate);
     let (started_tx, started_rx) = mpsc::channel();
@@ -723,7 +723,7 @@ fn test_async_content_yields_while_worker_is_gated() {
 
 #[test]
 fn test_async_content_returns_empty_candidate_and_worker_error() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let engine_calls = Arc::clone(&calls);
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
@@ -774,7 +774,7 @@ fn test_async_content_returns_empty_candidate_and_worker_error() {
 
 #[test]
 fn test_async_content_rejects_detector_limit_and_closed_runtime() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let limit = MimeConfig::default().max_buffer_size();
     let calls = Arc::new(AtomicUsize::new(0));
     let engine_calls = Arc::clone(&calls);
@@ -812,7 +812,7 @@ fn test_async_content_rejects_detector_limit_and_closed_runtime() {
 
 #[test]
 fn test_unmanaged_content_api_enforces_runtime_byte_limit() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let engine_calls = Arc::clone(&calls);
     let runtime = ManagedInferenceRuntime::with_engine(
@@ -844,7 +844,7 @@ fn test_unmanaged_content_api_enforces_runtime_byte_limit() {
 
 #[test]
 fn test_async_content_drop_releases_capacity_after_worker_finishes() {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let engine_gate = Arc::clone(&gate);
     let (started_tx, started_rx) = mpsc::channel();

@@ -15,8 +15,8 @@ use std::sync::mpsc::SyncSender;
 use magika::SyncInput;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
-use qubit_operation::report::ChildBusinessOutcome;
-use qubit_operation::supervisor::OperationSupervisor;
+use qubit_operation::ChildOutcomeKind;
+use qubit_operation::OperationManager;
 
 use super::AdmissionGate;
 use super::BridgeSyncInput;
@@ -48,7 +48,7 @@ impl ManagedInferenceRuntime {
     /// after publishing each result.
     #[cfg(test)]
     pub(crate) fn with_engine(
-        supervisor: OperationSupervisor,
+        supervisor: OperationManager,
         max_in_flight_bytes: usize,
         engine: ManagedInferenceEngine,
         after_business: Box<dyn Fn() + Send + 'static>,
@@ -74,7 +74,7 @@ impl ManagedInferenceRuntime {
     /// A test runtime using the supplied classifier and lifecycle hooks.
     #[cfg(test)]
     pub(crate) fn with_engine_and_worker_exit_hook(
-        supervisor: OperationSupervisor,
+        supervisor: OperationManager,
         max_in_flight_bytes: usize,
         engine: ManagedInferenceEngine,
         after_business: Box<dyn Fn() + Send + 'static>,
