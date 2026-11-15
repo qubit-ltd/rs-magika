@@ -59,11 +59,7 @@ impl InferenceFuture {
     ///
     /// The MIME inference result produced by the worker.
     pub(super) fn wait_blocking(mut self) -> MimeResult<Option<String>> {
-        let mut inner = self
-            .state
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.state.inner.lock().unwrap_or_else(|error| error.into_inner());
         #[cfg(test)]
         if let Some(wait_started) = self.wait_started.take() {
             let _ = wait_started.send(());
@@ -98,11 +94,7 @@ impl Future for InferenceFuture {
     /// `Ready` with the result, or `Pending` until worker completion.
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let result = {
-            let mut inner = self
-                .state
-                .inner
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut inner = self.state.inner.lock().unwrap_or_else(|error| error.into_inner());
             let result = inner.result.take();
             if result.is_none() {
                 register_waker(&mut inner.wakers, cx.waker());
@@ -159,10 +151,7 @@ mod tests {
         let mut context = Context::from_waker(waker);
 
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
-        state.finish_business(
-            Ok(Some("text/plain".to_owned())),
-            ChildBusinessOutcome::Succeeded,
-        );
+        state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
         assert!(matches!(
             future.as_mut().poll(&mut context),
             Poll::Ready(Ok(Some(mime))) if mime == "text/plain"
@@ -172,11 +161,7 @@ mod tests {
     #[test]
     fn test_blocking_wait_observes_result_published_after_wait_begins() {
         for (operation_id, result, business) in [
-            (
-                102,
-                Ok(Some("text/plain".to_owned())),
-                ChildBusinessOutcome::Succeeded,
-            ),
+            (102, Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded),
             (
                 103,
                 Err(qubit_mime::MimeError::detector_backend("test", "failed")),
@@ -184,44 +169,73 @@ mod tests {
             ),
         ] {
             let state = Arc::new(TaskState::new(OperationId::new(operation_id), None));
-            let control: Arc<dyn ManagedOperationControl> =
-                Arc::new(TaskControl(Arc::clone(&state)));
-            let (started_tx, started_rx) = mpsc::channel();
-            let (result_tx, result_rx) = mpsc::channel();
-            let mut future = InferenceFuture::new(Arc::clone(&state), control);
-            future.wait_started = Some(started_tx);
-            let waiter =
-                std::thread::spawn(move || result_tx.send(future.wait_blocking()).unwrap());
+            let (started, observed, worker_done, released, released_pending, waiter_panicked) =
+                std::thread::scope(|scope| {
+                    struct CompleteOnDrop(Arc<TaskState>);
+                    impl Drop for CompleteOnDrop {
+                        fn drop(&mut self) {
+                            self.0.mark_worker_done();
+                            self.0.mark_released();
+                        }
+                    }
 
-            started_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("waiter entered Condvar wait");
-            state.finish_business(result, business);
-            let observed = result_rx.recv_timeout(Duration::from_secs(2));
-            {
-                let inner = state.inner.lock().unwrap();
-                assert!(!inner.worker_done);
-                assert!(!inner.released);
-            }
-            let waker = Waker::noop();
-            let mut context = Context::from_waker(waker);
-            assert!(matches!(
-                TaskControl(Arc::clone(&state)).poll_released(&mut context),
-                Poll::Pending
-            ));
+                    let completion = CompleteOnDrop(Arc::clone(&state));
+                    let control: Arc<dyn ManagedOperationControl> =
+                        Arc::new(TaskControl(Arc::clone(&state)));
+                    let (started_tx, started_rx) = mpsc::channel();
+                    let (result_tx, result_rx) = mpsc::channel();
+                    let mut future = InferenceFuture::new(Arc::clone(&state), control);
+                    future.wait_started = Some(started_tx);
+                    let waiter = scope.spawn(move || {
+                        let _ = result_tx.send(future.wait_blocking());
+                    });
 
-            state.mark_worker_done();
-            state.mark_released();
-            waiter.join().unwrap();
+                    let started = started_rx.recv_timeout(Duration::from_secs(2));
+                    let observed = if started.is_ok() {
+                        state.finish_business(result, business);
+                        result_rx.recv_timeout(Duration::from_secs(2))
+                    } else {
+                        Err(mpsc::RecvTimeoutError::Disconnected)
+                    };
+                    let (worker_done, released) = {
+                        let inner = state.inner.lock().unwrap();
+                        (inner.worker_done, inner.released)
+                    };
+                    let waker = Waker::noop();
+                    let mut context = Context::from_waker(waker);
+                    let released_pending = matches!(
+                        TaskControl(Arc::clone(&state)).poll_released(&mut context),
+                        Poll::Pending
+                    );
+                    drop(completion);
+                    let waiter_panicked = waiter.join().is_err();
+                    (
+                        started,
+                        observed,
+                        worker_done,
+                        released,
+                        released_pending,
+                        waiter_panicked,
+                    )
+                });
+
+            assert!(started.is_ok(), "waiter entered Condvar wait: {started:?}");
+            assert!(observed.is_ok(), "result notification wakes waiter before release: {observed:?}");
+            assert!(!worker_done);
+            assert!(!released);
+            assert!(released_pending);
+            assert!(!waiter_panicked);
             let observed = observed.expect("result notification wakes waiter before release");
             match operation_id {
                 102 => assert_eq!(observed.unwrap().as_deref(), Some("text/plain")),
-                _ => assert!(observed.is_err()),
+                _ => assert_eq!(
+                    observed.unwrap_err().to_string(),
+                    "MIME detector backend 'test' failed: failed"
+                ),
             }
-            assert!(matches!(
-                TaskControl(state).poll_released(&mut context),
-                Poll::Ready(_)
-            ));
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            assert!(matches!(TaskControl(state).poll_released(&mut context), Poll::Ready(_)));
         }
     }
 
