@@ -215,10 +215,7 @@ fn test_fifo_content_rejected_without_writer() {
             let (ready, exit) = observe_ready_or_exit(
                 &mut || {
                     if ready.exists() {
-                        assert_eq!(
-                            fs::read(&ready).expect("readiness marker should be readable"),
-                            b"ready"
-                        );
+                        assert_eq!(fs::read(&ready).expect("readiness marker should be readable"), b"ready");
                         true
                     } else {
                         false
