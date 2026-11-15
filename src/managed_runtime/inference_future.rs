@@ -178,10 +178,7 @@ mod tests {
                             // publication is write-once, so this only fills an
                             // otherwise missing result during cleanup.
                             self.0.finish_business(
-                                Err(qubit_mime::MimeError::detector_backend(
-                                    "test",
-                                    "waiter cleanup",
-                                )),
+                                Err(qubit_mime::MimeError::detector_backend("test", "waiter cleanup")),
                                 ChildBusinessOutcome::Failed,
                             );
                             self.0.mark_worker_done();
