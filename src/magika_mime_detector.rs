@@ -903,13 +903,13 @@ mod tests {
         let oversized_borrowed = vec![0; limit + 1];
         let at_limit_result = MimeDetector::detect_by_content(&detector, &at_limit_borrowed);
         assert!(
-            !matches!(at_limit_result, Err(MimeError::BufferLimitExceeded { .. })),
-            "borrowed synchronous high-level content at the limit must complete"
+            at_limit_result.is_ok(),
+            "borrowed synchronous high-level content at the limit should complete: {at_limit_result:?}"
         );
         let high_level_result = MimeDetector::detect_by_content(&detector, &oversized_borrowed);
         assert!(
-            !matches!(high_level_result, Err(MimeError::BufferLimitExceeded { .. })),
-            "borrowed synchronous high-level content must not be rejected by the owned-payload limit"
+            high_level_result.is_ok(),
+            "borrowed synchronous high-level content must complete beyond the owned-payload limit: {high_level_result:?}"
         );
         let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
         assert_eq!(
