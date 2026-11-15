@@ -12,17 +12,12 @@ use qubit_fs::Path;
 use qubit_fs::read::AsyncRandomAccessReader;
 
 /// Selects how an asynchronous provider input obtains resource ranges.
-pub(super) enum AsyncRoute<'a> {
-    /// Opens each requested range through the filesystem and resource path.
-    Legacy {
-        /// Filesystem used to open each range.
-        file_system: &'a AsyncFileSystem,
-        /// Resource path used for each range.
-        path: &'a Path,
-    },
+pub(super) enum AsyncRoute {
     /// Filesystem and path owned by the submitted managed operation.
     OwnedLegacy {
+        /// Filesystem used to open each range.
         file_system: AsyncFileSystem,
+        /// Resource path used for each range.
         path: Path,
     },
     /// Reads ranges from one retained random-access session.

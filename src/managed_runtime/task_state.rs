@@ -326,12 +326,7 @@ mod tests {
     #[test]
     fn test_release_removes_task_from_runtime_registry() {
         let tasks = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let state = Arc::new(TaskState::new_registered(
-            9,
-            None,
-            Some(Arc::downgrade(&tasks)),
-            None,
-        ));
+        let state = Arc::new(TaskState::new_registered(9, None, Some(Arc::downgrade(&tasks)), None));
         tasks.lock().unwrap().push(Arc::clone(&state));
 
         state.mark_released();
@@ -395,12 +390,7 @@ mod tests {
     #[test]
     fn test_provider_start_recovers_poisoned_task_state_lock() {
         let gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
-        let state = Arc::new(TaskState::new_registered(
-            17,
-            None,
-            None,
-            Some(Arc::downgrade(&gate)),
-        ));
+        let state = Arc::new(TaskState::new_registered(17, None, None, Some(Arc::downgrade(&gate))));
         let poisoned = Arc::clone(&state);
         assert!(
             std::thread::spawn(move || {
@@ -436,12 +426,7 @@ mod tests {
     #[test]
     fn test_lifecycle_recovers_poisoned_bridge_owner_and_registry_locks() {
         let tasks = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let state = Arc::new(TaskState::new_registered(
-            13,
-            None,
-            Some(Arc::downgrade(&tasks)),
-            None,
-        ));
+        let state = Arc::new(TaskState::new_registered(13, None, Some(Arc::downgrade(&tasks)), None));
         tasks.lock().unwrap().push(Arc::clone(&state));
 
         let poisoned_bridge = Arc::clone(&state);

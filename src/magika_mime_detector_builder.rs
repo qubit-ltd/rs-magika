@@ -178,7 +178,10 @@ impl MagikaMimeDetectorBuilder {
                 let manager = match self.manager {
                     Some(manager) => manager,
                     None => OperationManager::new(ManagerOptions::default()).map_err(|error| {
-                        qubit_mime::MimeError::detector_backend("magika", format!("could not create operation manager: {error}"))
+                        qubit_mime::MimeError::detector_backend(
+                            "magika",
+                            format!("could not create operation manager: {error}"),
+                        )
                     })?,
                 };
                 Arc::new(ManagedInferenceRuntime::new(manager, max_buffer_size)?)

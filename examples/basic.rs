@@ -19,7 +19,11 @@ use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorRegistry;
 use qubit_mime::MimeResult;
-use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, ShutdownMode};
+use qubit_operation::GroupOptions;
+use qubit_operation::ManagerOptions;
+use qubit_operation::OperationManager;
+use qubit_operation::OperationOptions;
+use qubit_operation::ShutdownMode;
 use qubit_spi::ProviderSelection;
 
 /// Registers Magika and creates one detector for the application.
@@ -99,11 +103,13 @@ async fn managed_provider_path(
 ) -> Result<(), Box<dyn Error>> {
     let requests = manager.group(GroupOptions { capacity: 4 })?;
     let request_detector = Arc::clone(&detector);
-    let mut request = requests.as_async().try_submit(OperationOptions::default(), move |scope| async move {
-        request_detector
-            .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
-            .await
-    })?;
+    let mut request = requests
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            request_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
+                .await
+        })?;
     let _business_result = request.wait_outcome().await?;
     let _settlement = request.observer().wait_settlement().await;
     requests.close_admission();

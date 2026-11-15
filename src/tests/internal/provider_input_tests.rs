@@ -173,7 +173,7 @@ fn test_async_legacy_provider_reads_bounded_ranges_and_reserves_budget_once() {
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let path = Path::parse("/same").unwrap();
-    let mut input = AsyncProviderInput::new(&file_system, &path, 6, None, 4);
+    let mut input = AsyncProviderInput::new_owned(file_system.clone(), path.clone(), 6, None, 4);
     let mut output = [0; 4];
 
     run_ready(AsyncInput::read_at(&mut input, &mut output, 1)).unwrap();
@@ -265,8 +265,13 @@ fn test_legacy_provider_empty_unknown_zero_short_and_conditional_ranges() {
         .fail_conditional_on_open(1);
     let async_conditional_observations = async_conditional_provider.observations();
     let async_conditional_fs = async_conditional_provider.async_file_system();
-    let mut async_conditional_input =
-        AsyncProviderInput::new(&async_conditional_fs, &path, 4, Some(ResourceVersion::new("v1")), 4);
+    let mut async_conditional_input = AsyncProviderInput::new_owned(
+        async_conditional_fs.clone(),
+        path.clone(),
+        4,
+        Some(ResourceVersion::new("v1")),
+        4,
+    );
     assert!(run_ready(AsyncInput::read_at(&mut async_conditional_input, &mut [0; 4], 0)).is_err());
     let options = async_conditional_observations.options.lock().unwrap();
     assert_eq!(2, options.len());

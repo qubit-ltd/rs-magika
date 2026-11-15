@@ -59,10 +59,10 @@ use qubit_fs::spi::StatRequest;
 use qubit_fs::spi::StatResponse;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
-use qubit_operation::ManagerOptions;
 use qubit_operation::GroupOptions;
-use qubit_operation::OperationOptions;
+use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
+use qubit_operation::OperationOptions;
 
 const ID: &str = "magika-session-adapter-test";
 
@@ -401,7 +401,8 @@ fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live
     let body_detector = Arc::clone(&detector);
     let body_heartbeats = Arc::clone(&heartbeats);
     let mut handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
             let path = Path::parse("/bridge/sample").unwrap();
             let mut detection =
@@ -422,10 +423,7 @@ fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live
         qubit_operation::OperationOutcome::Succeeded(())
     ));
     assert!(heartbeats.load(Ordering::SeqCst) > 1);
-    let report = detector.shutdown_blocking(
-        qubit_operation::ShutdownMode::Drain,
-        Duration::from_secs(30),
-    );
+    let report = detector.shutdown_blocking(qubit_operation::ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
 }
 
@@ -513,7 +511,8 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
     let body_detector = Arc::clone(&detector);
     let body_gate = Arc::clone(&provider_gate);
     let mut handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
             let path = Path::parse("/bridge/cancel").unwrap();
             let mut detection = Some(Box::pin(body_detector.detect_async_provider_path_managed(
@@ -545,10 +544,7 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
     let (lock, ready) = &*release_gate;
     *lock.lock().unwrap() = true;
     ready.notify_all();
-    let report = detector.shutdown_blocking(
-        qubit_operation::ShutdownMode::Cancel,
-        Duration::from_millis(50),
-    );
+    let report = detector.shutdown_blocking(qubit_operation::ShutdownMode::Cancel, Duration::from_millis(50));
     assert!(report.admission.snapshot.service_resources != 0);
     assert!(!report.worker_stopped);
 }

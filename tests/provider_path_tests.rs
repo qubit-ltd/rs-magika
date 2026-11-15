@@ -28,19 +28,19 @@ use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
-use qubit_operation::StopReason;
 use qubit_operation::ManagerOptions;
-use qubit_operation::OperationOptions;
 use qubit_operation::OperationManager;
+use qubit_operation::OperationOptions;
 use qubit_operation::ShutdownMode;
+use qubit_operation::StopReason;
 
 use crate::support::AsyncProviderGate;
 use crate::support::AsyncProviderGatePoint;
 use crate::support::ProviderFileSystemSpi;
+use crate::support::ShutdownBlocking;
 use crate::support::detector;
 use crate::support::run_ready;
 use crate::support::run_until;
-use crate::support::ShutdownBlocking;
 
 const PYTHON: &[u8] = b"#!/usr/bin/env python3\nprint('hello')\n";
 
@@ -73,7 +73,8 @@ fn managed_provider_result(
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let mut handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), max_bytes)
                 .await
@@ -89,12 +90,16 @@ fn managed_provider_result(
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
     result
 }
@@ -248,7 +253,8 @@ fn test_async_provider_admission_failure_matches_both_entrances_without_io() {
     let body_detector = Arc::clone(&detector);
     let file_system = managed_provider.async_file_system();
     let mut handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/matrix.py"), 8192)
                 .await;
@@ -300,7 +306,8 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     if first_managed {
         managed_first = Some(
             service
-                .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
                     first_detector
                         .detect_async_provider_path_managed(
                             &scope,
@@ -338,7 +345,8 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     } else {
         let second_detector = Arc::clone(&detector);
         let mut second = service
-            .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
                 second_detector
                     .detect_async_provider_path_managed(&scope, &second_file_system, &path("/capacity-second.py"), 1)
                     .await
@@ -377,12 +385,16 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(10))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
     assert!(
         detector
@@ -449,7 +461,8 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     let first_fs = first_provider.async_file_system();
     let first_detector = Arc::clone(&detector);
     let mut first = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             first_detector
                 .detect_async_provider_path_managed(&scope, &first_fs, &path("/guide/first.py"), 4096)
                 .await
@@ -489,7 +502,8 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     let second_fs = second_provider.async_file_system();
     let second_detector = Arc::clone(&detector);
     let mut second = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             second_detector
                 .detect_async_provider_path_managed(&scope, &second_fs, &path("/guide/second.py"), 4096)
                 .await
@@ -506,7 +520,9 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
     assert!(
         detector
@@ -516,7 +532,9 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
 }
 
@@ -556,7 +574,8 @@ fn test_shared_runtime_provider_head_of_line() {
     let first_fs = first_provider.async_file_system();
     let first_detector = Arc::clone(&detector);
     let mut first = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             first_detector
                 .detect_async_provider_path_managed(&scope, &first_fs, &path("/hol/first.py"), 4096)
                 .await
@@ -571,7 +590,8 @@ fn test_shared_runtime_provider_head_of_line() {
     let second_detector = Arc::clone(&detector);
     let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
     let mut second = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, second_bytes));
             std::future::poll_fn(|context| match inference.as_mut().poll(context) {
                 Poll::Ready(result) => Poll::Ready(result),
@@ -616,7 +636,9 @@ fn test_shared_runtime_provider_head_of_line() {
     assert!(
         service
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
     assert!(
         detector
@@ -626,7 +648,9 @@ fn test_shared_runtime_provider_head_of_line() {
     assert!(
         supervisor
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
-            .snapshot.active_operations == 0
+            .snapshot
+            .active_operations
+            == 0
     );
 }
 
@@ -643,7 +667,8 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut first = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/hol/cancelled.py"), 4096)
                 .await
@@ -671,7 +696,8 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     let second_detector = Arc::clone(&detector);
     let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
     let mut second = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, bytes));
             std::future::poll_fn(|context| match inference.as_mut().poll(context) {
                 Poll::Ready(result) => {
@@ -690,7 +716,10 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     if let Ok(state) = admission_state.as_ref() {
         assert_eq!(state, "pending", "second owned-byte request ended before queueing");
     } else {
-        panic!("second owned-byte request body ended before its queue handshake: {admission_state:?}; outcome={:?}", run_ready(second.wait_outcome()));
+        panic!(
+            "second owned-byte request body ended before its queue handshake: {admission_state:?}; outcome={:?}",
+            run_ready(second.wait_outcome())
+        );
     }
     // The second operation must still be waiting on the shared worker before
     // releasing the provider read.
@@ -736,7 +765,8 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
         .async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let rejected = body_detector
                 .detect_async_provider_path_managed(
                     &scope,
@@ -777,7 +807,8 @@ fn test_managed_provider_admission_rejects_cancelled_scope_before_provider_io() 
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let _ = scope.request_stop(qubit_operation::StopReason::UserCancelled);
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/cancelled.py"), 4096)
@@ -806,7 +837,8 @@ fn test_managed_provider_admission_rejects_closed_runtime_before_provider_io() {
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/closed.py"), 4096)
                 .await;
@@ -839,7 +871,8 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
         let body_detector = Arc::clone(&detector);
         handles.push(
             service
-                .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
                     body_detector
                         .detect_async_provider_path_managed(&scope, &file_system, &path("/full.py"), 4096)
                         .await
@@ -857,7 +890,8 @@ fn test_managed_provider_admission_rejects_full_capacity_before_provider_io() {
     let file_system = rejected.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut rejected_handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             let result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/over-capacity.py"), 4096)
                 .await;
@@ -892,7 +926,8 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/cancel-between-ops.py"), 4096)
                 .await
@@ -922,7 +957,8 @@ fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close()
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let handle = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/pending.py"), 4096)
                 .await
@@ -1841,7 +1877,8 @@ fn test_managed_owned_bytes_preserve_public_result_and_release_contract() {
     let request_detector = Arc::clone(&detector);
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
     let mut request = service
-        .as_async().try_submit(OperationOptions::default(), move |scope| async move {
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
             request_detector.detect_bytes_managed(&scope, PYTHON.to_vec()).await
         })
         .unwrap();
@@ -1877,7 +1914,8 @@ fn test_managed_owned_bytes_preserve_public_result_and_release_contract() {
     let mut rejected_options = OperationOptions::default();
     rejected_options.limits.child_operations = 0;
     let mut rejected_request = service
-        .as_async().try_submit(rejected_options, move |scope| async move {
+        .as_async()
+        .try_submit(rejected_options, move |scope| async move {
             assert!(
                 rejected_detector
                     .detect_bytes_managed(&scope, Vec::new())

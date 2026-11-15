@@ -20,11 +20,11 @@ use std::time::Duration;
 use qubit_mime::MimeError;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::GroupOptions;
-use qubit_operation::StopReason;
 use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
 use qubit_operation::ShutdownMode;
+use qubit_operation::StopReason;
 
 use super::super::worker_input::WorkerBytes;
 use super::ManagedInferenceRuntime;
@@ -294,11 +294,11 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
     let mut first = service
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
-                let mut admission = first_runtime.reserve_for_provider(Some(&scope), 8)?;
-                let _ = scope.request_stop(StopReason::UserCancelled);
-                assert!(admission.begin_provider_operation().is_err());
-                Ok::<_, MimeError>(())
-            })
+            let mut admission = first_runtime.reserve_for_provider(Some(&scope), 8)?;
+            let _ = scope.request_stop(StopReason::UserCancelled);
+            assert!(admission.begin_provider_operation().is_err());
+            Ok::<_, MimeError>(())
+        })
         .unwrap();
     let _ = block_on(first.wait_outcome());
 
@@ -306,13 +306,13 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
     let mut later = service
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
-                let mut admission = later_runtime.reserve_for_provider(Some(&scope), 8)?;
-                admission.begin_provider_operation()?;
-                admission.provider_operation_completed();
-                let _ = scope.request_stop(StopReason::UserCancelled);
-                assert!(admission.begin_provider_operation().is_err());
-                Ok::<_, MimeError>(())
-            })
+            let mut admission = later_runtime.reserve_for_provider(Some(&scope), 8)?;
+            admission.begin_provider_operation()?;
+            admission.provider_operation_completed();
+            let _ = scope.request_stop(StopReason::UserCancelled);
+            assert!(admission.begin_provider_operation().is_err());
+            Ok::<_, MimeError>(())
+        })
         .unwrap();
     let _ = block_on(later.wait_outcome());
 
@@ -448,13 +448,14 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
         std::thread::park_timeout(Duration::from_millis(1));
     }
     if !worker_gate_entered {
-        worker_rx.recv_timeout(Duration::from_secs(2)).expect("worker should be waiting at the release gate");
+        worker_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should be waiting at the release gate");
     }
     let state = runtime.tasks.lock().unwrap().first().unwrap().clone();
     assert!(!state.wait_worker_done_blocking(Duration::ZERO));
     drop(future);
     gate_cleanup.release();
-    let state = runtime.tasks.lock().unwrap().first().unwrap().clone();
     assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(state.wait_released_blocking(Duration::from_secs(2)));
     assert!(runtime.byte_budget.try_acquire(8).is_some());

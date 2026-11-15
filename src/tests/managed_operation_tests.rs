@@ -2,6 +2,8 @@
 //    Copyright (c) 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Public operation integration for the session-owning Magika runtime.
 
@@ -44,7 +46,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 #[test]
-fn public_child_result_precedes_worker_resource_release() {
+fn test_public_child_result_precedes_worker_resource_release() {
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
     let group = manager.group(GroupOptions { capacity: 2 }).unwrap();
     let worker_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
@@ -90,7 +92,7 @@ fn public_child_result_precedes_worker_resource_release() {
 }
 
 #[test]
-fn public_stop_returns_outcome_while_native_worker_retains_resources() {
+fn test_public_stop_returns_outcome_while_native_worker_retains_resources() {
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
     let group = manager.group(GroupOptions { capacity: 2 }).unwrap();
     let entered = std::sync::mpsc::channel();
@@ -120,7 +122,10 @@ fn public_stop_returns_outcome_while_native_worker_retains_resources() {
         .unwrap();
     entered.1.recv_timeout(Duration::from_secs(2)).unwrap();
     let _ = operation.request_stop(StopReason::UserCancelled);
-    assert!(matches!(block_on(operation.wait_outcome()).unwrap(), OperationOutcome::Stopped(_)));
+    assert!(matches!(
+        block_on(operation.wait_outcome()).unwrap(),
+        OperationOutcome::Stopped(_)
+    ));
     assert!(group.snapshot().active_operations > 0);
 
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(20));
@@ -134,7 +139,7 @@ fn public_stop_returns_outcome_while_native_worker_retains_resources() {
 }
 
 #[test]
-fn runtime_group_shutdown_does_not_close_the_application_manager() {
+fn test_runtime_group_shutdown_does_not_close_the_application_manager() {
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::new(manager.clone(), 16).unwrap());
     let independent_group = manager.group(GroupOptions { capacity: 1 }).unwrap();
@@ -144,5 +149,8 @@ fn runtime_group_shutdown_does_not_close_the_application_manager() {
     let mut handle = independent_group
         .try_submit(OperationOptions::default(), |_| Ok::<_, MimeError>(()))
         .unwrap();
-    assert!(matches!(handle.wait_outcome().unwrap(), OperationOutcome::Succeeded(())));
+    assert!(matches!(
+        handle.wait_outcome().unwrap(),
+        OperationOutcome::Succeeded(())
+    ));
 }

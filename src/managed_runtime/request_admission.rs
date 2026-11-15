@@ -14,11 +14,11 @@ use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::OperationScope;
 use qubit_operation::ResourceRef;
-use super::service_permit::ServicePermit;
 
 use super::byte_permit::BytePermit;
 use super::job::Job;
 pub(super) use super::request_resource_owner::RequestResourceOwner;
+use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 
@@ -166,6 +166,15 @@ impl RequestAdmission {
         }
     }
 
+    /// Retains one resource reference in the optional parent scope.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Parent scope that owns the inference request.
+    ///
+    /// # Returns
+    ///
+    /// The scope reference, or an error when the scope rejects it.
     pub(super) fn scope_resources(scope: Option<&OperationScope>) -> MimeResult<Vec<ResourceRef<()>>> {
         match scope {
             Some(scope) => Ok(vec![scope.manage(()).map_err(|error| {
@@ -175,15 +184,23 @@ impl RequestAdmission {
         }
     }
 
+    /// Adds a parent or child scope reference to this request's retained
+    /// resources.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Operation scope that must remain active until request
+    ///   release.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation scope rejects the reference.
     pub(crate) fn retain_in_scope(&mut self, scope: &OperationScope) -> MimeResult<()> {
         self.scope_resources.push(scope.manage(()).map_err(|error| {
             MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
         })?);
         Ok(())
     }
-
-
-
 }
 
 /// Settles or retains resources when an admission lease is abandoned.
@@ -214,12 +231,13 @@ impl Drop for RequestAdmission {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
     use qubit_operation::ManagerOptions;
     use qubit_operation::OperationManager;
 
+    use super::super::service_permit::ServicePermit;
     use super::RequestAdmission;
     use super::RequestResourceOwner;
-    use super::super::service_permit::ServicePermit;
     use crate::managed_runtime::byte_budget::ByteBudget;
     use crate::managed_runtime::task_state::TaskState;
 
@@ -233,7 +251,13 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(700, None));
-        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, Vec::new(), true));
+        let owner = Arc::new(RequestResourceOwner::new(
+            Arc::downgrade(&state),
+            service,
+            permit,
+            Vec::new(),
+            true,
+        ));
         state.attach_owner(Arc::clone(&owner));
 
         owner.worker_done();
@@ -251,7 +275,13 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(702, None));
-        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, Vec::new(), true));
+        let owner = Arc::new(RequestResourceOwner::new(
+            Arc::downgrade(&state),
+            service,
+            permit,
+            Vec::new(),
+            true,
+        ));
         state.attach_owner(Arc::clone(&owner));
 
         owner.driver_done();
@@ -288,7 +318,10 @@ mod tests {
                 Ok::<_, ()>(())
             })
             .unwrap();
-        assert!(matches!(operation.wait_outcome().unwrap(), qubit_operation::OperationOutcome::Succeeded(())));
+        assert!(matches!(
+            operation.wait_outcome().unwrap(),
+            qubit_operation::OperationOutcome::Succeeded(())
+        ));
     }
 
     #[test]

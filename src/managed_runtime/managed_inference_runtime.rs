@@ -10,8 +10,8 @@
 use std::future::Future;
 use std::future::poll_fn;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 use std::task::Context;
@@ -25,8 +25,8 @@ use magika::Session;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
-use qubit_operation::GroupOptions;
 use qubit_operation::ChildRequirement;
+use qubit_operation::GroupOptions;
 use qubit_operation::OperationGroup;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
@@ -285,7 +285,8 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit_operation(Some(scope), WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice()))).await
+        self.submit_operation(Some(scope), WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))
+            .await
     }
 
     /// Classifies borrowed content through the worker without a parent scope.
@@ -313,7 +314,11 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit_operation(None, WorkerInput::Bytes(worker_bytes(content.to_vec().into_boxed_slice()))).await
+        self.submit_operation(
+            None,
+            WorkerInput::Bytes(worker_bytes(content.to_vec().into_boxed_slice())),
+        )
+        .await
     }
 
     /// Classifies owned bytes through the worker without registering a parent.
@@ -338,9 +343,24 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit_operation(None, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice()))).await
+        self.submit_operation(None, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))
+            .await
     }
 
+    /// Submits worker input through a public operation body.
+    ///
+    /// # Parameters
+    ///
+    /// * `parent` - Optional parent scope that owns the submitted child.
+    /// * `input` - Input and resources retained by the inference worker.
+    ///
+    /// # Returns
+    ///
+    /// The worker's MIME mapping, or `None` when it has no mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns admission, worker, or inference errors.
     async fn submit_operation(
         self: &Arc<Self>,
         parent: Option<&OperationScope>,
@@ -354,23 +374,25 @@ impl ManagedInferenceRuntime {
         let admission = self.reserve_request(None, byte_count)?;
         let runtime = Arc::clone(self);
         let body = move |scope| async move {
-                let mut admission = admission;
-                admission.retain_in_scope(&scope)?;
-                let mut inference = Box::pin(runtime.dispatch(admission, input)?);
-                let mut stop = Box::pin(scope.context().stop_requested());
-                poll_fn(|cx: &mut Context<'_>| {
-                    if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
-                        return Poll::Ready(Err(MimeError::detector_backend("magika", "inference stopped")));
-                    }
-                    inference.as_mut().poll(cx)
-                })
-                .await
-            };
-        let mut options = OperationOptions::default();
+            let mut admission = admission;
+            admission.retain_in_scope(&scope)?;
+            let mut inference = Box::pin(runtime.dispatch(admission, input)?);
+            let mut stop = Box::pin(scope.context().stop_requested());
+            poll_fn(|cx: &mut Context<'_>| {
+                if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
+                    return Poll::Ready(Err(MimeError::detector_backend("magika", "inference stopped")));
+                }
+                inference.as_mut().poll(cx)
+            })
+            .await
+        };
+        let options = OperationOptions {
+            requirement: ChildRequirement::Optional,
+            ..OperationOptions::default()
+        };
         // This operation is an implementation detail behind a MIME Result;
         // preserve the result for the caller to handle instead of replacing
         // the parent operation's own outcome with ChildFailed.
-        options.requirement = ChildRequirement::Optional;
         let mut operation = match parent {
             Some(scope) => scope.manager().as_async().try_submit(options.clone(), body),
             None => self.service_group.as_async().try_submit(options, body),
@@ -389,9 +411,14 @@ impl ManagedInferenceRuntime {
             OperationOutcome::Succeeded(result) => Ok(result),
             OperationOutcome::Failed(error) => Err(error),
             OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "inference stopped")),
-            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend("magika", format!("inference child failed: {summary:?}"))),
+            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
+                "magika",
+                format!("inference child failed: {summary:?}"),
+            )),
             OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "inference operation panicked")),
-            OperationOutcome::ExecutionFailed(_) => Err(MimeError::detector_backend("magika", "inference executor failed")),
+            OperationOutcome::ExecutionFailed(_) => {
+                Err(MimeError::detector_backend("magika", "inference executor failed"))
+            }
         }
     }
 
@@ -819,6 +846,11 @@ impl ManagedInferenceRuntime {
         }
     }
 
+    /// Captures the runtime group and local request counts.
+    ///
+    /// # Returns
+    ///
+    /// A shutdown snapshot for this runtime's managed operations.
     fn admission_report(&self) -> ShutdownReport {
         let group = self.service_group.snapshot();
         ShutdownReport {

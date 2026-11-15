@@ -22,9 +22,9 @@ use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
-pub(crate) struct AsyncProviderInput<'a> {
+pub(crate) struct AsyncProviderInput {
     /// Filesystem supplying the requested ranges.
-    route: AsyncRoute<'a>,
+    route: AsyncRoute,
     /// Complete logical resource length reported to Magika.
     length: u64,
     /// Optional version constraint applied to each range read.
@@ -33,49 +33,24 @@ pub(crate) struct AsyncProviderInput<'a> {
     budget: ReadBudget,
 }
 
-impl<'a> AsyncProviderInput<'a> {
-    /// Creates an asynchronous input for one provider resource.
-    ///
-    /// The filesystem and path are borrowed until feature extraction
-    /// completes. When supplied, `version` is required for every legacy range.
+impl AsyncProviderInput {
+    /// Creates an owned filesystem input suitable for managed operation
+    /// submission, whose body must be `'static`.
     ///
     /// # Parameters
     ///
-    /// * `file_system` - Asynchronous filesystem that supplies resource ranges.
-    /// * `path` - Path of the resource within the filesystem.
-    /// * `length` - Complete logical resource length reported to Magika.
-    /// * `version` - Optional resource version required for each legacy range.
-    /// * `limit` - Maximum cumulative bytes reserved across all reads.
-    ///
-    /// # Returns
-    ///
-    /// An asynchronous input using the legacy path route and a fresh byte
-    /// budget.
-    #[must_use]
-    pub(crate) fn new(
-        file_system: &'a AsyncFileSystem,
-        path: &'a Path,
-        length: u64,
-        version: Option<ResourceVersion>,
-        limit: usize,
-    ) -> Self {
-        Self {
-            route: AsyncRoute::Legacy { file_system, path },
-            length,
-            version,
-            budget: ReadBudget::new(limit),
-        }
-    }
-
-    /// Creates an owned filesystem input suitable for managed operation
-    /// submission, whose body must be `'static`.
+    /// * `file_system` - Filesystem used to open provider ranges.
+    /// * `path` - Resource path used for provider access.
+    /// * `length` - Input length reported by the provider.
+    /// * `version` - Optional version used to guard conditional reads.
+    /// * `limit` - Maximum bytes allowed for sampling.
     pub(crate) fn new_owned(
         file_system: AsyncFileSystem,
         path: Path,
         length: u64,
         version: Option<ResourceVersion>,
         limit: usize,
-    ) -> AsyncProviderInput<'static> {
+    ) -> Self {
         AsyncProviderInput {
             route: AsyncRoute::OwnedLegacy { file_system, path },
             length,
@@ -107,7 +82,7 @@ impl<'a> AsyncProviderInput<'a> {
     }
 }
 
-impl AsyncInput for AsyncProviderInput<'_> {
+impl AsyncInput for AsyncProviderInput {
     /// Returns the complete logical resource length captured at construction.
     ///
     /// # Returns
@@ -134,18 +109,6 @@ impl AsyncInput for AsyncProviderInput<'_> {
     /// budget, or cannot be read exactly from the provider.
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         match &mut self.route {
-            AsyncRoute::Legacy { file_system, path } => {
-                read_async(
-                    file_system,
-                    path,
-                    self.length,
-                    self.version.as_ref(),
-                    &mut self.budget,
-                    buffer,
-                    offset,
-                )
-                .await
-            }
             AsyncRoute::OwnedLegacy { file_system, path } => {
                 read_async(
                     file_system,

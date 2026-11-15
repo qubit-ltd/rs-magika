@@ -8,10 +8,13 @@
 //! Aggregate release of runtime and byte reservations.
 
 use qubit_operation::ResourceRef;
-use super::service_permit::ServicePermit;
 
 use super::byte_permit::BytePermit;
+use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
+
+/// Resources released together after worker and provider completion.
+type RetainedResources = (ServicePermit, BytePermit, Vec<ResourceRef<()>>);
 
 /// Holds runtime and byte capacity until the registered worker and sampling
 /// driver have both completed. A dropped Pending provider read intentionally
@@ -21,7 +24,7 @@ pub(super) struct RequestResourceOwner {
     /// Weak task state notified on aggregate release.
     state: std::sync::Weak<TaskState>,
     /// Runtime and byte permits retained until both participants finish.
-    resources: std::sync::Mutex<Option<(ServicePermit, BytePermit, Vec<ResourceRef<()>>)>>,
+    resources: std::sync::Mutex<Option<RetainedResources>>,
     /// Driver completion, worker completion, and release publication.
     facts: std::sync::Mutex<(bool, bool, bool)>,
 }
@@ -108,7 +111,13 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(4));
         let permit = budget.try_acquire(4).unwrap();
         let state = Arc::new(TaskState::new(14, None));
-        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, Vec::new(), true));
+        let owner = Arc::new(RequestResourceOwner::new(
+            Arc::downgrade(&state),
+            service,
+            permit,
+            Vec::new(),
+            true,
+        ));
 
         let poisoned_facts = Arc::clone(&owner);
         assert!(

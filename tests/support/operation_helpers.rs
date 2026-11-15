@@ -2,6 +2,8 @@
 //    Copyright (c) 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Blocking helpers for tests exercising the public async operation API.
 
@@ -24,7 +26,9 @@ impl ShutdownBlocking for OperationGroup {
     fn shutdown_blocking(&self, mode: ShutdownMode, timeout: Duration) -> BlockingShutdown {
         let handle = self.request_shutdown(mode);
         let _ = handle.wait_for(timeout).expect("group shutdown should be observable");
-        BlockingShutdown { snapshot: handle.snapshot() }
+        BlockingShutdown {
+            snapshot: handle.snapshot(),
+        }
     }
 }
 
@@ -32,6 +36,8 @@ impl ShutdownBlocking for OperationManager {
     fn shutdown_blocking(&self, mode: ShutdownMode, timeout: Duration) -> BlockingShutdown {
         let handle = self.request_shutdown(mode);
         let _ = handle.wait_for(timeout).expect("manager shutdown should be observable");
-        BlockingShutdown { snapshot: handle.snapshot() }
+        BlockingShutdown {
+            snapshot: handle.snapshot(),
+        }
     }
 }

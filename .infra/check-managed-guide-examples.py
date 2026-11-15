@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 
@@ -33,8 +34,8 @@ def extract_example(markdown: str, guide_name: str) -> str:
         raise ValueError(f"{guide_name}: expected exactly one non-empty Rust code block")
     example = fences[0]
     required_imports = (
-        "use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};",
-        "use qubit_operation::supervisor::{OperationSupervisor, ServiceGroup, ShutdownMode};",
+        "use qubit_magika::MagikaMimeDetector;",
+        "use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};",
     )
     if any(required not in example for required in required_imports):
         raise ValueError(f"{guide_name}: managed example is missing required imports")
@@ -44,12 +45,12 @@ def extract_example(markdown: str, guide_name: str) -> str:
 def run_self_tests() -> None:
     valid = (
         f"{START}\n```rust\n"
-        "use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};\n"
-        "use qubit_operation::supervisor::{OperationSupervisor, ServiceGroup, ShutdownMode};\n"
+        "use qubit_magika::MagikaMimeDetector;\n"
+        "use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};\n"
         "```\n"
         f"{END}"
     )
-    assert "ServiceGroup" in extract_example(valid, "fixture")
+    assert "GroupOptions" in extract_example(valid, "fixture")
     for invalid, label in (
         (valid.replace(START, ""), "missing start marker"),
         (valid + "\n" + START, "repeated start marker"),
@@ -61,13 +62,13 @@ def run_self_tests() -> None:
             pass
         else:
             raise AssertionError(f"accepted invalid fixture: {label}")
-    missing_import = valid.replace("ServiceGroup", "SomeOtherType")
+    missing_import = valid.replace("GroupOptions", "SomeOtherType")
     try:
         extract_example(missing_import, "Chinese fixture")
     except ValueError:
         pass
     else:
-        raise AssertionError("accepted guide fixture with missing ServiceGroup import")
+        raise AssertionError("accepted guide fixture with missing GroupOptions import")
 
 
 def toml_string(value: Path) -> str:
@@ -84,6 +85,13 @@ def main() -> int:
         return 0
 
     project_root = Path(__file__).resolve().parent.parent
+    project_manifest = tomllib.loads((project_root / "Cargo.toml").read_text(encoding="utf-8"))
+    operation_dependency = project_manifest["dependencies"]["qubit-operation"]
+    operation_path = (project_root / operation_dependency["path"]).resolve()
+    operation_version = operation_dependency["version"]
+    file_system_dependency = project_manifest["dependencies"]["qubit-fs"]
+    file_system_version = file_system_dependency["version"]
+    file_system_features = file_system_dependency.get("features", [])
     examples = [
         extract_example((project_root / guide).read_text(encoding="utf-8"), guide)
         for guide in GUIDES
@@ -103,6 +111,8 @@ edition = "2024"
 
 [dependencies]
 qubit-magika = {{ path = {toml_string(project_root)} }}
+qubit-operation = {{ path = {toml_string(operation_path)}, version = {operation_version!r} }}
+qubit-fs = {{ version = {file_system_version!r}, default-features = false, features = {file_system_features!r} }}
 """
         (consumer / "Cargo.toml").write_text(manifest, encoding="utf-8")
         print(f"Compiling guide examples extracted from {', '.join(GUIDES)}")

@@ -8,8 +8,8 @@
 //! Test-only worker construction helpers for managed inference runtime.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 
@@ -123,7 +123,9 @@ impl ManagedInferenceRuntime {
                 before_worker_exit();
             })
             .expect("test inference worker should start");
-        let service_group = supervisor.group(GroupOptions { capacity: 2 }).expect("operation group should construct");
+        let service_group = supervisor
+            .group(GroupOptions { capacity: 2 })
+            .expect("operation group should construct");
         Self {
             sender: Mutex::new(Some(sender)),
             worker: Mutex::new(WorkerState::new(worker)),

@@ -309,71 +309,65 @@ for the application lifetime, then pass the request scope explicitly:
 
 <!-- managed-guide-example-start -->
 ```rust,no_run
+use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
 use qubit_fs::{AsyncFileSystem, Path};
-use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};
-use qubit_operation::report::OperationOutcome;
-use qubit_operation::report::SupervisorLimits;
-use qubit_operation::scope::ScopeOptions;
-use qubit_operation::supervisor::{OperationSupervisor, ServiceGroup, ShutdownMode};
+use qubit_magika::MagikaMimeDetector;
+use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};
 
 fn prepare_application() -> Result<(
-    OperationSupervisor,
-    ServiceGroup,
+    OperationManager,
+    qubit_operation::OperationGroup,
     Arc<MagikaMimeDetector>,
-), Box<dyn std::error::Error>> {
-    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
-    let service = supervisor.service_group(4)?;
-    let config = qubit_mime::MimeConfig::default();
-    let runtime = Arc::new(ManagedInferenceRuntime::new(
-        supervisor.clone(),
-        config.max_buffer_size(),
-    )?);
+), Box<dyn Error>> {
+    let manager = OperationManager::new(ManagerOptions::default())?;
+    let service = manager.group(GroupOptions { capacity: 4 })?;
     let detector = Arc::new(
         MagikaMimeDetector::builder()
-            .mime_config(config)
-            .managed_runtime(runtime)
+            .operation_manager(manager.clone())
             .build()?,
     );
-    Ok((supervisor, service, detector))
+    Ok((manager, service, detector))
 }
 
 async fn detect_request(
-    service: &ServiceGroup,
+    service: &qubit_operation::OperationGroup,
     detector: &Arc<MagikaMimeDetector>,
-    file_system: Arc<AsyncFileSystem>,
+    file_system: AsyncFileSystem,
     path: Path,
-) -> Result<(
-    OperationOutcome<Option<String>, qubit_mime::MimeError>,
-    qubit_operation::report::SettlementReport,
-), Box<dyn std::error::Error>> {
-    let request_detector = Arc::clone(&detector);
-    let mut request = service.start(ScopeOptions::default(), move |scope| async move {
-        request_detector
-            .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
-            .await
-    })?;
-    let outcome = request.result().await?;
-    let settlement = request.released().await;
-    Ok((outcome, settlement))
+) -> Result<(), Box<dyn Error>> {
+    let request_detector = Arc::clone(detector);
+    let mut request = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            request_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
+                .await
+        })?;
+    match request.wait_outcome().await? {
+        OperationOutcome::Succeeded(mime) => println!("detected MIME: {mime:?}"),
+        other => return Err(format!("detection operation did not succeed: {other:?}").into()),
+    }
+    let settlement = request.wait_settlement().await;
+    if !settlement.all_released() {
+        return Err("request resources are still in use".into());
+    }
+    Ok(())
 }
 
 fn shutdown_application(
-    supervisor: &OperationSupervisor,
-    service: &ServiceGroup,
+    manager: &OperationManager,
     detector: &MagikaMimeDetector,
-) {
-    // Stop admitting requests before calling this function and wait for active
-    // request futures to finish. A timed-out report keeps pending work visible;
-    // it does not mean that the work was forcibly stopped.
-    let service_report = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
-    assert!(service_report.is_complete());
+) -> Result<(), Box<dyn Error>> {
     let detector_report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(detector_report.worker_stopped);
-    let supervisor_report = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
-    assert!(supervisor_report.is_complete());
+    let manager_report = manager
+        .request_shutdown(ShutdownMode::Drain)
+        .wait_for(Duration::from_secs(30))?;
+    let _snapshot = manager_report;
+    Ok(())
 }
 ```
 <!-- managed-guide-example-end -->
