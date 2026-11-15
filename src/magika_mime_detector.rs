@@ -32,8 +32,8 @@ use qubit_mime::MimeDetectorCore;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
-use qubit_operation::scope::OperationScope;
-use qubit_operation::supervisor::ShutdownMode;
+use qubit_operation::OperationScope;
+use qubit_operation::ShutdownMode;
 
 use crate::internal::AsyncProviderInput;
 use crate::internal::ReadSeekInput;
@@ -294,7 +294,13 @@ impl MagikaMimeDetector {
                     .supports(FileSystemCapability::ConditionalRead)
                     .then(|| metadata.etag().cloned())
                     .flatten();
-                let input = AsyncProviderInput::new(file_system, path, length, version, max_bytes);
+                let input = AsyncProviderInput::new_owned(
+                    file_system.clone(),
+                    path.clone(),
+                    length,
+                    version,
+                    max_bytes,
+                );
                 return self
                     .runtime
                     .detect_async_input_admitted(admission, input, max_bytes, map_provider_magika_error)
@@ -1056,7 +1062,7 @@ mod tests {
             detector
                 .runtime
                 .shutdown_blocking(
-                    qubit_operation::supervisor::ShutdownMode::Drain,
+                    qubit_operation::ShutdownMode::Drain,
                     std::time::Duration::from_secs(30),
                 )
                 .worker_stopped

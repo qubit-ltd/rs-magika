@@ -14,8 +14,7 @@ use std::sync::Weak;
 use std::task::Waker;
 
 use qubit_mime::MimeResult;
-use qubit_operation::report::ChildBusinessOutcome;
-use qubit_operation::report::OperationId;
+use qubit_operation::ChildOutcomeKind;
 
 pub(super) use super::admission_gate::AdmissionGate;
 use super::task_inner::TaskInner;
@@ -24,7 +23,7 @@ use crate::internal::async_sample_bridge::AsyncSampleBridge;
 /// State observed by both the worker and operation control adapter.
 pub(super) struct TaskState {
     /// Stable identity attached to the managed child report.
-    pub(super) operation_id: OperationId,
+    pub(super) operation_id: u64,
     /// Mutable result and lifecycle facts.
     pub(super) inner: Mutex<TaskInner>,
     /// Blocking notification used by synchronous inference callers.
@@ -49,7 +48,7 @@ impl TaskState {
     /// * `operation_id` - Stable identifier reported to the parent scope.
     /// * `bridge` - Weak bridge reference closed when this task is stopped.
     #[cfg(test)]
-    pub(super) fn new(operation_id: OperationId, bridge: Option<Weak<AsyncSampleBridge>>) -> Self {
+    pub(super) fn new(operation_id: u64, bridge: Option<Weak<AsyncSampleBridge>>) -> Self {
         Self::new_registered(operation_id, bridge, None, None)
     }
 
@@ -68,7 +67,7 @@ impl TaskState {
     ///
     /// A new state with no result or lifecycle facts recorded.
     pub(super) fn new_registered(
-        operation_id: OperationId,
+        operation_id: u64,
         bridge: Option<Weak<AsyncSampleBridge>>,
         active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
         admission_gate: Option<Weak<Mutex<AdmissionGate>>>,
@@ -234,7 +233,7 @@ impl TaskState {
     ///
     /// * `result` - MIME inference result produced by the worker.
     /// * `business` - Worker outcome corresponding to the stored result.
-    pub(super) fn finish_business(&self, result: MimeResult<Option<String>>, business: ChildBusinessOutcome) {
+    pub(super) fn finish_business(&self, result: MimeResult<Option<String>>, business: ChildOutcomeKind) {
         let wakers = {
             let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
             if inner.business.is_none() {
@@ -281,8 +280,8 @@ fn wake_all(wakers: Vec<Waker>) {
 mod tests {
     use std::sync::Arc;
 
-    use qubit_operation::report::ChildBusinessOutcome;
-    use qubit_operation::report::OperationId;
+    use qubit_operation::ChildOutcomeKind;
+    use qubit_operation::OperationId;
 
     use super::TaskState;
 
@@ -300,7 +299,7 @@ mod tests {
         state.request_stop();
         assert!(state.stop_requested());
         state.mark_started();
-        state.finish_business(Ok(None), ChildBusinessOutcome::Stopped);
+        state.finish_business(Ok(None), ChildOutcomeKind::Stopped);
         state.mark_released();
         let inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
         assert!(inner.started);
@@ -485,14 +484,14 @@ mod tests {
     #[test]
     fn test_business_terminal_fact_is_write_once() {
         let state = TaskState::new(OperationId::new(5), None);
-        state.finish_business(Ok(Some("first".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(Ok(Some("first".to_owned())), ChildOutcomeKind::Succeeded);
         state.finish_business(
             Err(qubit_mime::MimeError::detector_backend("test", "later")),
-            ChildBusinessOutcome::Failed,
+            ChildOutcomeKind::Failed,
         );
 
         let inner = state.inner.lock().unwrap();
-        assert_eq!(inner.business, Some(ChildBusinessOutcome::Succeeded));
+        assert_eq!(inner.business, Some(ChildOutcomeKind::Succeeded));
         assert!(matches!(inner.result.as_ref(), Some(Ok(Some(value))) if value == "first"));
     }
 
@@ -505,11 +504,11 @@ mod tests {
                 "test",
                 "stopped before execution",
             )),
-            ChildBusinessOutcome::Stopped,
+            ChildOutcomeKind::Stopped,
         );
 
         let inner = state.inner.lock().unwrap();
-        assert_eq!(inner.business, Some(ChildBusinessOutcome::Stopped));
+        assert_eq!(inner.business, Some(ChildOutcomeKind::Stopped));
         assert!(matches!(inner.result.as_ref(), Some(Err(_))));
     }
 
@@ -517,10 +516,10 @@ mod tests {
     fn test_result_winning_stop_race_keeps_matching_business_outcome() {
         let state = TaskState::new(OperationId::new(7), None);
         state.request_stop();
-        state.finish_business(Ok(Some("text/plain".to_owned())), ChildBusinessOutcome::Succeeded);
+        state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
 
         let inner = state.inner.lock().unwrap();
-        assert_eq!(inner.business, Some(ChildBusinessOutcome::Succeeded));
+        assert_eq!(inner.business, Some(ChildOutcomeKind::Succeeded));
         assert!(matches!(inner.result.as_ref(), Some(Ok(Some(value))) if value == "text/plain"));
     }
 }

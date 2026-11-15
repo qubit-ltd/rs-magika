@@ -67,6 +67,23 @@ impl<'a> AsyncProviderInput<'a> {
         }
     }
 
+    /// Creates an owned filesystem input suitable for managed operation
+    /// submission, whose body must be `'static`.
+    pub(crate) fn new_owned(
+        file_system: AsyncFileSystem,
+        path: Path,
+        length: u64,
+        version: Option<ResourceVersion>,
+        limit: usize,
+    ) -> AsyncProviderInput<'static> {
+        AsyncProviderInput {
+            route: AsyncRoute::OwnedLegacy { file_system, path },
+            length,
+            version,
+            budget: ReadBudget::new(limit),
+        }
+    }
+
     /// Creates a session-backed input retaining the opened object through
     /// feature extraction.
     ///
@@ -118,6 +135,18 @@ impl AsyncInput for AsyncProviderInput<'_> {
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         match &mut self.route {
             AsyncRoute::Legacy { file_system, path } => {
+                read_async(
+                    file_system,
+                    path,
+                    self.length,
+                    self.version.as_ref(),
+                    &mut self.budget,
+                    buffer,
+                    offset,
+                )
+                .await
+            }
+            AsyncRoute::OwnedLegacy { file_system, path } => {
                 read_async(
                     file_system,
                     path,

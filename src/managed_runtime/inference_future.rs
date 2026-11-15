@@ -16,9 +16,6 @@ use std::task::Context;
 use std::task::Poll;
 
 use qubit_mime::MimeResult;
-use qubit_operation::protocol::ManagedOperationControl;
-use qubit_operation::report::StopReason;
-
 use super::task_control::register_waker;
 use super::task_state::TaskState;
 
@@ -26,8 +23,6 @@ use super::task_state::TaskState;
 pub(super) struct InferenceFuture {
     /// Shared result and release state for the admitted job.
     state: Arc<TaskState>,
-    /// Control handle used to request cooperative stop on future drop.
-    control: Arc<dyn ManagedOperationControl>,
     /// Whether this future has already returned its business result.
     completed: bool,
     /// Test handshake sent after the blocking waiter owns the state lock.
@@ -41,11 +36,9 @@ impl InferenceFuture {
     /// # Parameters
     ///
     /// * `state` - State populated by the worker.
-    /// * `control` - Managed control retained for cancellation.
-    pub(super) fn new(state: Arc<TaskState>, control: Arc<dyn ManagedOperationControl>) -> Self {
+    pub(super) fn new(state: Arc<TaskState>) -> Self {
         Self {
             state,
-            control,
             completed: false,
             #[cfg(test)]
             wait_started: None,
@@ -113,7 +106,7 @@ impl Drop for InferenceFuture {
     /// Requests cancellation if the consumer abandons a pending result.
     fn drop(&mut self) {
         if !self.completed {
-            self.control.request_stop(StopReason::UserCancelled);
+            self.state.request_stop();
         }
     }
 }
@@ -129,8 +122,8 @@ mod tests {
     use std::time::Duration;
 
     use qubit_operation::protocol::ManagedOperationControl;
-    use qubit_operation::report::ChildBusinessOutcome;
-    use qubit_operation::report::OperationId;
+    use qubit_operation::ChildOutcomeKind;
+    use qubit_operation::OperationId;
 
     use super::InferenceFuture;
     use crate::managed_runtime::task_control::TaskControl;

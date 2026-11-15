@@ -20,6 +20,11 @@ pub(super) enum AsyncRoute<'a> {
         /// Resource path used for each range.
         path: &'a Path,
     },
+    /// Filesystem and path owned by the submitted managed operation.
+    OwnedLegacy {
+        file_system: AsyncFileSystem,
+        path: Path,
+    },
     /// Reads ranges from one retained random-access session.
     Session {
         /// Opened reader retained for the input's lifetime.

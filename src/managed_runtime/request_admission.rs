@@ -11,11 +11,10 @@ use std::sync::Arc;
 
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
-use qubit_operation::protocol::ManagedOperationControl;
-use qubit_operation::report::ChildBusinessOutcome;
-use qubit_operation::report::OperationId;
-use qubit_operation::scope::OperationScope;
-use qubit_operation::supervisor::ServiceRequest;
+use qubit_operation::ChildOutcomeKind;
+use qubit_operation::OperationScope;
+use qubit_operation::OperationManager;
+use qubit_operation::ResourceRef;
 
 use super::byte_permit::BytePermit;
 use super::job::Job;
@@ -27,10 +26,12 @@ use super::worker_input::WorkerInput;
 pub(crate) struct RequestAdmission {
     /// Shared lifecycle state for this request.
     pub(super) state: Arc<TaskState>,
-    /// Control handle attached to an optional parent scope.
-    control: Arc<dyn ManagedOperationControl>,
     /// Runtime service capacity held until release.
-    service: Option<ServiceRequest>,
+    service: Option<ResourceRef<()>>,
+    /// Parent operation scope reference held until release.
+    scope_resources: Vec<ResourceRef<()>>,
+    /// Public manager view bound to the parent, when one was supplied.
+    parent_manager: Option<OperationManager>,
     /// Input byte capacity held until release.
     bytes: Option<BytePermit>,
     /// Whether worker ownership has been established.
@@ -54,17 +55,17 @@ impl RequestAdmission {
     ///
     /// An admission lease holding all reserved resources.
     pub(super) fn new(
-        id: OperationId,
         state: Arc<TaskState>,
-        control: Arc<dyn ManagedOperationControl>,
-        service: ServiceRequest,
+        service: ResourceRef<()>,
+        scope_resources: Vec<ResourceRef<()>>,
+        parent_manager: Option<OperationManager>,
         bytes: BytePermit,
     ) -> Self {
-        let _ = id;
         Self {
             state,
-            control,
             service: Some(service),
+            scope_resources,
+            parent_manager,
             bytes: Some(bytes),
             dispatched: false,
             provider_pending: false,
@@ -122,6 +123,7 @@ impl RequestAdmission {
                     Arc::downgrade(&self.state),
                     self.service.take().expect("admission lease is present"),
                     self.bytes.take().expect("byte lease is present"),
+                    std::mem::take(&mut self.scope_resources),
                     driver_required,
                 ));
                 self.state.attach_owner(Arc::clone(&owner));
@@ -142,7 +144,7 @@ impl RequestAdmission {
                         "magika",
                         "inference worker queue is full or closed",
                     )),
-                    ChildBusinessOutcome::Failed,
+                    ChildOutcomeKind::Failed,
                 );
                 let state = Arc::clone(&rejected.state);
                 drop(rejected);
@@ -160,7 +162,7 @@ impl RequestAdmission {
     /// * `error` - Error reported to the task result.
     pub(crate) fn settle_error(&mut self, error: MimeError) {
         if !self.dispatched {
-            self.state.finish_business(Err(error), ChildBusinessOutcome::Failed);
+            self.state.finish_business(Err(error), ChildOutcomeKind::Failed);
             self.service.take();
             self.bytes.take();
             self.state.mark_released();
@@ -168,44 +170,26 @@ impl RequestAdmission {
         }
     }
 
-    /// Clones the operation control attached to this admission.
-    ///
-    /// # Returns
-    ///
-    /// The shared control handle.
-    pub(super) fn control(&self) -> Arc<dyn ManagedOperationControl> {
-        Arc::clone(&self.control)
+    pub(super) fn scope_resources(scope: Option<&OperationScope>) -> MimeResult<Vec<ResourceRef<()>>> {
+        match scope {
+            Some(scope) => Ok(vec![scope.manage(()).map_err(|error| {
+                MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
+            })?]),
+            None => Ok(Vec::new()),
+        }
     }
 
-    /// Commits this request as a child of the optional parent scope.
-    ///
-    /// # Parameters
-    ///
-    /// * `scope` - Parent scope, when this request is managed.
-    /// * `control` - Child control attached to the reservation.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` after the reservation commits.
-    pub(super) fn attach_scope(
-        scope: Option<&OperationScope>,
-        control: Arc<dyn ManagedOperationControl>,
-    ) -> MimeResult<()> {
-        if let Some(scope) = scope {
-            let mut reservation = scope
-                .reserve_child(qubit_operation::scope::ChildRequirement::Required)
-                .map_err(|error| {
-                    MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
-                })?;
-            reservation.attach(control).map_err(|error| {
-                MimeError::detector_backend("magika", format!("could not attach inference: {error:?}"))
-            })?;
-            reservation.commit().map_err(|error| {
-                MimeError::detector_backend("magika", format!("could not commit inference: {error:?}"))
-            })?;
-        }
+    pub(super) fn retain_in_scope(&mut self, scope: &OperationScope) -> MimeResult<()> {
+        self.scope_resources.push(scope.manage(()).map_err(|error| {
+            MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
+        })?);
         Ok(())
     }
+
+    pub(super) fn parent_manager(&self) -> Option<OperationManager> {
+        self.parent_manager.clone()
+    }
+
 }
 
 /// Settles or retains resources when an admission lease is abandoned.
@@ -220,6 +204,7 @@ impl Drop for RequestAdmission {
                     Arc::downgrade(&self.state),
                     self.service.take().expect("admission lease is present"),
                     self.bytes.take().expect("byte lease is present"),
+                    std::mem::take(&mut self.scope_resources),
                     true,
                 ));
                 owner.worker_done();
@@ -236,9 +221,9 @@ impl Drop for RequestAdmission {
 mod tests {
     use std::sync::Arc;
 
-    use qubit_operation::report::OperationId;
-    use qubit_operation::report::SupervisorLimits;
-    use qubit_operation::supervisor::OperationSupervisor;
+    use qubit_operation::OperationId;
+    use qubit_operation::ManagerOptions;
+    use qubit_operation::OperationManager;
 
     use super::RequestAdmission;
     use super::RequestResourceOwner;
@@ -248,13 +233,13 @@ mod tests {
 
     #[test]
     fn test_worker_completion_alone_keeps_provider_resources_until_driver_completion() {
-        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
         let service = supervisor.service_group(1).unwrap();
         let service = service.try_admit().unwrap();
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(OperationId::new(700), None));
-        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, None, true));
         state.attach_owner(Arc::clone(&owner));
 
         owner.worker_done();
@@ -268,12 +253,12 @@ mod tests {
 
     #[test]
     fn test_driver_completion_alone_keeps_provider_resources_until_worker_completion() {
-        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
         let service = supervisor.service_group(1).unwrap().try_admit().unwrap();
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(OperationId::new(702), None));
-        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, None, true));
         state.attach_owner(Arc::clone(&owner));
 
         owner.driver_done();
@@ -287,12 +272,12 @@ mod tests {
 
     #[test]
     fn test_resource_owner_releases_permits_when_task_state_is_gone() {
-        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
         let service = supervisor.service_group(1).unwrap().try_admit().unwrap();
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(OperationId::new(703), None));
-        let owner = RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true);
+        let owner = RequestResourceOwner::new(Arc::downgrade(&state), service, permit, None, true);
         drop(state);
 
         owner.driver_done();
@@ -304,11 +289,11 @@ mod tests {
     #[test]
     fn test_attach_scope_reports_child_limit_rejection() {
         use qubit_operation::protocol::ManagedOperationControl;
-        use qubit_operation::report::StopReason;
+        use qubit_operation::StopReason;
         use qubit_operation::scope::ScopeOptions;
-        use qubit_operation::supervisor::OperationSupervisor;
+        use qubit_operation::OperationManager;
 
-        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
         let service = supervisor.service_group(1).unwrap();
         let mut options = ScopeOptions::default();
         options.limits.child_operations = 0;
@@ -326,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_dropped_pending_provider_operation_retains_admission_without_claiming_release() {
-        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
         let service = supervisor.service_group(1).unwrap().try_admit().unwrap();
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();

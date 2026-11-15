@@ -7,7 +7,7 @@
 // =============================================================================
 //! Aggregate release of runtime and byte reservations.
 
-use qubit_operation::supervisor::ServiceRequest;
+use qubit_operation::ResourceRef;
 
 use super::byte_permit::BytePermit;
 use super::task_state::TaskState;
@@ -20,7 +20,7 @@ pub(super) struct RequestResourceOwner {
     /// Weak task state notified on aggregate release.
     state: std::sync::Weak<TaskState>,
     /// Runtime and byte permits retained until both participants finish.
-    resources: std::sync::Mutex<Option<(ServiceRequest, BytePermit)>>,
+    resources: std::sync::Mutex<Option<(ResourceRef<()>, BytePermit, Vec<ResourceRef<()>>)>>,
     /// Driver completion, worker completion, and release publication.
     facts: std::sync::Mutex<(bool, bool, bool)>,
 }
@@ -36,13 +36,14 @@ impl RequestResourceOwner {
     /// * `driver_required` - Whether provider sampling must also finish.
     pub(super) fn new(
         state: std::sync::Weak<TaskState>,
-        service: ServiceRequest,
+        service: ResourceRef<()>,
         bytes: BytePermit,
+        scope_resources: Vec<ResourceRef<()>>,
         driver_required: bool,
     ) -> Self {
         Self {
             state,
-            resources: std::sync::Mutex::new(Some((service, bytes))),
+            resources: std::sync::Mutex::new(Some((service, bytes, scope_resources))),
             facts: std::sync::Mutex::new((!driver_required, false, false)),
         }
     }
@@ -92,9 +93,9 @@ impl RequestResourceOwner {
 mod tests {
     use std::sync::Arc;
 
-    use qubit_operation::report::OperationId;
-    use qubit_operation::report::SupervisorLimits;
-    use qubit_operation::supervisor::OperationSupervisor;
+    use qubit_operation::OperationId;
+    use qubit_operation::ManagerOptions;
+    use qubit_operation::OperationManager;
 
     use super::RequestResourceOwner;
     use crate::managed_runtime::byte_budget::ByteBudget;
@@ -102,12 +103,12 @@ mod tests {
 
     #[test]
     fn test_resource_completion_recovers_poisoned_fact_and_permit_locks() {
-        let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
         let service = supervisor.service_group(1).unwrap().try_admit().unwrap();
         let budget = Arc::new(ByteBudget::new(4));
         let permit = budget.try_acquire(4).unwrap();
         let state = Arc::new(TaskState::new(OperationId::new(14), None));
-        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, None, true));
 
         let poisoned_facts = Arc::clone(&owner);
         assert!(

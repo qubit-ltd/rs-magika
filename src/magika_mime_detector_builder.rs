@@ -14,8 +14,8 @@ use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorCore;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
-use qubit_operation::report::SupervisorLimits;
-use qubit_operation::supervisor::OperationSupervisor;
+use qubit_operation::ManagerOptions;
+use qubit_operation::OperationManager;
 
 use crate::MagikaMimeDetector;
 use crate::managed_runtime::ManagedInferenceRuntime;
@@ -44,8 +44,8 @@ pub struct MagikaMimeDetectorBuilder {
     media_stream_classifier: Option<Arc<dyn MediaStreamClassifier>>,
     /// Optional shared managed runtime supplied by the application.
     runtime: Option<Arc<ManagedInferenceRuntime>>,
-    /// Optional application-owned supervisor used to create the runtime.
-    supervisor: Option<OperationSupervisor>,
+    /// Optional application-owned manager used to create the runtime.
+    manager: Option<OperationManager>,
 }
 
 impl std::fmt::Debug for MagikaMimeDetectorBuilder {
@@ -67,7 +67,7 @@ impl std::fmt::Debug for MagikaMimeDetectorBuilder {
                 &self.media_stream_classifier.is_some(),
             )
             .field("runtime_configured", &self.runtime.is_some())
-            .field("supervisor_configured", &self.supervisor.is_some())
+            .field("manager_configured", &self.manager.is_some())
             .finish()
     }
 }
@@ -132,22 +132,22 @@ impl MagikaMimeDetectorBuilder {
         self
     }
 
-    /// Uses an application-owned supervisor for the detector's managed runtime.
+    /// Uses an application-owned operation manager for the detector runtime.
     ///
-    /// This supervisor is used only when no runtime was set with
+    /// This manager is used only when no runtime was set with
     /// [`Self::managed_runtime`]. If both are configured, the supplied runtime
     /// takes precedence regardless of setter order.
     ///
     /// # Parameters
     ///
-    /// * `supervisor` - Application-owned supervisor retained by the runtime.
+    /// * `manager` - Application-owned manager retained by the runtime.
     ///
     /// # Returns
     ///
     /// The builder configured to create its runtime from that supervisor.
     #[must_use]
-    pub fn operation_supervisor(mut self, supervisor: OperationSupervisor) -> Self {
-        self.supervisor = Some(supervisor);
+    pub fn operation_manager(mut self, manager: OperationManager) -> Self {
+        self.manager = Some(manager);
         self
     }
 
@@ -175,10 +175,13 @@ impl MagikaMimeDetectorBuilder {
                 ));
             }
             None => {
-                let supervisor = self
-                    .supervisor
-                    .unwrap_or_else(|| OperationSupervisor::new(SupervisorLimits::default()));
-                Arc::new(ManagedInferenceRuntime::new(supervisor, max_buffer_size)?)
+                let manager = match self.manager {
+                    Some(manager) => manager,
+                    None => OperationManager::new(ManagerOptions::default()).map_err(|error| {
+                        qubit_mime::MimeError::detector_backend("magika", format!("could not create operation manager: {error}"))
+                    })?,
+                };
+                Arc::new(ManagedInferenceRuntime::new(manager, max_buffer_size)?)
             }
         };
         let mut core = MimeDetectorCore::from_mime_config(self.mime_config.clone());
@@ -203,21 +206,21 @@ mod tests {
     use std::time::Duration;
 
     use qubit_mime::MimeConfig;
-    use qubit_operation::report::SupervisorLimits;
-    use qubit_operation::supervisor::OperationSupervisor;
-    use qubit_operation::supervisor::ShutdownMode;
+    use qubit_operation::ManagerOptions;
+    use qubit_operation::OperationManager;
+    use qubit_operation::ShutdownMode;
 
     use super::MagikaMimeDetectorBuilder;
     use crate::managed_runtime::ManagedInferenceRuntime;
 
     #[test]
     fn test_builder_runtime_precedence() {
-        let supervisor_a = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor_a = OperationManager::new(ManagerOptions::default()).unwrap();
         let runtime_a = Arc::new(
             ManagedInferenceRuntime::new(supervisor_a.clone(), MimeConfig::default().max_buffer_size())
                 .expect("runtime A should initialize"),
         );
-        let supervisor_b = OperationSupervisor::new(SupervisorLimits::default());
+        let supervisor_b = OperationManager::new(ManagerOptions::default()).unwrap();
 
         let runtime_then_supervisor = MagikaMimeDetectorBuilder::default()
             .managed_runtime(Arc::clone(&runtime_a))
@@ -256,7 +259,7 @@ mod tests {
     fn test_builder_debug_and_application_supervisor_configuration() {
         let builder = MagikaMimeDetectorBuilder::default()
             .media_stream_classifier(None)
-            .operation_supervisor(OperationSupervisor::new(SupervisorLimits::default()));
+            .operation_supervisor(OperationManager::new(ManagerOptions::default()).unwrap());
         assert!(format!("{builder:?}").contains("MagikaMimeDetectorBuilder"));
         let detector = builder.build().expect("configured detector should initialize");
         assert!(

@@ -10,7 +10,7 @@
 use std::task::Waker;
 
 use qubit_mime::MimeResult;
-use qubit_operation::report::ChildBusinessOutcome;
+use qubit_operation::ChildOutcomeKind;
 
 /// Business and resource facts observed by the control adapter.
 pub(super) struct TaskInner {
@@ -21,7 +21,7 @@ pub(super) struct TaskInner {
     /// Result available to the inference future, if finished.
     pub(super) result: Option<MimeResult<Option<String>>>,
     /// Terminal business outcome reported to the operation scope.
-    pub(super) business: Option<ChildBusinessOutcome>,
+    pub(super) business: Option<ChildOutcomeKind>,
     /// Whether worker-owned input and permits have been dropped.
     pub(super) released: bool,
     /// Whether the worker has completed its participant duties.
