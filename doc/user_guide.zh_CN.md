@@ -227,7 +227,9 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 附带相同的条件 ETag；没有该条件就不能保证多段期间内容一致。`max_bytes` 是所有采样读取的
 累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
-一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。同步借用内容、reader 和本地
+一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。异步 Provider path 采样时，worker
+可能等待 Provider 读取；这会延迟共享同一 runtime 的其他请求，形成共同的等待和故障域。若应用需要隔离
+延迟，可以为调用方使用独立 runtime，但每个 runtime 都会额外占用一个 Magika Session。同步借用内容、reader 和本地
 文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待，仓库规则命中时可以直接返回。
 借用内容不会仅因逻辑长度超过 `MimeConfig::max_buffer_size()` 而拒绝。异步 Provider route
 通过容量为 1 的范围读取 bridge 与 worker 协作：调用方 future 异步读取 Provider。旧

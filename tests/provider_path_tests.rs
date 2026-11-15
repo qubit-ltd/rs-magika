@@ -456,6 +456,187 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     );
 }
 
+/// Releases a provider gate during unwinding so a failed assertion cannot
+/// leave the managed runtime worker blocked in test I/O.
+struct ReleaseGateOnDrop(Arc<AsyncProviderGate>);
+
+impl Drop for ReleaseGateOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[test]
+fn test_shared_runtime_provider_head_of_line() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(2).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime_budget = config.max_buffer_size();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
+    let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let first_fs = first_provider.async_file_system();
+    let first_detector = Arc::clone(&detector);
+    let mut first = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            first_detector
+                .detect_async_provider_path_managed(&scope, &first_fs, &path("/hol/first.py"), 4096)
+                .await
+        })
+        .unwrap();
+    gate.wait_until_entered(Duration::from_secs(30));
+
+    // Ensure this request fits alongside the provider's full reserved budget.
+    // The managed owned-byte entry point always uses the shared worker.
+    let second_bytes = PYTHON.to_vec();
+    assert!(4096 + second_bytes.len() <= runtime_budget);
+    let second_detector = Arc::clone(&detector);
+    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+    let mut second = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, second_bytes));
+            std::future::poll_fn(|context| match inference.as_mut().poll(context) {
+                Poll::Ready(result) => Poll::Ready(result),
+                Poll::Pending => {
+                    admitted_tx.send(()).expect("test receiver remains alive");
+                    Poll::Pending
+                }
+            })
+            .await
+        })
+        .unwrap();
+    admitted_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("second owned-byte request should be admitted and queued");
+
+    // The notification above is emitted only after detect_bytes_managed was
+    // polled; that call reserves runtime capacity and dispatches before it
+    // waits for the shared worker. Now explicitly observe Pending at the
+    // operation result boundary while the first provider read is gated.
+    let mut second_result = Box::pin(second.result());
+    let observed = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(second_result.as_mut().poll(context))
+    }));
+    assert!(observed.is_pending());
+    drop(second_result);
+
+    gate.release();
+    let first_outcome = run_ready(first.result());
+    let first_settlement = run_ready(first.released());
+    let second_outcome = run_ready(second.result());
+    let second_settlement = run_ready(second.released());
+    assert!(matches!(
+        first_outcome,
+        Ok(qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
+    ));
+    assert!(matches!(
+        second_outcome,
+        Ok(qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
+    ));
+    assert!(first_settlement.all_released);
+    assert!(second_settlement.all_released);
+    assert!(service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
+    assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
+    assert!(supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5)).is_complete());
+}
+
+#[test]
+fn test_shared_runtime_provider_head_of_line_cancellation() {
+    let supervisor = OperationSupervisor::new(SupervisorLimits::default());
+    let service = supervisor.service_group(2).unwrap();
+    let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let file_system = provider.async_file_system();
+    let body_detector = Arc::clone(&detector);
+    let mut first = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            body_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/hol/cancelled.py"), 4096)
+                .await
+        })
+        .unwrap();
+    gate.wait_until_entered(Duration::from_secs(30));
+    let first_observer = first.observer();
+    first.request_cancel(StopReason::UserCancelled);
+    let first_result = run_ready(first.result());
+    assert!(matches!(first_result, Ok(qubit_operation::report::OperationOutcome::Stopped(_))));
+
+    // Cancellation stops local polling, but the gated provider read has no
+    // completion signal yet, so the first managed release remains Pending.
+    let mut first_release = Box::pin(first_observer.released());
+    let release_state = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(first_release.as_mut().poll(context))
+    }));
+    assert!(release_state.is_pending());
+
+    let bytes = PYTHON.to_vec();
+    assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
+    let second_detector = Arc::clone(&detector);
+    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+    let mut second = service
+        .start(ScopeOptions::default(), move |scope| async move {
+            let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, bytes));
+            std::future::poll_fn(|context| match inference.as_mut().poll(context) {
+                Poll::Ready(result) => Poll::Ready(result),
+                Poll::Pending => {
+                    admitted_tx.send(()).expect("test receiver remains alive");
+                    Poll::Pending
+                }
+            })
+            .await
+        })
+        .unwrap();
+    admitted_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("second owned-byte request should be admitted and queued");
+    // The second operation must still be waiting on the shared worker before
+    // releasing the provider read.
+    let mut second_result = Box::pin(second.result());
+    let result_state = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(second_result.as_mut().poll(context))
+    }));
+    assert!(result_state.is_pending());
+    drop(second_result);
+
+    // Releasing the read lets the second owned-byte request progress.
+    gate.release();
+    let second_result = run_ready(second.result());
+    let second_settlement = run_ready(second.released());
+    assert!(matches!(
+        second_result,
+        Ok(qubit_operation::report::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
+    ));
+    assert!(second_settlement.all_released);
+    // Even though the gate is released and the second request completes, the
+    // first provider future was dropped while pending. Its native completion
+    // cannot be observed through this fixture, so managed release stays
+    // Pending and shutdown admission remains incomplete by contract.
+    let release_state = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(first_release.as_mut().poll(context))
+    }));
+    assert!(release_state.is_pending());
+    let shutdown = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
+    assert!(!shutdown.admission.is_complete());
+}
+
 #[test]
 fn test_managed_provider_session_api_classifies_and_settles_worker() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));

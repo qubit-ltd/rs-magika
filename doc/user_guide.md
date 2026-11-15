@@ -259,6 +259,11 @@ detect overflow and reject oversized resources. Unknown and undefined Magika
 types become `Ok(None)` so filename fallback follows the selected
 `MimeDetectionPolicy`.
 One worker owns the Magika session and serializes worker sampling and inference.
+For asynchronous provider paths, the worker can wait for provider reads while
+sampling; that wait can delay other requests sharing the same runtime. This is
+a shared wait and failure domain. Applications that need delay isolation can
+use independent runtimes, at the cost of an additional Magika session per
+runtime.
 Synchronous borrowed content, reader, and local-file entry points sample on the
 caller thread, then wait synchronously when model work is needed; repository
 rules can return without model work. Borrowed content is not rejected solely
