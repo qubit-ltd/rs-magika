@@ -23,6 +23,7 @@ use qubit_operation::GroupOptions;
 use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
+use qubit_operation::OperationOutcome;
 use qubit_operation::ShutdownMode;
 use qubit_operation::StopReason;
 
@@ -794,6 +795,300 @@ fn test_worker_current_bridge_closed_on_panic() {
         Box::new(|_| panic!("injected inference panic")),
         ChildOutcomeKind::Panicked,
     );
+}
+
+#[test]
+fn test_drain_admitted_provider_completes_after_gate_closes() {
+    struct GatedLengthInput(mpsc::SyncSender<()>, Arc<Mutex<mpsc::Receiver<()>>>);
+    impl magika::AsyncInput for GatedLengthInput {
+        fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+            let started = self.0.clone();
+            let release = Arc::clone(&self.1);
+            async move {
+                started.send(()).unwrap();
+                release.lock().unwrap().recv().unwrap();
+                Ok(1)
+            }
+        }
+        fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+            buffer[0] = b'x';
+            std::future::ready(Ok(()))
+        }
+    }
+
+    let runtime = borrowed_test_runtime(8);
+    let admission = runtime.reserve_for_provider(None, 8).unwrap();
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let detect_runtime = Arc::clone(&runtime);
+    let detect = std::thread::spawn(move || {
+        block_on(detect_runtime.detect_async_input_admitted_test(
+            admission,
+            GatedLengthInput(started_tx, release_rx),
+            8,
+            map_provider_test_error,
+        ))
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Drain, Duration::from_secs(2), move || {
+            closed_tx.send(()).unwrap();
+        })
+    });
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(runtime.reserve_for_provider(None, 1).is_err());
+    release_tx.send(()).unwrap();
+    assert_eq!(detect.join().unwrap().unwrap(), None);
+    let report = shutdown.join().unwrap();
+    assert_eq!(0, report.admission.snapshot.active_operations);
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_drain_real_managed_provider_route_completes_gated_read() {
+    use crate::tests::internal::random_access_session_tests::Fixture;
+    use crate::tests::internal::random_access_session_tests::TestAsyncReadGate;
+
+    struct ReleaseOnDrop(Arc<TestAsyncReadGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let service = supervisor.group(GroupOptions { capacity: 2 }).unwrap();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        qubit_mime::MimeConfig::default().max_buffer_size(),
+        Box::new(|bytes| {
+            assert_eq!(bytes, b"sample");
+            Ok(Some("application/x-fixture".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = Arc::new(
+        crate::MagikaMimeDetector::builder()
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .unwrap(),
+    );
+    let gate = Arc::new(TestAsyncReadGate::new());
+    let _release_gate = ReleaseOnDrop(Arc::clone(&gate));
+    let fixture = Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(2))
+        .with_async_read_gate(Arc::clone(&gate));
+    let file_system = qubit_fs::AsyncFileSystem::from_spi(fixture).unwrap();
+    let request_detector = Arc::clone(&detector);
+    let mut operation = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            request_detector
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &file_system,
+                    &qubit_fs::Path::parse("/drain/gated-read").unwrap(),
+                    6,
+                )
+                .await
+        })
+        .unwrap();
+
+    gate.wait_until_started(Duration::from_secs(2));
+    assert_eq!(1, runtime.tasks.lock().unwrap().len());
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Drain, Duration::from_secs(2), move || {
+            closed_tx.send(()).unwrap();
+        })
+    });
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(runtime.reserve_for_provider(None, 1).is_err());
+    gate.release();
+    assert!(matches!(
+        block_on(operation.wait_outcome()).unwrap(),
+        OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-fixture"
+    ));
+    assert!(block_on(operation.wait_settlement()).all_released());
+    let report = shutdown.join().unwrap();
+    assert_eq!(0, report.admission.snapshot.active_operations);
+    assert!(report.worker_stopped);
+    service.close_admission();
+    assert_eq!(
+        0,
+        supervisor
+            .request_shutdown(ShutdownMode::Drain)
+            .wait()
+            .unwrap()
+            .snapshot
+            .active_operations
+    );
+}
+
+#[test]
+fn test_drain_reserved_content_can_submit_operation_after_gate_closes() {
+    let runtime = borrowed_test_runtime(8);
+    let admission = runtime.reserve_for_provider(None, 1).unwrap();
+    let (submit_tx, submit_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let submit_runtime = Arc::clone(&runtime);
+    let submit = std::thread::spawn(move || {
+        block_on(submit_runtime.submit_operation_admitted_with_hook(
+            None,
+            admission,
+            WorkerInput::Bytes(vec![b'x'].into()),
+            move || {
+                submit_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            },
+        ))
+    });
+    submit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Drain, Duration::from_secs(2), move || {
+            closed_tx.send(()).unwrap();
+        })
+    });
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(runtime.reserve_for_provider(None, 1).is_err());
+    release_tx.send(()).unwrap();
+    assert_eq!(submit.join().unwrap().unwrap(), None);
+    let report = shutdown.join().unwrap();
+    assert_eq!(0, report.admission.snapshot.active_operations);
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_cancel_admitted_provider_does_not_submit_model_job() {
+    struct GatedLengthInput(mpsc::SyncSender<()>, Arc<Mutex<mpsc::Receiver<()>>>);
+    impl magika::AsyncInput for GatedLengthInput {
+        fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+            let started = self.0.clone();
+            let release = Arc::clone(&self.1);
+            async move {
+                started.send(()).unwrap();
+                release.lock().unwrap().recv().unwrap();
+                Ok(1)
+            }
+        }
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine_calls = Arc::clone(&calls);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(move |_| {
+            engine_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }),
+        Box::new(|| {}),
+    ));
+    let admission = runtime.reserve_for_provider(None, 8).unwrap();
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let detect_runtime = Arc::clone(&runtime);
+    let detect = std::thread::spawn(move || {
+        block_on(detect_runtime.detect_async_input_admitted_test(
+            admission,
+            GatedLengthInput(started_tx, release_rx),
+            8,
+            map_provider_test_error,
+        ))
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Cancel, Duration::from_secs(2), move || {
+            closed_tx.send(()).unwrap();
+        })
+    });
+    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    release_tx.send(()).unwrap();
+    assert!(detect.join().unwrap().is_err());
+    let report = shutdown.join().unwrap();
+    assert!(report.worker_stopped);
+    assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn test_worker_panic_rejects_previously_admitted_dispatch() {
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(|_| panic!("injected worker panic")),
+        Box::new(|| {}),
+    ));
+    let second_admission = runtime.reserve_for_provider(None, 1).unwrap();
+    let first_admission = runtime.reserve_for_provider(None, 1).unwrap();
+    let first = runtime
+        .dispatch(first_admission, WorkerInput::Bytes(vec![b'x'].into()))
+        .unwrap();
+    assert!(first.wait_blocking().is_err());
+    let error = match runtime.dispatch(second_admission, WorkerInput::Bytes(vec![b'y'].into())) {
+        Ok(_) => panic!("dispatch after worker fault unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("after worker fault"));
+    assert!(runtime.admission_gate.lock().unwrap().faulted);
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let engine_release = Arc::clone(&release_rx);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            engine_release.lock().unwrap().recv().unwrap();
+            Ok(None)
+        }),
+        Box::new(|| {}),
+    ));
+    let inference = runtime.submit(None, WorkerInput::Bytes(vec![b'x'].into())).unwrap();
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let first = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(1));
+    assert!(!first.worker_stopped);
+    assert_eq!(0, first.admission.snapshot.active_operations);
+    assert_eq!(1, first.admission.snapshot.service_resources);
+
+    release_tx.send(()).unwrap();
+    assert_eq!(block_on(inference).unwrap(), None);
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let first_runtime = Arc::clone(&runtime);
+    let first_barrier = Arc::clone(&barrier);
+    let first_shutdown = std::thread::spawn(move || {
+        first_barrier.wait();
+        first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
+    });
+    let second_runtime = Arc::clone(&runtime);
+    let second_barrier = Arc::clone(&barrier);
+    let second_shutdown = std::thread::spawn(move || {
+        second_barrier.wait();
+        second_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
+    });
+    barrier.wait();
+    assert!(first_shutdown.join().unwrap().worker_stopped);
+    assert!(second_shutdown.join().unwrap().worker_stopped);
 }
 
 #[test]

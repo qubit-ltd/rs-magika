@@ -77,11 +77,8 @@ impl RequestAdmission {
     pub(crate) fn begin_provider_operation(&mut self) -> MimeResult<()> {
         if !self.state.try_start_provider_operation() {
             self.state.request_stop();
-            let error = MimeError::detector_backend("magika", "provider operation stopped before start");
-            self.settle_error(MimeError::detector_backend(
-                "magika",
-                "provider operation stopped before start",
-            ));
+            let error = MimeError::detector_backend("magika", self.state.provider_stop_reason());
+            self.settle_error(MimeError::detector_backend("magika", self.state.provider_stop_reason()));
             return Err(error);
         }
         self.provider_pending = true;

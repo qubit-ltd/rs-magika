@@ -13,6 +13,8 @@ pub(super) struct AdmissionGate {
     pub(super) closed: bool,
     /// Prevents provider I/O starts after cancellation begins.
     pub(super) cancelling: bool,
+    /// Prevents dispatch and provider I/O after the worker session fails.
+    pub(super) faulted: bool,
 }
 
 impl AdmissionGate {
@@ -21,6 +23,7 @@ impl AdmissionGate {
         Self {
             closed: false,
             cancelling: false,
+            faulted: false,
         }
     }
 }

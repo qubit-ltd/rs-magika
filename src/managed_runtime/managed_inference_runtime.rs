@@ -378,6 +378,32 @@ impl ManagedInferenceRuntime {
         admission: RequestAdmission,
         input: WorkerInput,
     ) -> MimeResult<Option<String>> {
+        self.submit_operation_admitted_with_hook(parent, admission, input, || {})
+            .await
+    }
+
+    /// Submits an admitted operation, with a test seam immediately before
+    /// supervisor submission.
+    ///
+    /// # Parameters
+    ///
+    /// * `parent` - Optional parent scope that owns the submitted operation.
+    /// * `admission` - Previously acquired request and byte capacity.
+    /// * `input` - Owned input dispatched to the inference worker.
+    /// * `before_submit` - One-shot hook called before the supervisor accepts
+    ///   the operation.
+    ///
+    /// # Returns
+    ///
+    /// The MIME mapping produced by the worker, or an error if submission or
+    /// inference fails.
+    async fn submit_operation_admitted_with_hook(
+        self: &Arc<Self>,
+        parent: Option<&OperationScope>,
+        admission: RequestAdmission,
+        input: WorkerInput,
+        before_submit: impl FnOnce(),
+    ) -> MimeResult<Option<String>> {
         let runtime = Arc::clone(self);
         let body = move |scope| async move {
             let mut admission = admission;
@@ -396,6 +422,7 @@ impl ManagedInferenceRuntime {
             requirement: ChildRequirement::Optional,
             ..OperationOptions::default()
         };
+        before_submit();
         // This operation is an implementation detail behind a MIME Result;
         // preserve the result for the caller to handle instead of replacing
         // the parent operation's own outcome with ChildFailed.
@@ -684,7 +711,14 @@ impl ManagedInferenceRuntime {
     ) -> MimeResult<RequestAdmission> {
         let admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
         if admission_gate.closed {
-            return Err(MimeError::detector_backend("magika", "runtime admission is closed"));
+            let reason = if admission_gate.faulted {
+                "runtime admission is closed after worker fault"
+            } else if admission_gate.cancelling {
+                "runtime admission is closed after cancellation"
+            } else {
+                "runtime admission is closed"
+            };
+            return Err(MimeError::detector_backend("magika", reason));
         }
         let byte_permit = self
             .byte_budget
@@ -729,16 +763,15 @@ impl ManagedInferenceRuntime {
     /// Returns an error if the operation cannot be dispatched.
     fn dispatch(&self, admission: RequestAdmission, input: WorkerInput) -> MimeResult<InferenceFuture> {
         let admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
-        if admission_gate.closed {
+        if admission_gate.cancelling || admission_gate.faulted {
+            let message = if admission_gate.faulted {
+                "runtime admission is closed after worker fault"
+            } else {
+                "runtime admission is closed after cancellation"
+            };
             let mut admission = admission;
-            admission.settle_error(MimeError::detector_backend(
-                "magika",
-                "runtime admission is closed after worker fault",
-            ));
-            return Err(MimeError::detector_backend(
-                "magika",
-                "runtime admission is closed after worker fault",
-            ));
+            admission.settle_error(MimeError::detector_backend("magika", message));
+            return Err(MimeError::detector_backend("magika", message));
         }
         let sent_state = {
             let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());
@@ -791,7 +824,7 @@ impl ManagedInferenceRuntime {
     ///
     /// Admission and worker termination facts, including whether the worker
     /// stopped before the timeout.
-    fn shutdown_blocking_with_hook(
+    pub(crate) fn shutdown_blocking_with_hook(
         &self,
         mode: ShutdownMode,
         timeout: std::time::Duration,
@@ -809,7 +842,6 @@ impl ManagedInferenceRuntime {
             }
         }
         after_task_scan();
-        self.service_group.close_admission();
         loop {
             let admission = self.admission_report();
             if admission.snapshot.active_operations == 0
@@ -827,6 +859,7 @@ impl ManagedInferenceRuntime {
             std::thread::sleep(remaining_timeout(deadline).min(std::time::Duration::from_millis(1)));
         }
         let admission = self.admission_report();
+        self.service_group.close_admission();
         self.sender.lock().unwrap_or_else(|error| error.into_inner()).take();
         loop {
             let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());

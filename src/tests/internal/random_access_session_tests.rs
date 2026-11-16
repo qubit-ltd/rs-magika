@@ -67,7 +67,7 @@ use qubit_operation::OperationOptions;
 const ID: &str = "magika-session-adapter-test";
 
 #[derive(Clone)]
-struct Fixture {
+pub(crate) struct Fixture {
     opens: Arc<AtomicUsize>,
     stats: Arc<AtomicUsize>,
     path_opens: Arc<AtomicUsize>,
@@ -83,7 +83,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(bytes: &'static [u8], max_read: FileSystemLimit) -> Self {
+    pub(crate) fn new(bytes: &'static [u8], max_read: FileSystemLimit) -> Self {
         Self {
             opens: Arc::new(AtomicUsize::new(0)),
             stats: Arc::new(AtomicUsize::new(0)),
@@ -99,7 +99,7 @@ impl Fixture {
             async_read_gate: None,
         }
     }
-    fn with_async_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+    pub(crate) fn with_async_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
         self.async_read_gate = Some(gate);
         self
     }
@@ -217,25 +217,52 @@ struct Session {
     async_read_gate: Option<Arc<TestAsyncReadGate>>,
 }
 
-struct TestAsyncReadGate {
+pub(crate) struct TestAsyncReadGate {
     state: std::sync::Mutex<(bool, bool, Option<std::task::Waker>)>,
+    changed: std::sync::Condvar,
 }
 
 impl TestAsyncReadGate {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: std::sync::Mutex::new((false, false, None)),
+            changed: std::sync::Condvar::new(),
         }
     }
 
-    fn started(&self) -> bool {
+    pub(crate) fn started(&self) -> bool {
         self.state.lock().unwrap().1
+    }
+
+    pub(crate) fn wait_until_started(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap();
+        while !state.1 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "provider read did not reach its gate");
+            let (next, result) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            assert!(!result.timed_out() || state.1, "provider read did not reach its gate");
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        let waker = {
+            let mut state = self.state.lock().unwrap();
+            state.0 = true;
+            state.2.take()
+        };
+        self.changed.notify_all();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 
     async fn wait(&self) {
         std::future::poll_fn(|cx| {
             let mut state = self.state.lock().unwrap();
             state.1 = true;
+            self.changed.notify_all();
             if state.0 {
                 Poll::Ready(())
             } else {

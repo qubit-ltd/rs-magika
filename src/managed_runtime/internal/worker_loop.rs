@@ -21,25 +21,25 @@ use super::WorkerInput;
 
 /// Converts inference execution into a result and its matching child outcome.
 ///
+/// # Type Parameters
+///
+/// * `T` - Value produced by the inference closure.
+///
 /// # Parameters
 ///
-/// * `work` - Inference closure whose panic is contained at the worker boundary.
+/// * `work` - Inference closure whose panic is contained at the worker
+///   boundary.
 ///
 /// # Returns
 ///
 /// The closure result and a lifecycle outcome that distinguishes success,
 /// failure, and panic.
-pub(super) fn execute_classified<T>(
-    work: impl FnOnce() -> MimeResult<T>,
-) -> (MimeResult<T>, ChildOutcomeKind) {
+pub(super) fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>, ChildOutcomeKind) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok(Ok(value)) => (Ok(value), ChildOutcomeKind::Succeeded),
         Ok(Err(error)) => (Err(error), ChildOutcomeKind::Failed),
         Err(_) => (
-            Err(MimeError::detector_backend(
-                "magika",
-                "inference worker panicked",
-            )),
+            Err(MimeError::detector_backend("magika", "inference worker panicked")),
             ChildOutcomeKind::Panicked,
         ),
     }
@@ -62,17 +62,17 @@ pub(super) fn run_worker(
     before_exit: impl FnOnce(),
 ) {
     while let Ok(job) = receiver.recv() {
-        let Job {
-            input,
-            state,
-            owner,
-        } = job;
+        let Job { input, state, owner } = job;
         let bridge = match &input {
             WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
             _ => None,
         };
         let mut terminal_fault = false;
-        if state.stop_requested() {
+        let stop_requested = state.stop_requested() || {
+            let gate = gate.lock().unwrap_or_else(|error| error.into_inner());
+            gate.cancelling || gate.faulted
+        };
+        if stop_requested {
             state.finish_business(
                 Err(MimeError::detector_backend(
                     "magika",
@@ -85,6 +85,13 @@ pub(super) fn run_worker(
             state.mark_started();
             let (result, outcome) = execute_classified(|| infer(input));
             terminal_fault = outcome == ChildOutcomeKind::Panicked;
+            if terminal_fault {
+                // Serialize the terminal worker fault with dispatch before
+                // publishing the panic result or releasing this job's slot.
+                let mut gate = gate.lock().unwrap_or_else(|error| error.into_inner());
+                gate.closed = true;
+                gate.faulted = true;
+            }
             state.finish_business(result, outcome);
         }
         if let Some(bridge) = bridge {
@@ -94,9 +101,6 @@ pub(super) fn run_worker(
         owner.worker_done();
         if terminal_fault {
             // Native session state after an unwind is undocumented.
-            gate.lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .closed = true;
             settle_queued_jobs(&receiver, "inference session discarded after worker panic");
             break;
         }
@@ -112,11 +116,7 @@ pub(super) fn run_worker(
 /// * `reason` - Backend error message reported to queued operations.
 fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
     for job in receiver.try_iter() {
-        let Job {
-            input,
-            state,
-            owner,
-        } = job;
+        let Job { input, state, owner } = job;
         let bridge = match &input {
             WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
             _ => None,

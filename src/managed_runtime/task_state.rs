@@ -92,7 +92,7 @@ impl TaskState {
         let gate = gate
             .as_ref()
             .map(|gate| gate.lock().unwrap_or_else(|error| error.into_inner()));
-        if gate.as_ref().is_some_and(|gate| gate.cancelling) {
+        if gate.as_ref().is_some_and(|gate| gate.cancelling || gate.faulted) {
             return false;
         }
         !self
@@ -100,6 +100,22 @@ impl TaskState {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .stop_requested
+    }
+
+    /// Describes why a provider operation may no longer start.
+    pub(super) fn provider_stop_reason(&self) -> &'static str {
+        let gate = self.admission_gate.as_ref().and_then(Weak::upgrade);
+        let Some(gate) = gate else {
+            return "provider operation stopped before start";
+        };
+        let gate = gate.lock().unwrap_or_else(|error| error.into_inner());
+        if gate.faulted {
+            "provider operation stopped after worker fault"
+        } else if gate.cancelling {
+            "provider operation stopped after cancellation"
+        } else {
+            "provider operation stopped before start"
+        }
     }
 
     /// Reports whether the worker should skip or stop this job.
