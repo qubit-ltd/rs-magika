@@ -31,6 +31,7 @@ use qubit_mime::MimeError;
 use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
+use qubit_operation::ScopeLimits;
 use qubit_operation::ShutdownMode;
 use qubit_operation::StopReason;
 
@@ -432,6 +433,75 @@ fn test_async_provider_full_capacity_rejects_both_entrypoint_orders_before_io() 
     let managed_first = assert_full_capacity_rejects_second_async_provider_route(true);
     let legacy_first = assert_full_capacity_rejects_second_async_provider_route(false);
     assert_eq!(managed_first, legacy_first);
+}
+
+#[test]
+fn test_scope_admission_rejection_performs_no_io() {
+    for stopped in [true, false] {
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+        let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+        let config = qubit_mime::MimeConfig::default();
+        let runtime = Arc::new(ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap());
+        let detector = Arc::new(
+            qubit_magika::MagikaMimeDetector::builder()
+                .mime_config(config)
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .unwrap(),
+        );
+        let provider = ProviderFileSystemSpi::new(PYTHON.to_vec());
+        let observations = provider.observations();
+        let file_system = provider.async_file_system();
+        let request_detector = Arc::clone(&detector);
+        let options = if stopped {
+            OperationOptions::default()
+        } else {
+            OperationOptions {
+                limits: ScopeLimits {
+                    resources: 1,
+                    ..ScopeLimits::default()
+                },
+                ..OperationOptions::default()
+            }
+        };
+        let mut operation = service
+            .as_async()
+            .try_submit(options, move |scope| async move {
+                let _held = if stopped { None } else { Some(scope.manage(()).unwrap()) };
+                if stopped {
+                    let _ = scope.request_stop(StopReason::UserCancelled);
+                }
+                let error = request_detector
+                    .detect_async_provider_path_managed(&scope, &file_system, &path("/scope/rejected.py"), 4096)
+                    .await
+                    .unwrap_err();
+                assert!(format!("{error:?}").contains("operation scope rejected inference"));
+                Ok::<_, MimeError>(())
+            })
+            .unwrap();
+        let _ = run_ready(operation.wait_outcome()).unwrap();
+        assert_eq!(observations.stats.load(Ordering::SeqCst), 0);
+        assert_eq!(observations.opens.load(Ordering::SeqCst), 0);
+        assert_eq!(observations.random_opens.load(Ordering::SeqCst), 0);
+        assert_eq!(observations.random_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(observations.read_bytes.load(Ordering::SeqCst), 0);
+        let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+        assert!(report.worker_stopped);
+        assert!(
+            service
+                .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+                .snapshot
+                .active_operations
+                == 0
+        );
+        assert!(
+            supervisor
+                .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+                .snapshot
+                .active_operations
+                == 0
+        );
+    }
 }
 
 #[test]

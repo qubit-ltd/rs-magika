@@ -173,15 +173,6 @@ impl RequestAdmission {
     /// # Returns
     ///
     /// The scope reference, or an error when the scope rejects it.
-    pub(super) fn scope_resources(scope: Option<&OperationScope>) -> MimeResult<Vec<ResourceRef<()>>> {
-        match scope {
-            Some(scope) => Ok(vec![scope.manage(()).map_err(|error| {
-                MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
-            })?]),
-            None => Ok(Vec::new()),
-        }
-    }
-
     /// Adds a parent or child scope reference to this request's retained
     /// resources.
     ///
@@ -311,8 +302,16 @@ mod tests {
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
         let mut operation = manager
             .try_submit(qubit_operation::OperationOptions::default(), |scope| {
-                let retained = RequestAdmission::scope_resources(Some(&scope)).unwrap();
-                assert_eq!(retained.len(), 1);
+                let budget = Arc::new(ByteBudget::new(8));
+                let permit = budget.try_acquire(8).unwrap();
+                let mut admission = RequestAdmission::new(
+                    Arc::new(TaskState::new(704, None)),
+                    service_resource(),
+                    Vec::new(),
+                    permit,
+                );
+                admission.retain_in_scope(&scope).unwrap();
+                assert_eq!(admission.scope_resources.len(), 1);
                 Ok::<_, ()>(())
             })
             .unwrap();

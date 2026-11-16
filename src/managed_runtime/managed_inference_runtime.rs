@@ -739,12 +739,11 @@ impl ManagedInferenceRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .push(Arc::clone(&state));
         drop(admission_gate);
-        Ok(RequestAdmission::new(
-            state,
-            admission,
-            RequestAdmission::scope_resources(scope)?,
-            byte_permit,
-        ))
+        let mut request = RequestAdmission::new(state, admission, Vec::new(), byte_permit);
+        if let Some(scope) = scope {
+            request.retain_in_scope(scope)?;
+        }
+        Ok(request)
     }
 
     /// Sends an admitted input to the worker and returns its result observer.

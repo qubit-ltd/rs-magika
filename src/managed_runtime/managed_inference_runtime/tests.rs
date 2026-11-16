@@ -24,6 +24,7 @@ use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
 use qubit_operation::OperationOutcome;
+use qubit_operation::ScopeLimits;
 use qubit_operation::ShutdownMode;
 use qubit_operation::StopReason;
 
@@ -44,6 +45,156 @@ fn borrowed_test_runtime(max_bytes: usize) -> Arc<ManagedInferenceRuntime> {
         Box::new(|_| Ok(None)),
         Box::new(|| {}),
     ))
+}
+
+fn assert_scope_admission_rollback(stopped: bool) {
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let runtime = borrowed_test_runtime(8);
+    let request_runtime = Arc::clone(&runtime);
+    let options = if stopped {
+        OperationOptions::default()
+    } else {
+        OperationOptions {
+            limits: ScopeLimits {
+                resources: 1,
+                ..ScopeLimits::default()
+            },
+            ..OperationOptions::default()
+        }
+    };
+    let mut operation = manager
+        .as_async()
+        .try_submit(options, move |scope| async move {
+            let _held = if stopped { None } else { Some(scope.manage(()).unwrap()) };
+            if stopped {
+                let _ = scope.request_stop(StopReason::UserCancelled);
+            }
+            let error = request_runtime
+                .reserve_for_provider(Some(&scope), 8)
+                .err()
+                .expect("scope must reject registration");
+            let message = format!("{error:?}");
+            assert!(
+                message.contains("operation scope rejected inference"),
+                "unexpected error: {message}"
+            );
+            assert!(request_runtime.tasks.lock().unwrap().is_empty());
+            assert_eq!(
+                request_runtime
+                    .active_requests
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            drop(
+                request_runtime
+                    .reserve_for_provider(None, 8)
+                    .expect("byte capacity must be returned"),
+            );
+            let first = request_runtime
+                .reserve_for_provider(None, 0)
+                .expect("first request slot must be returned");
+            let second = request_runtime
+                .reserve_for_provider(None, 0)
+                .expect("second request slot must be returned");
+            drop((first, second));
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let _ = block_on(operation.wait_outcome());
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+    assert!(runtime.tasks.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_scope_admission_stopped_rolls_back() {
+    assert_scope_admission_rollback(true);
+}
+
+#[test]
+fn test_scope_admission_capacity_rolls_back() {
+    assert_scope_admission_rollback(false);
+}
+
+#[test]
+fn test_scope_admission_repeated_failures_do_not_accumulate() {
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let runtime = borrowed_test_runtime(8);
+    let request_runtime = Arc::clone(&runtime);
+    let options = OperationOptions {
+        limits: ScopeLimits {
+            resources: 1,
+            ..ScopeLimits::default()
+        },
+        ..OperationOptions::default()
+    };
+    let mut operation = manager
+        .as_async()
+        .try_submit(options, move |scope| async move {
+            let _held = scope.manage(()).unwrap();
+            for _ in 0..32 {
+                assert!(request_runtime.reserve_for_provider(Some(&scope), 8).is_err());
+                assert!(request_runtime.tasks.lock().unwrap().is_empty());
+                assert_eq!(
+                    request_runtime
+                        .active_requests
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    0
+                );
+                drop(
+                    request_runtime
+                        .byte_budget
+                        .try_acquire(8)
+                        .expect("byte capacity must be returned"),
+                );
+            }
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let _ = block_on(operation.wait_outcome());
+    let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_scope_admission_failure_preserves_other_request() {
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let runtime = borrowed_test_runtime(8);
+    let request_runtime = Arc::clone(&runtime);
+    let options = OperationOptions {
+        limits: ScopeLimits {
+            resources: 1,
+            ..ScopeLimits::default()
+        },
+        ..OperationOptions::default()
+    };
+    let mut operation = manager
+        .as_async()
+        .try_submit(options, move |scope| async move {
+            let _held = scope.manage(()).unwrap();
+            let independent = request_runtime.reserve_for_provider(None, 8).unwrap();
+            assert!(request_runtime.reserve_for_provider(Some(&scope), 1).is_err());
+            assert_eq!(request_runtime.tasks.lock().unwrap().len(), 1);
+            assert_eq!(
+                request_runtime
+                    .active_requests
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            drop(independent);
+            assert!(request_runtime.tasks.lock().unwrap().is_empty());
+            assert_eq!(
+                request_runtime
+                    .active_requests
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let _ = block_on(operation.wait_outcome());
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
 }
 
 #[test]
