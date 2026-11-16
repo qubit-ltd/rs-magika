@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           git init ../rs-operation
           git -C ../rs-operation remote add origin https://github.com/qubit-ltd/rs-operation.git
-          git -C ../rs-operation fetch --depth 1 origin 1fc3c8713cc30a92e18bdbde0b924ce83d53a0e7
+          git -C ../rs-operation fetch origin 1fc3c8713cc30a92e18bdbde0b924ce83d53a0e7
           git -C ../rs-operation checkout --detach FETCH_HEAD
       - name: Download and verify ONNX Runtime 1.24.2
         run: |
