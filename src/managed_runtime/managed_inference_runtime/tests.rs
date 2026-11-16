@@ -699,6 +699,63 @@ fn test_shared_worker_classification_covers_success_and_panic() {
 }
 
 #[test]
+fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (panic_tx, panic_rx) = mpsc::channel();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        8,
+        Box::new(move |_| {
+            entered_tx.send(()).unwrap();
+            panic_rx.recv().unwrap();
+            panic!("injected worker panic")
+        }),
+        Box::new(|| {}),
+    ));
+
+    let _current = runtime.submit(None, WorkerInput::Bytes(vec![1].into())).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
+    let _queued = runtime
+        .submit(None, WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error))
+        .unwrap();
+    let (read_started_tx, read_started_rx) = mpsc::channel();
+    let waiting_bridge = Arc::clone(&bridge);
+    let bridge_waiter = std::thread::spawn(move || {
+        read_started_tx.send(()).unwrap();
+        waiting_bridge.read_at(0, &mut [0; 1])
+    });
+    read_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let states = runtime.tasks.lock().unwrap().clone();
+    assert_eq!(states.len(), 2);
+
+    panic_tx.send(()).unwrap();
+    assert!(states[0].wait_worker_done_blocking(Duration::from_secs(2)));
+    assert!(states[1].wait_worker_done_blocking(Duration::from_secs(2)));
+    assert!(states[0].wait_released_blocking(Duration::from_secs(2)));
+    assert!(!states[1].inner.lock().unwrap().released, "pending bridge driver still owns resources");
+    assert_eq!(states[0].inner.lock().unwrap().business, Some(ChildOutcomeKind::Panicked));
+    assert_eq!(states[1].inner.lock().unwrap().business, Some(ChildOutcomeKind::Failed));
+    assert_eq!(
+        states[1].inner.lock().unwrap().result.as_ref().unwrap().as_ref().unwrap_err().to_string(),
+        "MIME detector backend 'magika' failed: inference session discarded after worker panic"
+    );
+    assert!(bridge_waiter.join().unwrap().is_err(), "queued bridge waiter is woken by closure");
+    assert!(runtime.reserve_for_provider(None, 1).is_err());
+    assert!(runtime.byte_budget.try_acquire(5).is_none());
+
+    // Only actual provider-driver completion releases a queued bridge's resources.
+    states[1].mark_driver_done();
+    assert!(states[1].wait_released_blocking(Duration::from_secs(2)));
+    assert!(runtime.byte_budget.try_acquire(8).is_some());
+    let first = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    let second = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+    assert!(first.worker_stopped);
+    assert!(second.worker_stopped);
+}
+
+#[test]
 fn test_unmanaged_detection_enforces_limit_and_shutdown_joins_worker() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     assert!(ManagedInferenceRuntime::new(supervisor.clone(), 0).is_err());

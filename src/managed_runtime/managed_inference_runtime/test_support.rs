@@ -27,6 +27,8 @@ use super::Job;
 use super::ManagedInferenceRuntime;
 use super::WorkerInput;
 use super::execute_classified;
+use super::close_runtime_admission;
+use super::settle_queued_jobs;
 use super::map_magika_error;
 use super::worker_state::WorkerState;
 
@@ -83,9 +85,12 @@ impl ManagedInferenceRuntime {
         before_worker_exit: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(1);
+        let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
+        let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = std::thread::Builder::new()
             .name("magika-test-inference".to_owned())
             .spawn(move || {
+                let mut terminal_fault = false;
                 while let Ok(job) = receiver.recv() {
                     let Job { input, state, owner } = job;
                     if state.stop_requested() {
@@ -115,10 +120,16 @@ impl ManagedInferenceRuntime {
                                 "test engine only accepts owned bytes",
                             )),
                         });
+                        terminal_fault = outcome == ChildOutcomeKind::Panicked;
                         state.finish_business(result, outcome);
                     }
                     after_business();
                     owner.worker_done();
+                    if terminal_fault {
+                        close_runtime_admission(&worker_admission_gate);
+                        settle_queued_jobs(&receiver, "inference session discarded after worker panic");
+                        break;
+                    }
                 }
                 before_worker_exit();
             })
@@ -134,7 +145,7 @@ impl ManagedInferenceRuntime {
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks: Arc::new(Mutex::new(Vec::new())),
-            admission_gate: Arc::new(Mutex::new(AdmissionGate::new())),
+            admission_gate,
         }
     }
 }

@@ -90,6 +90,31 @@ fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>
     }
 }
 
+/// Closes admissions at the shared dispatch boundary after a worker fault.
+fn close_runtime_admission(gate: &Mutex<AdmissionGate>) {
+    gate.lock().unwrap_or_else(|error| error.into_inner()).closed = true;
+}
+
+/// Completes queued work after the worker session has become unusable.
+fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
+    for job in receiver.try_iter() {
+        let Job { input, state, owner } = job;
+        let bridge = match &input {
+            WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
+            _ => None,
+        };
+        state.finish_business(
+            Err(MimeError::detector_backend("magika", reason)),
+            ChildOutcomeKind::Failed,
+        );
+        drop(input);
+        if let Some(bridge) = bridge {
+            bridge.close();
+        }
+        owner.worker_done();
+    }
+}
+
 /// Shareable managed execution runtime. One worker owns its Magika session and
 /// one queued request; the supervisor service group admits at most one running
 /// and one queued request.
@@ -181,6 +206,8 @@ impl ManagedInferenceRuntime {
         }
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(1);
+        let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
+        let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = match std::thread::Builder::new()
             .name("magika-inference".to_owned())
             .spawn(move || {
@@ -194,6 +221,7 @@ impl ManagedInferenceRuntime {
                         return;
                     }
                 };
+                let mut terminal_fault = false;
                 while let Ok(job) = receiver.recv() {
                     let Job { input, state, owner } = job;
                     let bridge = match &input {
@@ -212,12 +240,19 @@ impl ManagedInferenceRuntime {
                     } else {
                         state.mark_started();
                         let (result, outcome) = execute_classified(|| infer_input(&mut session, input));
+                        terminal_fault = outcome == ChildOutcomeKind::Panicked;
                         state.finish_business(result, outcome);
                     }
                     if let Some(bridge) = bridge {
                         bridge.close();
                     }
                     owner.worker_done();
+                    if terminal_fault {
+                        // Native session state after an unwind is undocumented.
+                        close_runtime_admission(&worker_admission_gate);
+                        settle_queued_jobs(&receiver, "inference session discarded after worker panic");
+                        break;
+                    }
                 }
             }) {
             Ok(worker) => worker,
@@ -255,7 +290,7 @@ impl ManagedInferenceRuntime {
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks: Arc::new(Mutex::new(Vec::new())),
-            admission_gate: Arc::new(Mutex::new(AdmissionGate::new())),
+            admission_gate,
         })
     }
 
@@ -738,6 +773,12 @@ impl ManagedInferenceRuntime {
     ///
     /// Returns an error if the operation cannot be dispatched.
     fn dispatch(&self, admission: RequestAdmission, input: WorkerInput) -> MimeResult<InferenceFuture> {
+        let admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+        if admission_gate.closed {
+            let mut admission = admission;
+            admission.settle_error(MimeError::detector_backend("magika", "runtime admission is closed after worker fault"));
+            return Err(MimeError::detector_backend("magika", "runtime admission is closed after worker fault"));
+        }
         let sent_state = {
             let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());
             match sender.as_ref() {
@@ -748,6 +789,7 @@ impl ManagedInferenceRuntime {
                 }
             }
         };
+        drop(admission_gate);
         Ok(InferenceFuture::new(sent_state))
     }
 
