@@ -464,6 +464,7 @@ fn test_scope_admission_rejection_performs_no_io() {
                 ..OperationOptions::default()
             }
         };
+        let (facts_tx, facts_rx) = std::sync::mpsc::channel();
         let mut operation = service
             .as_async()
             .try_submit(options, move |scope| async move {
@@ -475,11 +476,30 @@ fn test_scope_admission_rejection_performs_no_io() {
                     .detect_async_provider_path_managed(&scope, &file_system, &path("/scope/rejected.py"), 4096)
                     .await
                     .unwrap_err();
-                assert!(format!("{error:?}").contains("operation scope rejected inference"));
+                facts_tx.send(format!("{error:?}")).unwrap();
                 Ok::<_, MimeError>(())
             })
             .unwrap();
-        let _ = run_ready(operation.wait_outcome()).unwrap();
+        let outcome = run_ready(operation.wait_outcome()).expect("operation outcome must be available");
+        if stopped {
+            assert!(
+                matches!(outcome, qubit_operation::OperationOutcome::Succeeded(()))
+                    || matches!(outcome, qubit_operation::OperationOutcome::Stopped(ref report) if report.reason == StopReason::UserCancelled),
+                "unexpected outcome: {outcome:?}"
+            );
+        } else {
+            assert!(
+                matches!(outcome, qubit_operation::OperationOutcome::Succeeded(())),
+                "unexpected outcome: {outcome:?}"
+            );
+        }
+        let error = facts_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("scope rejection fact must arrive");
+        assert!(
+            error.contains("operation scope rejected inference"),
+            "unexpected error: {error}"
+        );
         assert_eq!(observations.stats.load(Ordering::SeqCst), 0);
         assert_eq!(observations.opens.load(Ordering::SeqCst), 0);
         assert_eq!(observations.random_opens.load(Ordering::SeqCst), 0);

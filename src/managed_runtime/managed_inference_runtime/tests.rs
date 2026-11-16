@@ -62,6 +62,7 @@ fn assert_scope_admission_rollback(stopped: bool) {
             ..OperationOptions::default()
         }
     };
+    let (facts_tx, facts_rx) = mpsc::channel();
     let mut operation = manager
         .as_async()
         .try_submit(options, move |scope| async move {
@@ -74,33 +75,55 @@ fn assert_scope_admission_rollback(stopped: bool) {
                 .err()
                 .expect("scope must reject registration");
             let message = format!("{error:?}");
-            assert!(
-                message.contains("operation scope rejected inference"),
-                "unexpected error: {message}"
-            );
-            assert!(request_runtime.tasks.lock().unwrap().is_empty());
-            assert_eq!(
-                request_runtime
-                    .active_requests
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                0
-            );
-            drop(
-                request_runtime
-                    .reserve_for_provider(None, 8)
-                    .expect("byte capacity must be returned"),
-            );
-            let first = request_runtime
+            let no_tasks = request_runtime.tasks.lock().unwrap().is_empty();
+            let active = request_runtime
+                .active_requests
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let full_budget_returned = request_runtime
+                .reserve_for_provider(None, 8)
+                .map(|permit| {
+                    drop(permit);
+                    true
+                })
+                .unwrap_or(false);
+            let slots_returned = request_runtime
                 .reserve_for_provider(None, 0)
-                .expect("first request slot must be returned");
-            let second = request_runtime
-                .reserve_for_provider(None, 0)
-                .expect("second request slot must be returned");
-            drop((first, second));
+                .and_then(|first| {
+                    request_runtime
+                        .reserve_for_provider(None, 0)
+                        .map(|second| drop((first, second)))
+                })
+                .is_ok();
+            facts_tx
+                .send((message, no_tasks, active, full_budget_returned, slots_returned))
+                .unwrap();
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = block_on(operation.wait_outcome());
+    let outcome = block_on(operation.wait_outcome()).expect("operation outcome must be available");
+    if stopped {
+        assert!(
+            matches!(outcome, OperationOutcome::Succeeded(()))
+                || matches!(outcome, OperationOutcome::Stopped(ref report) if report.reason == StopReason::UserCancelled),
+            "unexpected outcome: {outcome:?}"
+        );
+    } else {
+        assert!(
+            matches!(outcome, OperationOutcome::Succeeded(())),
+            "unexpected outcome: {outcome:?}"
+        );
+    }
+    let (message, no_tasks, active, full_budget_returned, slots_returned) = facts_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("scope admission facts must arrive");
+    assert!(
+        message.contains("operation scope rejected inference"),
+        "unexpected error: {message}"
+    );
+    assert!(no_tasks);
+    assert_eq!(active, 0);
+    assert!(full_budget_returned);
+    assert!(slots_returned);
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
     assert!(runtime.tasks.lock().unwrap().is_empty());
@@ -151,7 +174,11 @@ fn test_scope_admission_repeated_failures_do_not_accumulate() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = block_on(operation.wait_outcome());
+    let outcome = block_on(operation.wait_outcome()).expect("operation outcome must be available");
+    assert!(
+        matches!(outcome, OperationOutcome::Succeeded(())),
+        "unexpected outcome: {outcome:?}"
+    );
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
     assert!(report.worker_stopped);
 }
@@ -160,7 +187,10 @@ fn test_scope_admission_repeated_failures_do_not_accumulate() {
 fn test_scope_admission_failure_preserves_other_request() {
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = borrowed_test_runtime(8);
+    let independent = runtime.reserve_for_provider(None, 4).unwrap();
+    let original_state = runtime.tasks.lock().unwrap()[0].clone();
     let request_runtime = Arc::clone(&runtime);
+    let (facts_tx, facts_rx) = mpsc::channel();
     let options = OperationOptions {
         limits: ScopeLimits {
             resources: 1,
@@ -172,27 +202,53 @@ fn test_scope_admission_failure_preserves_other_request() {
         .as_async()
         .try_submit(options, move |scope| async move {
             let _held = scope.manage(()).unwrap();
-            let independent = request_runtime.reserve_for_provider(None, 8).unwrap();
-            assert!(request_runtime.reserve_for_provider(Some(&scope), 1).is_err());
-            assert_eq!(request_runtime.tasks.lock().unwrap().len(), 1);
-            assert_eq!(
-                request_runtime
-                    .active_requests
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                1
-            );
-            drop(independent);
-            assert!(request_runtime.tasks.lock().unwrap().is_empty());
-            assert_eq!(
-                request_runtime
-                    .active_requests
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                0
-            );
+            let error = request_runtime
+                .reserve_for_provider(Some(&scope), 1)
+                .err()
+                .expect("scope must reject second request");
+            facts_tx.send(format!("{error:?}")).unwrap();
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = block_on(operation.wait_outcome());
+    let outcome = block_on(operation.wait_outcome()).expect("operation outcome must be available");
+    assert!(
+        matches!(outcome, OperationOutcome::Succeeded(())),
+        "unexpected outcome: {outcome:?}"
+    );
+    let error = facts_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("scope rejection fact must arrive");
+    assert!(
+        error.contains("operation scope rejected inference"),
+        "unexpected error: {error}"
+    );
+    let tasks = runtime.tasks.lock().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert!(Arc::ptr_eq(&tasks[0], &original_state));
+    drop(tasks);
+    assert_eq!(runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(runtime.byte_budget.try_acquire(5).is_none());
+    drop(
+        runtime
+            .byte_budget
+            .try_acquire(4)
+            .expect("failed request must return byte permit"),
+    );
+    drop(
+        runtime
+            .reserve_for_provider(None, 0)
+            .expect("failed request must return request slot"),
+    );
+    assert!(Arc::ptr_eq(&runtime.tasks.lock().unwrap()[0], &original_state));
+    drop(independent);
+    assert!(runtime.tasks.lock().unwrap().is_empty());
+    assert_eq!(runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(
+        runtime
+            .byte_budget
+            .try_acquire(8)
+            .expect("full budget must be restored"),
+    );
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
 }
