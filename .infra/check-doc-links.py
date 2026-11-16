@@ -16,27 +16,71 @@ DOCUMENTS = (
     "doc/user_guide.zh_CN.md",
     "doc/design-0.19.0.zh_CN.md",
 )
-LINK = re.compile(r"!?(?:\[[^\]]*\])\(([^)]+)\)")
+LINK_START = re.compile(r"!?(?:\[[^\]]*\])\(")
 REFERENCE = re.compile(r"^\s*\[[^\]]+\]:\s*(\S+)", re.MULTILINE)
 
 
 def markdown_without_fences(markdown: str) -> str:
     lines: list[str] = []
-    in_fence = False
+    fence_char: str | None = None
+    fence_length = 0
     for line in markdown.splitlines():
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if marker and fence_char is None:
+            fence_char = marker.group(1)[0]
+            fence_length = len(marker.group(1))
             lines.append("")
-        elif not in_fence:
+        elif (
+            marker
+            and marker.group(1)[0] == fence_char
+            and len(marker.group(1)) >= fence_length
+            and not line[marker.end() :].strip()
+        ):
+            fence_char = None
+            fence_length = 0
+            lines.append("")
+        elif fence_char is None:
             lines.append(line)
         else:
             lines.append("")
     return "\n".join(lines)
 
 
+def inline_targets(content: str) -> list[str]:
+    targets: list[str] = []
+    for match in LINK_START.finditer(content):
+        depth = 1
+        cursor = match.end()
+        destination: list[str] = []
+        while cursor < len(content) and depth:
+            char = content[cursor]
+            if char == "\\" and cursor + 1 < len(content):
+                destination.extend((char, content[cursor + 1]))
+                cursor += 2
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            destination.append(char)
+            cursor += 1
+        if depth:
+            continue
+        raw = "".join(destination).strip()
+        if raw.startswith("<") and ">" in raw:
+            raw = raw[1 : raw.index(">")]
+        else:
+            raw = re.split(r"\s+[\"']", raw, maxsplit=1)[0]
+        if raw:
+            targets.append(raw)
+    return targets
+
+
 def local_targets(markdown: str) -> list[str]:
     content = markdown_without_fences(markdown)
-    targets = [match.group(1).strip().split()[0].strip("<>") for match in LINK.finditer(content)]
+    targets = inline_targets(content)
     targets.extend(match.group(1).strip().strip("<>") for match in REFERENCE.finditer(content))
     return [target.split("#", 1)[0] for target in targets if target and not target.startswith(("http://", "https://", "mailto:", "#", "data:"))]
 
@@ -60,8 +104,13 @@ def find_errors(root: Path) -> list[str]:
 
 
 def self_test() -> None:
-    sample = "[good](guide.md#part) [web](https://example.com)\n```md\n[ignored](missing.md)\n```"
-    assert local_targets(sample) == ["guide.md"]
+    sample = (
+        "[good](guide.md#part) [nested](sub(dir)/guide.md) [web](https://example.com)\n"
+        "```md\n[backtick-ignored](also-missing.md)\n```\n"
+        "~~~md\n[tilde-ignored](missing.md)\n~~~"
+        "\n```\n```md\n[still-ignored](after-fake-close.md)\n```\n[good-again](after.md)"
+    )
+    assert local_targets(sample) == ["guide.md", "sub(dir)/guide.md", "after.md"]
     with_missing = "[bad](missing.md)"
     assert local_targets(with_missing) == ["missing.md"]
 
