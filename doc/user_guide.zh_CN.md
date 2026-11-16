@@ -156,6 +156,19 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 
 ### 共享应用管理的推理 runtime
 
+共享 runtime 和后续带 Operation scope 的示例使用这些直接依赖。将示例复制到应用时，
+请同时保留此依赖块：
+
+<!-- managed-dependencies-start -->
+```toml
+[dependencies]
+qubit-magika = "0.18"
+qubit-mime = "0.21"
+qubit-operation = "0.3"
+qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
+```
+<!-- managed-dependencies-end -->
+
 在应用启动时创建 runtime，并显式注册已配置的 Provider：
 
 <!-- provider-runtime-example-start -->

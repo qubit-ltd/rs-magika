@@ -196,6 +196,20 @@ uses registry-based construction. Classifier failures are reported as
 
 ### Sharing an application-managed inference runtime
 
+The shared runtime and the operation-aware example below use these direct
+dependencies. Keep this block alongside the managed examples when copying them
+into an application:
+
+<!-- managed-dependencies-start -->
+```toml
+[dependencies]
+qubit-magika = "0.18"
+qubit-mime = "0.21"
+qubit-operation = "0.3"
+qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
+```
+<!-- managed-dependencies-end -->
+
 Create the runtime during application startup and register a configured
 provider explicitly:
 

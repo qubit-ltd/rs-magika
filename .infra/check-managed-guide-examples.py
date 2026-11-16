@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Compile the managed examples extracted directly from both user guides."""
+"""Compile managed examples using only each guide's declared dependencies."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -18,7 +19,19 @@ START = "<!-- managed-guide-example-start -->"
 END = "<!-- managed-guide-example-end -->"
 PROVIDER_START = "<!-- provider-runtime-example-start -->"
 PROVIDER_END = "<!-- provider-runtime-example-end -->"
+DEPENDENCIES_START = "<!-- managed-dependencies-start -->"
+DEPENDENCIES_END = "<!-- managed-dependencies-end -->"
 GUIDES = ("doc/user_guide.md", "doc/user_guide.zh_CN.md")
+EXPECTED_VERSIONS = {
+    "qubit-magika": "0.18",
+    "qubit-mime": "0.21",
+    "qubit-operation": "0.3",
+    "qubit-fs": "0.3",
+}
+REQUIRED_IMPORTS = (
+    "use qubit_magika::MagikaMimeDetector;",
+    "use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};",
+)
 
 
 def extract_example(
@@ -26,21 +39,15 @@ def extract_example(
     guide_name: str,
     start_marker: str = START,
     end_marker: str = END,
-    required_imports: tuple[str, ...] = (
-        "use qubit_magika::MagikaMimeDetector;",
-        "use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};",
-    ),
+    required_imports: tuple[str, ...] = REQUIRED_IMPORTS,
 ) -> str:
-    if markdown.count(start_marker) != 1:
-        raise ValueError(f"{guide_name}: expected exactly one start marker")
-    if markdown.count(end_marker) != 1:
-        raise ValueError(f"{guide_name}: expected exactly one end marker")
+    if markdown.count(start_marker) != 1 or markdown.count(end_marker) != 1:
+        raise ValueError(f"{guide_name}: expected exactly one start and end marker")
     start = markdown.index(start_marker) + len(start_marker)
     end = markdown.index(end_marker)
     if end <= start:
         raise ValueError(f"{guide_name}: end marker must follow start marker")
-    marked = markdown[start:end]
-    fences = re.findall(r"```rust(?:,[^\n]*)?\n(.*?)\n```", marked, re.DOTALL)
+    fences = re.findall(r"```rust(?:,[^\n]*)?\n(.*?)\n```", markdown[start:end], re.DOTALL)
     if len(fences) != 1 or not fences[0].strip():
         raise ValueError(f"{guide_name}: expected exactly one non-empty Rust code block")
     example = fences[0]
@@ -50,113 +57,194 @@ def extract_example(
 
 
 def extract_provider_example(markdown: str, guide_name: str) -> str:
-    required_imports = (
+    required = (
         "use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};",
         "MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime))",
     )
-    return extract_example(markdown, guide_name, PROVIDER_START, PROVIDER_END, required_imports)
+    return extract_example(markdown, guide_name, PROVIDER_START, PROVIDER_END, required)
+
+
+def extract_dependencies(markdown: str, guide_name: str) -> tuple[str, dict[str, object]]:
+    if markdown.count(DEPENDENCIES_START) != 1 or markdown.count(DEPENDENCIES_END) != 1:
+        raise ValueError(f"{guide_name}: expected exactly one managed dependency block")
+    start = markdown.index(DEPENDENCIES_START) + len(DEPENDENCIES_START)
+    end = markdown.index(DEPENDENCIES_END)
+    if end <= start:
+        raise ValueError(f"{guide_name}: dependency end marker must follow start marker")
+    marked = markdown[start:end]
+    fences = re.findall(r"```toml\s*\n(.*?)\n```", marked, re.DOTALL)
+    if len(fences) != 1:
+        raise ValueError(f"{guide_name}: expected exactly one TOML dependency block")
+    try:
+        parsed = tomllib.loads(fences[0])
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"{guide_name}: invalid managed dependency TOML: {error}") from error
+    dependencies = parsed.get("dependencies")
+    if not isinstance(dependencies, dict):
+        raise ValueError(f"{guide_name}: dependency block must declare [dependencies]")
+    return fences[0], dependencies
+
+
+def dependency_version(entry: object) -> str | None:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        version = entry.get("version")
+        return version if isinstance(version, str) else None
+    return None
+
+
+def validate_dependencies(
+    guide_name: str, dependencies: dict[str, object], examples: list[str]
+) -> None:
+    used_crates: set[str] = set()
+    for example in examples:
+        used_crates.update(re.findall(r"\b(qubit_[a-z0-9_]+)::", example))
+    crate_to_package = {name.replace("-", "_"): name for name in EXPECTED_VERSIONS}
+    required = {crate_to_package[crate] for crate in used_crates if crate in crate_to_package}
+    for package in sorted(required):
+        if package not in dependencies:
+            raise ValueError(f"{guide_name}: managed dependency block is missing {package}")
+    for package, expected in EXPECTED_VERSIONS.items():
+        if package not in dependencies:
+            raise ValueError(f"{guide_name}: managed dependency block is missing {package}")
+        actual = dependency_version(dependencies[package])
+        if actual is None:
+            raise ValueError(f"{guide_name}: {package} has no version in managed dependency block")
+        if actual.removeprefix("^") != expected:
+            raise ValueError(
+                f"{guide_name}: {package} version {actual!r}; expected {expected!r}"
+            )
+    fs = dependencies["qubit-fs"]
+    features = fs.get("features", []) if isinstance(fs, dict) else []
+    if "AsyncFileSystem" in "\n".join(examples) and "async" not in features:
+        raise ValueError(f"{guide_name}: qubit-fs is missing the async feature used by the examples")
 
 
 def run_self_tests() -> None:
-    valid = (
-        f"{START}\n```rust\n"
-        "use qubit_magika::MagikaMimeDetector;\n"
-        "use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};\n"
-        "```\n"
-        f"{END}"
-    )
-    assert "GroupOptions" in extract_example(valid, "fixture")
-    provider = (
-        f"{PROVIDER_START}\n```rust\n"
-        "use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};\n"
-        "MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime))\n"
-        "```\n"
-        f"{PROVIDER_END}"
-    )
-    assert "managed_runtime" in extract_provider_example(provider, "provider fixture")
-    for invalid, label in (
-        (valid.replace(START, ""), "missing start marker"),
-        (valid + "\n" + START, "repeated start marker"),
-        (valid.replace("```rust\n", "```text\n"), "missing Rust block"),
+    guide = "English fixture"
+    examples = ["use qubit_magika::MagikaMimeDetector;", "use qubit_operation::OperationManager;"]
+    dependencies = {
+        "qubit-magika": "0.18",
+        "qubit-mime": "0.21",
+        "qubit-operation": "0.3",
+        "qubit-fs": {"version": "0.3", "default-features": False, "features": ["async"]},
+    }
+    block = """[dependencies]
+qubit-magika = "0.18"
+qubit-mime = "0.21"
+qubit-operation = "0.3"
+qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
+"""
+    parsed = tomllib.loads(block)["dependencies"]
+    validate_dependencies(guide, parsed, examples)
+    for label, mutated, expected_message in (
+        ("English missing operation", {k: v for k, v in dependencies.items() if k != "qubit-operation"}, "missing qubit-operation"),
+        ("Chinese missing operation", {k: v for k, v in dependencies.items() if k != "qubit-operation"}, "missing qubit-operation"),
+        ("wrong Magika version", {**dependencies, "qubit-magika": "9.99"}, "qubit-magika version"),
     ):
         try:
-            extract_example(invalid, "fixture")
+            validate_dependencies(label, mutated, examples)
+        except ValueError as error:
+            if expected_message not in str(error):
+                raise AssertionError(f"{label}: unexpected validation error: {error}") from error
+        else:
+            raise AssertionError(f"accepted invalid dependency fixture: {label}")
+    sample = f"{DEPENDENCIES_START}\n```toml\n{block}```\n{DEPENDENCIES_END}"
+    _, parsed = extract_dependencies(sample, "self-test fixture")
+    assert parsed == tomllib.loads(block)["dependencies"]
+    for invalid in (sample.replace(DEPENDENCIES_START, ""), sample + "\n" + DEPENDENCIES_START):
+        try:
+            extract_dependencies(invalid, "self-test fixture")
         except ValueError:
             pass
         else:
-            raise AssertionError(f"accepted invalid fixture: {label}")
-    missing_import = valid.replace("GroupOptions", "SomeOtherType")
-    try:
-        extract_example(missing_import, "Chinese fixture")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("accepted guide fixture with missing GroupOptions import")
+            raise AssertionError("accepted invalid dependency marker fixture")
 
 
-def toml_string(value: Path) -> str:
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+def toml_value(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def consumer_manifest(dependencies: dict[str, object], project_root: Path, operation_path: Path) -> str:
+    entries: list[str] = []
+    for package, value in dependencies.items():
+        if package in ("qubit-magika", "qubit-operation"):
+            version = dependency_version(value)
+            assert version is not None
+            mapped: dict[str, object] = {"version": version}
+            if package == "qubit-magika":
+                mapped["path"] = str(project_root)
+            else:
+                mapped["path"] = str(operation_path)
+            if isinstance(value, dict):
+                mapped.update({k: v for k, v in value.items() if k != "path"})
+            value = mapped
+        if isinstance(value, dict):
+            encoded = ", ".join(f"{key} = {toml_value(item)}" for key, item in value.items())
+            entries.append(f"{package} = {{ {encoded} }}")
+        else:
+            entries.append(f"{package} = {toml_value(value)}")
+    return """[package]
+name = "managed-guide-example-check"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+""" + "\n".join(entries) + "\n"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--self-test", action="store_true", help="run extractor validation checks")
+    parser.add_argument("--self-test", action="store_true", help="run checker validation checks")
     args = parser.parse_args()
     if args.self_test:
         run_self_tests()
-        print("managed guide extractor self-tests passed")
+        print("managed guide dependency checker self-tests passed")
         return 0
 
     project_root = Path(__file__).resolve().parent.parent
     project_manifest = tomllib.loads((project_root / "Cargo.toml").read_text(encoding="utf-8"))
     operation_dependency = project_manifest["dependencies"]["qubit-operation"]
     operation_path = (project_root / operation_dependency["path"]).resolve()
-    operation_version = operation_dependency["version"]
-    file_system_dependency = project_manifest["dependencies"]["qubit-fs"]
-    file_system_version = file_system_dependency["version"]
-    file_system_features = file_system_dependency.get("features", [])
-    mime_dependency = project_manifest["dependencies"]["qubit-mime"]
-    mime_version = mime_dependency if isinstance(mime_dependency, str) else mime_dependency["version"]
-    examples = [
-        extract_example((project_root / guide).read_text(encoding="utf-8"), guide)
-        for guide in GUIDES
-    ]
-    provider_examples = [
-        extract_provider_example((project_root / guide).read_text(encoding="utf-8"), guide)
-        for guide in GUIDES
-    ]
     target = project_root / "target"
     target.mkdir(exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(prefix="managed-guide-check-", dir=target))
     try:
-        consumer = temp_dir / "consumer"
-        (consumer / "src").mkdir(parents=True)
-        modules = [
-            f"#[allow(dead_code)]\nmod guide_{index} {{\n{example}\n}}"
-            for index, example in enumerate(examples + provider_examples)
-        ]
-        (consumer / "src/lib.rs").write_text("\n\n".join(modules) + "\n", encoding="utf-8")
-        manifest = f"""[package]
-name = "managed-guide-example-check"
-version = "0.0.0"
-edition = "2024"
-
-[dependencies]
-qubit-magika = {{ path = {toml_string(project_root)} }}
-qubit-operation = {{ path = {toml_string(operation_path)}, version = {operation_version!r} }}
-qubit-fs = {{ version = {file_system_version!r}, default-features = false, features = {file_system_features!r} }}
-qubit-mime = {{ version = {mime_version!r} }}
-"""
-        (consumer / "Cargo.toml").write_text(manifest, encoding="utf-8")
-        print(f"Compiling guide examples extracted from {', '.join(GUIDES)}")
         cargo_env = os.environ.copy()
-        cargo_env["CARGO_TARGET_DIR"] = str(project_root / "target")
-        return subprocess.run(
-            ["cargo", "check", "--manifest-path", str(consumer / "Cargo.toml")],
-            cwd=project_root,
-            env=cargo_env,
-            check=False,
-        ).returncode
+        cargo_env["CARGO_TARGET_DIR"] = str(target)
+        for guide in GUIDES:
+            guide_path = project_root / guide
+            markdown = guide_path.read_text(encoding="utf-8")
+            examples = [
+                extract_example(markdown, guide),
+                extract_provider_example(markdown, guide),
+            ]
+            _, dependencies = extract_dependencies(markdown, guide)
+            validate_dependencies(guide, dependencies, examples)
+            consumer = temp_dir / Path(guide).stem
+            (consumer / "src").mkdir(parents=True)
+            modules = [
+                f"#[allow(dead_code)]\nmod guide_{index} {{\n{example}\n}}"
+                for index, example in enumerate(examples)
+            ]
+            (consumer / "src/lib.rs").write_text("\n\n".join(modules) + "\n", encoding="utf-8")
+            (consumer / "Cargo.toml").write_text(
+                consumer_manifest(dependencies, project_root, operation_path), encoding="utf-8"
+            )
+            print(f"Compiling managed examples from {guide}", flush=True)
+            result = subprocess.run(
+                ["cargo", "check", "--manifest-path", str(consumer / "Cargo.toml")],
+                cwd=project_root,
+                env=cargo_env,
+                check=False,
+            )
+            if result.returncode:
+                return result.returncode
+        return 0
+    except (OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
+        print(f"managed guide check failed: {error}", file=sys.stderr)
+        return 1
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
