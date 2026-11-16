@@ -14,9 +14,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 
 use magika::SyncInput;
-use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
-use qubit_operation::ChildOutcomeKind;
 use qubit_operation::GroupOptions;
 use qubit_operation::OperationManager;
 
@@ -26,10 +24,8 @@ use super::ByteBudget;
 use super::Job;
 use super::ManagedInferenceRuntime;
 use super::WorkerInput;
-use super::close_runtime_admission;
-use super::execute_classified;
 use super::map_magika_error;
-use super::settle_queued_jobs;
+use super::worker_loop::run_worker;
 use super::worker_state::WorkerState;
 
 /// Owned byte classifier used by the worker thread.
@@ -90,48 +86,28 @@ impl ManagedInferenceRuntime {
         let worker = std::thread::Builder::new()
             .name("magika-test-inference".to_owned())
             .spawn(move || {
-                let mut terminal_fault = false;
-                while let Ok(job) = receiver.recv() {
-                    let Job { input, state, owner } = job;
-                    if state.stop_requested() {
-                        state.finish_business(
-                            Err(MimeError::detector_backend(
-                                "magika",
-                                "inference stopped before execution",
-                            )),
-                            ChildOutcomeKind::Stopped,
-                        );
-                        drop(input);
-                    } else {
-                        state.mark_started();
-                        let (result, outcome) = execute_classified(|| match input {
-                            WorkerInput::Bytes(bytes) => (engine)(bytes.into_vec()),
-                            WorkerInput::Bridge(bridge, _, _) => {
-                                let mut input = BridgeSyncInput(bridge);
-                                let length = SyncInput::length(&input).unwrap();
-                                let mut bytes = vec![0; usize::try_from(length).unwrap()];
-                                match SyncInput::read_at(&mut input, &mut bytes, 0) {
-                                    Ok(()) => (engine)(bytes),
-                                    Err(error) => Err(map_magika_error(error)),
-                                }
+                run_worker(
+                    receiver,
+                    worker_admission_gate,
+                    |input| match input {
+                        WorkerInput::Bytes(bytes) => (engine)(bytes.into_vec()),
+                        WorkerInput::Bridge(bridge, _, _) => {
+                            let mut input = BridgeSyncInput(bridge);
+                            let length = SyncInput::length(&input).unwrap();
+                            let mut bytes = vec![0; usize::try_from(length).unwrap()];
+                            match SyncInput::read_at(&mut input, &mut bytes, 0) {
+                                Ok(()) => (engine)(bytes),
+                                Err(error) => Err(map_magika_error(error)),
                             }
-                            WorkerInput::Features(_, _) => Err(MimeError::detector_backend(
-                                "magika",
-                                "test engine only accepts owned bytes",
-                            )),
-                        });
-                        terminal_fault = outcome == ChildOutcomeKind::Panicked;
-                        state.finish_business(result, outcome);
-                    }
-                    after_business();
-                    owner.worker_done();
-                    if terminal_fault {
-                        close_runtime_admission(&worker_admission_gate);
-                        settle_queued_jobs(&receiver, "inference session discarded after worker panic");
-                        break;
-                    }
-                }
-                before_worker_exit();
+                        }
+                        WorkerInput::Features(_, _) => Err(qubit_mime::MimeError::detector_backend(
+                            "magika",
+                            "test engine only accepts owned bytes",
+                        )),
+                    },
+                    after_business,
+                    before_worker_exit,
+                );
             })
             .expect("test inference worker should start");
         let service_group = supervisor

@@ -24,7 +24,6 @@ use magika::FeaturesOrRuled;
 use magika::Session;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
-use qubit_operation::ChildOutcomeKind;
 use qubit_operation::ChildRequirement;
 use qubit_operation::GroupOptions;
 use qubit_operation::OperationGroup;
@@ -58,71 +57,14 @@ mod worker_state;
 
 use self::worker_state::WorkerState;
 
+#[path = "internal/worker_loop.rs"]
+mod worker_loop;
+
 #[cfg(test)]
 mod test_support;
 
 /// Monotonically allocates identifiers for runtime child operations.
 static NEXT_CHILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// Converts worker execution into a result and its matching child outcome.
-///
-/// # Type Parameters
-///
-/// * `T` - Successful inference result type.
-///
-/// # Parameters
-///
-/// * `work` - Inference closure whose panic is contained at the worker
-///   boundary.
-///
-/// # Returns
-///
-/// The closure result and a lifecycle outcome that distinguishes success,
-/// failure, and panic.
-fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>, ChildOutcomeKind) {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
-        Ok(Ok(value)) => (Ok(value), ChildOutcomeKind::Succeeded),
-        Ok(Err(error)) => (Err(error), ChildOutcomeKind::Failed),
-        Err(_) => (
-            Err(MimeError::detector_backend("magika", "inference worker panicked")),
-            ChildOutcomeKind::Panicked,
-        ),
-    }
-}
-
-/// Closes admissions at the shared dispatch boundary after a worker fault.
-///
-/// # Parameters
-///
-/// * `gate` - Shared admission gate guarded by the dispatch boundary.
-fn close_runtime_admission(gate: &Mutex<AdmissionGate>) {
-    gate.lock().unwrap_or_else(|error| error.into_inner()).closed = true;
-}
-
-/// Completes queued work after the worker session has become unusable.
-///
-/// # Parameters
-///
-/// * `receiver` - Queue whose already accepted jobs must be completed.
-/// * `reason` - Backend error message reported to queued operations.
-fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
-    for job in receiver.try_iter() {
-        let Job { input, state, owner } = job;
-        let bridge = match &input {
-            WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
-            _ => None,
-        };
-        state.finish_business(
-            Err(MimeError::detector_backend("magika", reason)),
-            ChildOutcomeKind::Failed,
-        );
-        drop(input);
-        if let Some(bridge) = bridge {
-            bridge.close();
-        }
-        owner.worker_done();
-    }
-}
 
 /// Shareable managed execution runtime. One worker owns its Magika session and
 /// one queued request; the supervisor service group admits at most one running
@@ -230,39 +172,13 @@ impl ManagedInferenceRuntime {
                         return;
                     }
                 };
-                let mut terminal_fault = false;
-                while let Ok(job) = receiver.recv() {
-                    let Job { input, state, owner } = job;
-                    let bridge = match &input {
-                        WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
-                        _ => None,
-                    };
-                    if state.stop_requested() {
-                        state.finish_business(
-                            Err(MimeError::detector_backend(
-                                "magika",
-                                "inference stopped before execution",
-                            )),
-                            ChildOutcomeKind::Stopped,
-                        );
-                        drop(input);
-                    } else {
-                        state.mark_started();
-                        let (result, outcome) = execute_classified(|| infer_input(&mut session, input));
-                        terminal_fault = outcome == ChildOutcomeKind::Panicked;
-                        state.finish_business(result, outcome);
-                    }
-                    if let Some(bridge) = bridge {
-                        bridge.close();
-                    }
-                    owner.worker_done();
-                    if terminal_fault {
-                        // Native session state after an unwind is undocumented.
-                        close_runtime_admission(&worker_admission_gate);
-                        settle_queued_jobs(&receiver, "inference session discarded after worker panic");
-                        break;
-                    }
-                }
+                worker_loop::run_worker(
+                    receiver,
+                    worker_admission_gate,
+                    |input| infer_input(&mut session, input),
+                    || {},
+                    || {},
+                );
             }) {
             Ok(worker) => worker,
             Err(error) => {
