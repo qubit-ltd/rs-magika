@@ -21,6 +21,13 @@ use qubit_spi::ProviderSelection;
 #[cfg(feature = "bundled-onnxruntime")]
 use crate::support::StaticMediaStreamClassifier;
 
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_magika::ManagedInferenceRuntime;
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_operation::ManagerOptions;
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_operation::OperationManager;
+
 /// Tests provider self-description and one-argument registration.
 #[test]
 fn test_magika_mime_detector_provider_metadata_and_registration() {
@@ -44,7 +51,47 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 
     assert_eq!(
         vec!["magika"],
-        registry.provider_ids().iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        registry
+            .provider_ids()
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// Tests that an explicitly registered provider retains its shared runtime.
+#[cfg(feature = "bundled-onnxruntime")]
+#[test]
+fn test_provider_shared_runtime_explicit_registry_registration() {
+    use qubit_operation::ShutdownMode;
+    use std::time::Duration;
+
+    let manager = OperationManager::new(ManagerOptions::default())
+        .expect("operation manager should initialize");
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(manager, MimeConfig::default().max_buffer_size())
+            .expect("managed runtime should initialize"),
+    );
+    let registry = MimeDetectorRegistry::default();
+    registry
+        .register(MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)))
+        .expect("configured Magika provider should register");
+    let provider = registry
+        .resolve_selected(&ProviderSelection::named("magika").expect("selection should be valid"))
+        .expect("configured Magika provider should resolve");
+    let detector = provider
+        .create_configured(&MimeConfig::default())
+        .expect("detector should use the registered shared runtime");
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        detector
+            .detect_by_filename("document.pdf")
+            .expect("filename detection should not require inference"),
+    );
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .worker_stopped
     );
 }
 
@@ -132,11 +179,18 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
 #[test]
 fn test_magika_provider_is_discovered_with_repository_default() {
     let registry = MimeDetectorRegistry::builtin();
-    assert!(registry.provider_ids().iter().any(|id| id.as_str() == "magika"));
+    assert!(
+        registry
+            .provider_ids()
+            .iter()
+            .any(|id| id.as_str() == "magika")
+    );
     assert_eq!(
         qubit_spi::ProviderSelection::named("repository").expect("valid repository ID"),
         registry.default_selection(),
     );
     let selection = qubit_spi::ProviderSelection::named("magika").expect("valid magika ID");
-    registry.resolve_selected(&selection).expect("Magika should resolve");
+    registry
+        .resolve_selected(&selection)
+        .expect("Magika should resolve");
 }
