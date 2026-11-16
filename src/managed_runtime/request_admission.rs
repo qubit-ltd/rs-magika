@@ -43,10 +43,11 @@ impl RequestAdmission {
     ///
     /// # Parameters
     ///
-    /// * `id` - Stable operation identifier.
     /// * `state` - Shared task state.
-    /// * `control` - Operation control registered with the parent scope.
     /// * `service` - Runtime service capacity reservation.
+    /// * `scope_resources` - References retained in the parent operation scope
+    ///   until this request's resources are released. These references keep the
+    ///   scope lifecycle active; they are not operation controls.
     /// * `bytes` - Payload byte reservation.
     ///
     /// # Returns

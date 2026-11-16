@@ -307,6 +307,15 @@ impl ManagedInferenceRuntime {
     ///
     /// Returns a size-limit, capacity, Magika, or worker error.
     pub(crate) async fn detect_content_unmanaged(self: &Arc<Self>, content: &[u8]) -> MimeResult<Option<String>> {
+        self.detect_content_unmanaged_with_copy(content, |content| content.to_vec().into_boxed_slice())
+            .await
+    }
+
+    async fn detect_content_unmanaged_with_copy(
+        self: &Arc<Self>,
+        content: &[u8],
+        copy_content: impl FnOnce(&[u8]) -> Box<[u8]>,
+    ) -> MimeResult<Option<String>> {
         let length = content.len();
         if length > self.max_in_flight_bytes() {
             return Err(MimeError::BufferLimitExceeded {
@@ -314,11 +323,9 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit_operation(
-            None,
-            WorkerInput::Bytes(worker_bytes(content.to_vec().into_boxed_slice())),
-        )
-        .await
+        let admission = self.reserve_request(None, length)?;
+        let input = WorkerInput::Bytes(worker_bytes(copy_content(content)));
+        self.submit_operation_admitted(None, admission, input).await
     }
 
     /// Classifies owned bytes through the worker without registering a parent.
@@ -372,6 +379,15 @@ impl ManagedInferenceRuntime {
             WorkerInput::Features(_, _) => 0,
         };
         let admission = self.reserve_request(None, byte_count)?;
+        self.submit_operation_admitted(parent, admission, input).await
+    }
+
+    async fn submit_operation_admitted(
+        self: &Arc<Self>,
+        parent: Option<&OperationScope>,
+        admission: RequestAdmission,
+        input: WorkerInput,
+    ) -> MimeResult<Option<String>> {
         let runtime = Arc::clone(self);
         let body = move |scope| async move {
             let mut admission = admission;

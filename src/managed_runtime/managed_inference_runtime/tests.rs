@@ -35,6 +35,76 @@ fn map_provider_test_error(_: magika::Error) -> MimeError {
     MimeError::detector_backend("magika", "test input failed")
 }
 
+fn borrowed_test_runtime(max_bytes: usize) -> Arc<ManagedInferenceRuntime> {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        max_bytes,
+        Box::new(|_| Ok(None)),
+        Box::new(|| {}),
+    ))
+}
+
+#[test]
+fn test_borrowed_content_closed_does_not_copy() {
+    let runtime = borrowed_test_runtime(8);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+    let copies = std::sync::atomic::AtomicUsize::new(0);
+    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |_| {
+        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::from(b"x".as_slice())
+    }));
+    assert!(result.is_err());
+    assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_borrowed_content_full_does_not_copy() {
+    let runtime = borrowed_test_runtime(8);
+    let first = runtime.reserve_for_provider(None, 0).unwrap();
+    let second = runtime.reserve_for_provider(None, 0).unwrap();
+    let copies = std::sync::atomic::AtomicUsize::new(0);
+    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |_| {
+        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::from(b"x".as_slice())
+    }));
+    assert!(result.is_err());
+    assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop((first, second));
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+}
+
+#[test]
+fn test_borrowed_content_budget_rejection_does_not_copy() {
+    let runtime = borrowed_test_runtime(8);
+    let reservation = runtime.reserve_for_provider(None, 8).unwrap();
+    let copies = std::sync::atomic::AtomicUsize::new(0);
+    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |_| {
+        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::from(b"x".as_slice())
+    }));
+    assert!(result.is_err());
+    assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(reservation);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+}
+
+#[test]
+fn test_borrowed_content_accepted_copies_once() {
+    let runtime = borrowed_test_runtime(8);
+    let copies = std::sync::atomic::AtomicUsize::new(0);
+    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |content| {
+        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(runtime.byte_budget.try_acquire(8).is_none());
+        content.to_vec().into_boxed_slice()
+    }));
+    assert_eq!(result.unwrap(), None);
+    assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(runtime.byte_budget.try_acquire(8).is_some());
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+}
+
 struct ReleaseWorkerGate(Arc<(Mutex<bool>, Condvar)>);
 
 impl ReleaseWorkerGate {
