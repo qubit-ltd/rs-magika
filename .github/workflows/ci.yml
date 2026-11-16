@@ -54,3 +54,36 @@ jobs:
             features: ((.features // []) | join(","))
           }]}' "$config")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  dynamic-loader:
+    name: Dynamic ONNX Runtime consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal
+      - name: Prepare pinned operation dependency
+        run: |
+          set -euo pipefail
+          git init ../rs-operation
+          git -C ../rs-operation remote add origin https://github.com/qubit-ltd/rs-operation.git
+          git -C ../rs-operation fetch origin 1fc3c8713cc30a92e18bdbde0b924ce83d53a0e7
+          git -C ../rs-operation checkout --detach FETCH_HEAD
+      - name: Download and verify ONNX Runtime 1.24.2
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/onnxruntime-linux-x64-1.24.2.tgz"
+          curl --fail --location --silent --show-error \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz \
+            --output "$archive"
+          echo '43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6  '"$archive" | sha256sum --check
+          mkdir "$RUNNER_TEMP/onnxruntime"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/onnxruntime"
+          echo "ORT_LIBRARY_PATH=$RUNNER_TEMP/onnxruntime/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/onnxruntime/onnxruntime-linux-x64-1.24.2/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+      - name: Check dynamic feature selection
+        run: |
+          python3 .infra/check-dynamic-loader-features.py --self-test
+          cargo +1.94.0 tree --manifest-path tests/fixtures/dynamic_loader/Cargo.toml -e features | python3 .infra/check-dynamic-loader-features.py
+      - name: Run isolated dynamic loading consumer
+        run: cargo +1.94.0 run --manifest-path tests/fixtures/dynamic_loader/Cargo.toml
