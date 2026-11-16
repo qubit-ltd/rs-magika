@@ -104,6 +104,10 @@ Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的
 默认选择仍是 `repository`；需要 Magika 时应显式选择。若需配置媒体流分类器，
 仍须通过 `with_media_stream_classifier` 显式构造并注册 Provider。
 应用还需引用该 crate（`use qubit_magika as _;`），确保链接器保留 inventory 提交项。
+Inventory 只提交未配置的 Provider。若要共享应用管理的 runtime，应显式注册
+`MagikaMimeDetectorProvider::new().managed_runtime(...)`，并在 detector 使用期间保留
+runtime；[Provider runtime 示例](doc/user_guide.zh_CN.md#共享应用管理的推理-runtime)说明了
+注册方式及共享预算和关闭行为。
 构造 detector 时会同步等待 worker 初始化内嵌 Magika 模型和 ONNX Runtime Session。
 应用应在启动阶段构造一次并共享（例如使用 `Arc`）；共享 runtime 上的推理调用会在内部串行执行。
 

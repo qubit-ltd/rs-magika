@@ -154,6 +154,39 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 `MagikaMimeDetectorProvider::with_media_stream_classifier`。classifier 失败时返回
 `MimeError`；只有 classifier 成功时才会进行 refinement。
 
+### 共享应用管理的推理 runtime
+
+在应用启动时创建 runtime，并显式注册已配置的 Provider：
+
+<!-- provider-runtime-example-start -->
+```rust
+use std::error::Error;
+use std::sync::Arc;
+
+use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
+use qubit_mime::{MimeConfig, MimeDetectorRegistry};
+use qubit_operation::{ManagerOptions, OperationManager};
+
+fn register_provider() -> Result<Arc<ManagedInferenceRuntime>, Box<dyn Error>> {
+    let manager = OperationManager::new(ManagerOptions::default())?;
+    let runtime = Arc::new(ManagedInferenceRuntime::new(
+        manager,
+        MimeConfig::default().max_buffer_size(),
+    )?);
+    MimeDetectorRegistry::global().register(
+        MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)),
+    )?;
+    Ok(runtime)
+}
+```
+<!-- provider-runtime-example-end -->
+
+应用应在整个生命周期内保留返回的 `Arc`，并在 detector 停止接收请求后关闭
+runtime。该 Provider 创建的 detector 共享同一 worker、请求容量、字节预算和关闭域。
+runtime 字节预算必须覆盖每个 detector 配置的 `max_buffer_size`。Inventory 只提交不带
+runtime 的 `MagikaMimeDetectorProvider::new()`；需要共享应用 runtime 时，应显式注册配置后的
+Provider。
+
 ## Media refinement 支持范围
 
 已配置的媒体流分类器只用于符合条件的高层输入。必须启用 precise detection，且检测到的
@@ -356,6 +389,11 @@ managed 和 scope-less provider 入口都遵循此生命周期。
 子操作的业务结果与资源释放是两件事。推理成功记录为 `Succeeded`；worker 返回错误时记录
 `Failed`，调用方仍会收到原始错误；worker panic 则记录为 `Panicked`。即使调用方已经
 取走结果、资源也已释放，终态结果仍可从子操作状态中读取。
+
+worker panic 后，runtime 会关闭新请求准入，将排队任务以 backend 错误终结，并丢弃
+session；Magika 与 ONNX Runtime 均未说明 unwind 后可安全恢复 session。该 runtime 不能再用于
+模型请求；应用需要新建 runtime 并重新注册 Provider 才能恢复推理。此策略处理 worker 捕获到的
+Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 
 `shutdown_blocking` 用同一个 deadline 等待服务接纳/结算和 worker 退出。超时返回时，
 `worker_stopped == false` 表示 worker 尚未退出，运行时会保留其 handle；之后再次调用 shutdown

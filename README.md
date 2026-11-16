@@ -116,6 +116,11 @@ explicitly when needed. A provider with a media-stream classifier still needs
 explicit registration with `with_media_stream_classifier`.
 Reference the crate in the application (`use qubit_magika as _;`) so the linker
 retains its inventory submission.
+Inventory submits the unconfigured provider only. To share an application-owned
+runtime, register `MagikaMimeDetectorProvider::new().managed_runtime(...)`
+explicitly and keep the runtime alive for the detector lifetime; the
+[provider runtime example](doc/user_guide.md#sharing-an-application-managed-inference-runtime)
+shows the setup and shared budget/shutdown behavior.
 Detector construction synchronously waits for the worker to initialize the
 embedded Magika model and ONNX Runtime session. Build it during application
 startup, create it once, and share it (for example with `Arc`). Inference calls

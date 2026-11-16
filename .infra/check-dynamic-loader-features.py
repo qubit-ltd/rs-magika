@@ -8,7 +8,13 @@ import re
 import sys
 
 
-FORBIDDEN = ("download-binaries", "copy-dylibs", "download-binaries-check")
+FORBIDDEN = (
+    "download-binaries",
+    "copy-dylibs",
+    "download-binaries-check",
+    "tls-rustls",
+    "tls-rustls-no-provider",
+)
 
 
 def check(tree: str) -> list[str]:
@@ -29,6 +35,7 @@ def self_test() -> None:
     assert not check(valid)
     assert "load-dynamic" in " ".join(check("├── ort v2.0.0-rc.12\n│   └── ort feature \"std\""))
     assert "download-binaries" in " ".join(check(valid + "\n│   └── ort feature \"download-binaries\""))
+    assert "tls-rustls" in " ".join(check(valid + "\n│   └── ort feature \"tls-rustls\""))
 
 
 def main() -> int:

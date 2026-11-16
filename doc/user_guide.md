@@ -194,6 +194,42 @@ The same classifier can be passed to
 uses registry-based construction. Classifier failures are reported as
 `MimeError`; refinement is best-effort only when the classifier succeeds.
 
+### Sharing an application-managed inference runtime
+
+Create the runtime during application startup and register a configured
+provider explicitly:
+
+<!-- provider-runtime-example-start -->
+```rust
+use std::error::Error;
+use std::sync::Arc;
+
+use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
+use qubit_mime::{MimeConfig, MimeDetectorRegistry};
+use qubit_operation::{ManagerOptions, OperationManager};
+
+fn register_provider() -> Result<Arc<ManagedInferenceRuntime>, Box<dyn Error>> {
+    let manager = OperationManager::new(ManagerOptions::default())?;
+    let runtime = Arc::new(ManagedInferenceRuntime::new(
+        manager,
+        MimeConfig::default().max_buffer_size(),
+    )?);
+    MimeDetectorRegistry::global().register(
+        MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)),
+    )?;
+    Ok(runtime)
+}
+```
+<!-- provider-runtime-example-end -->
+
+Keep the returned `Arc` for the application lifetime and shut the runtime down
+after detectors stop accepting requests. Detectors created by this provider
+share its worker, request capacity, byte budget, and shutdown domain. The
+runtime byte budget must cover each detector's configured `max_buffer_size`.
+Inventory submits only `MagikaMimeDetectorProvider::new()` without a runtime;
+register a configured provider explicitly when sharing an application-owned
+runtime.
+
 ## Custom ONNX Runtime Configuration
 
 To use an ONNX Runtime library supplied by the application, disable the bundled
@@ -415,6 +451,12 @@ inference reports `Succeeded`; a worker error reports `Failed` while the
 caller receives the original error, and a worker panic reports
 `Panicked`. The terminal child result remains observable after the caller
 consumes the result and after resources are released.
+After a worker panic, the runtime closes admission, fails queued work with a
+backend error, and discards its session because Magika and ONNX Runtime do not
+document session recovery after an unwind. The runtime cannot be reused for
+model requests; create and register a new runtime to resume inference. This
+policy addresses Rust panics caught by the worker and does not cover native
+crashes or `panic = abort`.
 
 `shutdown_blocking` uses one deadline for service admission/settlement and
 worker exit. On timeout, `worker_stopped == false` means the worker has not

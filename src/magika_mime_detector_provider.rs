@@ -138,10 +138,7 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// is classified as initialization failure because Magika's upstream error
     /// does not reliably distinguish a missing runtime from an invalid model or
     /// configuration. `OnAbsence` fallback therefore does not suppress it.
-    fn create_configured(
-        &self,
-        config: &MimeConfig,
-    ) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
+    fn create_configured(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
         let mut builder = MagikaMimeDetector::builder()
             .mime_config(config.clone())
             .media_stream_classifier(self.media_stream_classifier.clone());
@@ -177,6 +174,7 @@ mod tests {
     use std::io::Read;
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use qubit_mime::MediaStreamClassifier;
     use qubit_mime::MediaStreamType;
@@ -187,7 +185,6 @@ mod tests {
     use qubit_operation::ShutdownMode;
     use qubit_spi::ProviderMetadata;
     use qubit_spi::ServiceProvider;
-    use std::time::Duration;
 
     use super::MagikaMimeDetectorProvider;
     use crate::ManagedInferenceRuntime;
@@ -219,8 +216,7 @@ mod tests {
             MediaStreamType::None,
             classifier.classify_reader(&mut &b""[..]).unwrap()
         );
-        let provider =
-            MagikaMimeDetectorProvider::with_media_stream_classifier(Arc::new(NoopClassifier));
+        let provider = MagikaMimeDetectorProvider::with_media_stream_classifier(Arc::new(NoopClassifier));
         assert!(format!("{provider:?}").contains("configured"));
         let detector = provider
             .create_configured(&MimeConfig::default())
@@ -229,11 +225,9 @@ mod tests {
     }
 
     fn runtime(byte_budget: usize) -> Arc<ManagedInferenceRuntime> {
-        let manager = OperationManager::new(ManagerOptions::default())
-            .expect("operation manager should initialize");
+        let manager = OperationManager::new(ManagerOptions::default()).expect("operation manager should initialize");
         Arc::new(
-            ManagedInferenceRuntime::new(manager, byte_budget)
-                .expect("managed inference runtime should initialize"),
+            ManagedInferenceRuntime::new(manager, byte_budget).expect("managed inference runtime should initialize"),
         )
     }
 
@@ -243,14 +237,10 @@ mod tests {
         use qubit_mime::MimeDetector;
 
         let shared_runtime = runtime(MimeConfig::default().max_buffer_size());
-        let provider =
-            MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&shared_runtime));
+        let provider = MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&shared_runtime));
         let cloned_provider = provider.clone();
         assert!(Arc::ptr_eq(
-            provider
-                .runtime
-                .as_ref()
-                .expect("runtime should be configured"),
+            provider.runtime.as_ref().expect("runtime should be configured"),
             cloned_provider
                 .runtime
                 .as_ref()
@@ -278,8 +268,7 @@ mod tests {
         }
 
         let independent_runtime = runtime(MimeConfig::default().max_buffer_size());
-        let independent_provider =
-            MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&independent_runtime));
+        let independent_provider = MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&independent_runtime));
         let independent = independent_provider
             .create_configured(&MimeConfig::default())
             .expect("independent detector should initialize");
@@ -292,8 +281,7 @@ mod tests {
                 )
                 .is_ok()
         );
-        let report =
-            independent_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        let report = independent_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
         assert!(report.worker_stopped);
     }
 
@@ -309,9 +297,8 @@ mod tests {
         assert!(report.worker_stopped);
 
         let shared_runtime = runtime(MimeConfig::default().max_buffer_size());
-        let provider =
-            MagikaMimeDetectorProvider::with_media_stream_classifier(Arc::new(NoopClassifier))
-                .managed_runtime(Arc::clone(&shared_runtime));
+        let provider = MagikaMimeDetectorProvider::with_media_stream_classifier(Arc::new(NoopClassifier))
+            .managed_runtime(Arc::clone(&shared_runtime));
         assert!(format!("{provider:?}").contains("runtime_configured: true"));
         let detector = provider
             .create_configured(&MimeConfig::default())

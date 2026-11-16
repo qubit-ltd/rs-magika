@@ -10,23 +10,22 @@ use std::sync::Arc;
 
 use qubit_magika::MagikaMimeDetectorProvider;
 #[cfg(feature = "bundled-onnxruntime")]
+use qubit_magika::ManagedInferenceRuntime;
+#[cfg(feature = "bundled-onnxruntime")]
 use qubit_mime::MediaStreamType;
 #[cfg(feature = "bundled-onnxruntime")]
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorRegistry;
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_operation::ManagerOptions;
+#[cfg(feature = "bundled-onnxruntime")]
+use qubit_operation::OperationManager;
 use qubit_spi::ProviderMetadata;
 #[cfg(feature = "bundled-onnxruntime")]
 use qubit_spi::ProviderSelection;
 
 #[cfg(feature = "bundled-onnxruntime")]
 use crate::support::StaticMediaStreamClassifier;
-
-#[cfg(feature = "bundled-onnxruntime")]
-use qubit_magika::ManagedInferenceRuntime;
-#[cfg(feature = "bundled-onnxruntime")]
-use qubit_operation::ManagerOptions;
-#[cfg(feature = "bundled-onnxruntime")]
-use qubit_operation::OperationManager;
 
 /// Tests provider self-description and one-argument registration.
 #[test]
@@ -51,11 +50,7 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 
     assert_eq!(
         vec!["magika"],
-        registry
-            .provider_ids()
-            .iter()
-            .map(|id| id.as_str())
-            .collect::<Vec<_>>(),
+        registry.provider_ids().iter().map(|id| id.as_str()).collect::<Vec<_>>(),
     );
 }
 
@@ -63,11 +58,11 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 #[cfg(feature = "bundled-onnxruntime")]
 #[test]
 fn test_provider_shared_runtime_explicit_registry_registration() {
-    use qubit_operation::ShutdownMode;
     use std::time::Duration;
 
-    let manager = OperationManager::new(ManagerOptions::default())
-        .expect("operation manager should initialize");
+    use qubit_operation::ShutdownMode;
+
+    let manager = OperationManager::new(ManagerOptions::default()).expect("operation manager should initialize");
     let runtime = Arc::new(
         ManagedInferenceRuntime::new(manager, MimeConfig::default().max_buffer_size())
             .expect("managed runtime should initialize"),
@@ -179,18 +174,11 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
 #[test]
 fn test_magika_provider_is_discovered_with_repository_default() {
     let registry = MimeDetectorRegistry::builtin();
-    assert!(
-        registry
-            .provider_ids()
-            .iter()
-            .any(|id| id.as_str() == "magika")
-    );
+    assert!(registry.provider_ids().iter().any(|id| id.as_str() == "magika"));
     assert_eq!(
         qubit_spi::ProviderSelection::named("repository").expect("valid repository ID"),
         registry.default_selection(),
     );
     let selection = qubit_spi::ProviderSelection::named("magika").expect("valid magika ID");
-    registry
-        .resolve_selected(&selection)
-        .expect("Magika should resolve");
+    registry.resolve_selected(&selection).expect("Magika should resolve");
 }

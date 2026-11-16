@@ -91,11 +91,20 @@ fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>
 }
 
 /// Closes admissions at the shared dispatch boundary after a worker fault.
+///
+/// # Parameters
+///
+/// * `gate` - Shared admission gate guarded by the dispatch boundary.
 fn close_runtime_admission(gate: &Mutex<AdmissionGate>) {
     gate.lock().unwrap_or_else(|error| error.into_inner()).closed = true;
 }
 
 /// Completes queued work after the worker session has become unusable.
+///
+/// # Parameters
+///
+/// * `receiver` - Queue whose already accepted jobs must be completed.
+/// * `reason` - Backend error message reported to queued operations.
 fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
     for job in receiver.try_iter() {
         let Job { input, state, owner } = job;
@@ -346,6 +355,21 @@ impl ManagedInferenceRuntime {
             .await
     }
 
+    /// Reserves runtime capacity before copying borrowed content.
+    ///
+    /// # Parameters
+    ///
+    /// * `content` - Borrowed input retained only for this call.
+    /// * `copy_content` - One-shot owned copy operation invoked after
+    ///   admission.
+    ///
+    /// # Returns
+    ///
+    /// The MIME mapping or `None` when Magika has no mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns a size-limit, capacity, Magika, or worker error.
     async fn detect_content_unmanaged_with_copy(
         self: &Arc<Self>,
         content: &[u8],
@@ -417,6 +441,21 @@ impl ManagedInferenceRuntime {
         self.submit_operation_admitted(parent, admission, input).await
     }
 
+    /// Submits an operation using capacity acquired before input allocation.
+    ///
+    /// # Parameters
+    ///
+    /// * `parent` - Optional parent scope for the operation.
+    /// * `admission` - Capacity and lifecycle state reserved for the request.
+    /// * `input` - Owned input submitted to the inference worker.
+    ///
+    /// # Returns
+    ///
+    /// The MIME mapping or `None` when Magika has no mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation, capacity, Magika, or worker error.
     async fn submit_operation_admitted(
         self: &Arc<Self>,
         parent: Option<&OperationScope>,
@@ -776,8 +815,14 @@ impl ManagedInferenceRuntime {
         let admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
         if admission_gate.closed {
             let mut admission = admission;
-            admission.settle_error(MimeError::detector_backend("magika", "runtime admission is closed after worker fault"));
-            return Err(MimeError::detector_backend("magika", "runtime admission is closed after worker fault"));
+            admission.settle_error(MimeError::detector_backend(
+                "magika",
+                "runtime admission is closed after worker fault",
+            ));
+            return Err(MimeError::detector_backend(
+                "magika",
+                "runtime admission is closed after worker fault",
+            ));
         }
         let sent_state = {
             let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());

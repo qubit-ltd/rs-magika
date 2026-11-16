@@ -718,7 +718,10 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
     let _queued = runtime
-        .submit(None, WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error))
+        .submit(
+            None,
+            WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error),
+        )
         .unwrap();
     let (read_started_tx, read_started_rx) = mpsc::channel();
     let waiting_bridge = Arc::clone(&bridge);
@@ -734,14 +737,32 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
     assert!(states[0].wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(states[1].wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(states[0].wait_released_blocking(Duration::from_secs(2)));
-    assert!(!states[1].inner.lock().unwrap().released, "pending bridge driver still owns resources");
-    assert_eq!(states[0].inner.lock().unwrap().business, Some(ChildOutcomeKind::Panicked));
+    assert!(
+        !states[1].inner.lock().unwrap().released,
+        "pending bridge driver still owns resources"
+    );
+    assert_eq!(
+        states[0].inner.lock().unwrap().business,
+        Some(ChildOutcomeKind::Panicked)
+    );
     assert_eq!(states[1].inner.lock().unwrap().business, Some(ChildOutcomeKind::Failed));
     assert_eq!(
-        states[1].inner.lock().unwrap().result.as_ref().unwrap().as_ref().unwrap_err().to_string(),
+        states[1]
+            .inner
+            .lock()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string(),
         "MIME detector backend 'magika' failed: inference session discarded after worker panic"
     );
-    assert!(bridge_waiter.join().unwrap().is_err(), "queued bridge waiter is woken by closure");
+    assert!(
+        bridge_waiter.join().unwrap().is_err(),
+        "queued bridge waiter is woken by closure"
+    );
     assert!(runtime.reserve_for_provider(None, 1).is_err());
     assert!(runtime.byte_budget.try_acquire(5).is_none());
 

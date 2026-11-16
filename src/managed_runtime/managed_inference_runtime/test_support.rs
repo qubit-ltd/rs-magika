@@ -26,10 +26,10 @@ use super::ByteBudget;
 use super::Job;
 use super::ManagedInferenceRuntime;
 use super::WorkerInput;
-use super::execute_classified;
 use super::close_runtime_admission;
-use super::settle_queued_jobs;
+use super::execute_classified;
 use super::map_magika_error;
+use super::settle_queued_jobs;
 use super::worker_state::WorkerState;
 
 /// Owned byte classifier used by the worker thread.
