@@ -29,7 +29,7 @@ use qubit_operation::StopReason;
 use super::super::worker_input::WorkerBytes;
 use super::ManagedInferenceRuntime;
 use super::WorkerInput;
-use super::execute_classified;
+use super::worker_loop::execute_classified;
 
 fn map_provider_test_error(_: magika::Error) -> MimeError {
     MimeError::detector_backend("magika", "test input failed")
@@ -552,6 +552,9 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
         }
     }
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let inference_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let inference_gate_worker = Arc::clone(&inference_gate);
+    let (inference_started_tx, inference_started_rx) = mpsc::sync_channel(1);
     let (worker_tx, worker_rx) = mpsc::sync_channel(1);
     let worker_signaled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let callback_signaled = Arc::clone(&worker_signaled);
@@ -560,7 +563,15 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         16,
-        Box::new(|_| Ok(None)),
+        Box::new(move |_| {
+            inference_started_tx.send(()).unwrap();
+            let (lock, changed) = &*inference_gate_worker;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+            Ok(None)
+        }),
         Box::new(move || {
             if !callback_signaled.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 worker_tx.send(()).unwrap();
@@ -575,16 +586,17 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     // Declared after the runtime so an assertion unwind releases the
     // worker before runtime teardown attempts to join it.
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
+    let inference_gate_cleanup = ReleaseWorkerGate(Arc::clone(&inference_gate));
     let first_admission = runtime.reserve_for_provider(None, 8).unwrap();
     let first_runtime = Arc::clone(&runtime);
     let mut first = Box::pin(async move { first_runtime.detect_bytes_admitted(first_admission, vec![b'a']).await });
     let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while worker_rx.try_recv().is_err() {
+    while inference_started_rx.try_recv().is_err() {
         assert!(
             std::time::Instant::now() < deadline,
-            "first worker did not reach its gate"
+            "first inference did not reach its gate"
         );
         assert!(first.as_mut().poll(&mut context).is_pending());
         std::thread::park_timeout(Duration::from_millis(1));
@@ -606,6 +618,8 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     drop(second);
     assert!(runtime.reserve_for_provider(None, 1).is_err());
 
+    inference_gate_cleanup.release();
+    worker_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     gate_cleanup.release();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -696,6 +710,90 @@ fn test_shared_worker_classification_covers_success_and_panic() {
     let (result, outcome): (qubit_mime::MimeResult<()>, _) = execute_classified(|| panic!("engine panic"));
     assert!(result.is_err());
     assert_eq!(outcome, ChildOutcomeKind::Panicked);
+}
+
+fn assert_current_bridge_closes_for_engine(
+    engine: crate::managed_runtime::managed_inference_runtime::test_support::ManagedInferenceEngine,
+    expected: ChildOutcomeKind,
+) {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let (business_tx, business_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let release_wait = Arc::clone(&release_rx);
+    let runtime = ManagedInferenceRuntime::with_engine(
+        supervisor,
+        4,
+        engine,
+        Box::new(move || {
+            business_tx.send(()).unwrap();
+            release_wait.lock().unwrap().recv().unwrap();
+        }),
+    );
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
+    let driver = bridge.driver();
+    let _inference = runtime
+        .submit(
+            None,
+            WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error),
+        )
+        .unwrap();
+    let state = runtime.tasks.lock().unwrap()[0].clone();
+
+    business_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(state.inner.lock().unwrap().business, Some(expected));
+    assert!(!state.inner.lock().unwrap().worker_done);
+    assert!(!state.inner.lock().unwrap().released);
+    assert!(runtime.byte_budget.try_acquire(4).is_none());
+
+    release_tx.send(()).unwrap();
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let waiting_bridge = Arc::clone(&bridge);
+    let closure_observer = std::thread::spawn(move || {
+        block_on(waiting_bridge.closed());
+        closed_tx.send(()).unwrap();
+    });
+    if closed_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+        drop(driver);
+        closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        closure_observer.join().unwrap();
+        panic!("worker did not close the current bridge");
+    }
+    closure_observer.join().unwrap();
+    assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
+    assert!(!state.inner.lock().unwrap().released);
+    assert!(runtime.byte_budget.try_acquire(4).is_none());
+
+    drop(driver);
+    state.mark_driver_done();
+    assert!(state.wait_released_blocking(Duration::from_secs(2)));
+    assert!(runtime.byte_budget.try_acquire(4).is_some());
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_worker_current_bridge_closed_on_success() {
+    assert_current_bridge_closes_for_engine(
+        Box::new(|_| Ok(Some("text/plain".to_owned()))),
+        ChildOutcomeKind::Succeeded,
+    );
+}
+
+#[test]
+fn test_worker_current_bridge_closed_on_error() {
+    assert_current_bridge_closes_for_engine(
+        Box::new(|_| Err(MimeError::detector_backend("magika", "injected inference error"))),
+        ChildOutcomeKind::Failed,
+    );
+}
+
+#[test]
+fn test_worker_current_bridge_closed_on_panic() {
+    assert_current_bridge_closes_for_engine(
+        Box::new(|_| panic!("injected inference panic")),
+        ChildOutcomeKind::Panicked,
+    );
 }
 
 #[test]

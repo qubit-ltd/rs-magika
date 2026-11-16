@@ -1,0 +1,134 @@
+// =============================================================================
+//    Copyright (c) 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Shared lifecycle for the managed inference worker.
+
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc;
+
+use qubit_mime::MimeError;
+use qubit_mime::MimeResult;
+use qubit_operation::ChildOutcomeKind;
+
+use super::super::job::Job;
+use super::super::task_state::AdmissionGate;
+use super::WorkerInput;
+
+/// Converts inference execution into a result and its matching child outcome.
+///
+/// # Parameters
+///
+/// * `work` - Inference closure whose panic is contained at the worker boundary.
+///
+/// # Returns
+///
+/// The closure result and a lifecycle outcome that distinguishes success,
+/// failure, and panic.
+pub(super) fn execute_classified<T>(
+    work: impl FnOnce() -> MimeResult<T>,
+) -> (MimeResult<T>, ChildOutcomeKind) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(value)) => (Ok(value), ChildOutcomeKind::Succeeded),
+        Ok(Err(error)) => (Err(error), ChildOutcomeKind::Failed),
+        Err(_) => (
+            Err(MimeError::detector_backend(
+                "magika",
+                "inference worker panicked",
+            )),
+            ChildOutcomeKind::Panicked,
+        ),
+    }
+}
+
+/// Receives and settles every job on the session-owning worker thread.
+///
+/// # Parameters
+///
+/// * `receiver` - Bounded queue of accepted jobs.
+/// * `gate` - Admission gate closed after an inference panic.
+/// * `infer` - Inference implementation for production or tests.
+/// * `after_business` - Hook after result publication and bridge closure.
+/// * `before_exit` - Hook after the queue closes or a panic drains it.
+pub(super) fn run_worker(
+    receiver: mpsc::Receiver<Job>,
+    gate: Arc<Mutex<AdmissionGate>>,
+    mut infer: impl FnMut(WorkerInput) -> MimeResult<Option<String>>,
+    after_business: impl Fn(),
+    before_exit: impl FnOnce(),
+) {
+    while let Ok(job) = receiver.recv() {
+        let Job {
+            input,
+            state,
+            owner,
+        } = job;
+        let bridge = match &input {
+            WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
+            _ => None,
+        };
+        let mut terminal_fault = false;
+        if state.stop_requested() {
+            state.finish_business(
+                Err(MimeError::detector_backend(
+                    "magika",
+                    "inference stopped before execution",
+                )),
+                ChildOutcomeKind::Stopped,
+            );
+            drop(input);
+        } else {
+            state.mark_started();
+            let (result, outcome) = execute_classified(|| infer(input));
+            terminal_fault = outcome == ChildOutcomeKind::Panicked;
+            state.finish_business(result, outcome);
+        }
+        if let Some(bridge) = bridge {
+            bridge.close();
+        }
+        after_business();
+        owner.worker_done();
+        if terminal_fault {
+            // Native session state after an unwind is undocumented.
+            gate.lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .closed = true;
+            settle_queued_jobs(&receiver, "inference session discarded after worker panic");
+            break;
+        }
+    }
+    before_exit();
+}
+
+/// Completes queued work after the worker session has become unusable.
+///
+/// # Parameters
+///
+/// * `receiver` - Queue whose already accepted jobs must be completed.
+/// * `reason` - Backend error message reported to queued operations.
+fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
+    for job in receiver.try_iter() {
+        let Job {
+            input,
+            state,
+            owner,
+        } = job;
+        let bridge = match &input {
+            WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
+            _ => None,
+        };
+        state.finish_business(
+            Err(MimeError::detector_backend("magika", reason)),
+            ChildOutcomeKind::Failed,
+        );
+        drop(input);
+        if let Some(bridge) = bridge {
+            bridge.close();
+        }
+        owner.worker_done();
+    }
+}
