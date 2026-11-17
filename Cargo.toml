@@ -62,3 +62,6 @@ path = "tests/mod.rs"
 name = "basic"
 path = "examples/basic.rs"
 required-features = ["bundled-onnxruntime"]
+
+[workspace]
+exclude = ["target"]
