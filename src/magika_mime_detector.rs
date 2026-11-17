@@ -45,6 +45,7 @@ use crate::internal::SyncProviderInput;
 use crate::internal::map_provider_magika_error;
 use crate::managed_runtime::ManagedInferenceRuntime;
 use crate::managed_runtime::ManagedInferenceShutdownReport;
+use crate::managed_runtime::ManagedInferenceSnapshot;
 
 /// MIME detector backed by Google's Magika model.
 ///
@@ -371,6 +372,14 @@ impl MagikaMimeDetector {
         timeout: std::time::Duration,
     ) -> ManagedInferenceShutdownReport {
         self.runtime.shutdown_blocking(mode, timeout)
+    }
+
+    /// Reads non-atomic diagnostic state for this detector's shared runtime.
+    ///
+    /// Counts include every detector that shares the runtime; this snapshot
+    /// does not prove resource release.
+    pub fn runtime_snapshot(&self) -> ManagedInferenceSnapshot {
+        self.runtime.snapshot()
     }
 
     /// Gets filename candidates from the repository detector.

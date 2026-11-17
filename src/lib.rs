@@ -24,3 +24,4 @@ pub use magika_mime_detector_builder::MagikaMimeDetectorBuilder;
 pub use magika_mime_detector_provider::MagikaMimeDetectorProvider;
 pub use managed_runtime::ManagedInferenceRuntime;
 pub use managed_runtime::ManagedInferenceShutdownReport;
+pub use managed_runtime::ManagedInferenceSnapshot;

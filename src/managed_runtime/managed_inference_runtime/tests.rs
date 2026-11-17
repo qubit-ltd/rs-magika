@@ -47,6 +47,112 @@ fn borrowed_test_runtime(max_bytes: usize) -> Arc<ManagedInferenceRuntime> {
     ))
 }
 
+#[test]
+fn test_snapshot_idle() {
+    let runtime = borrowed_test_runtime(17);
+    let snapshot = runtime.snapshot();
+    assert!(!snapshot.admission_closed);
+    assert!(!snapshot.cancelling);
+    assert!(!snapshot.faulted);
+    assert_eq!(0, snapshot.admitted_not_started);
+    assert_eq!(0, snapshot.worker_running);
+    assert_eq!(0, snapshot.awaiting_release);
+    assert_eq!(0, snapshot.unconfirmed_provider_io);
+    assert_eq!(0, snapshot.reserved_bytes);
+    assert_eq!(17, snapshot.max_in_flight_bytes);
+}
+
+#[test]
+fn test_snapshot_classifies_admitted_running_and_awaiting_release() {
+    let runtime = borrowed_test_runtime(17);
+    let admitted = Arc::new(super::super::task_state::TaskState::new(1, None));
+    let running = Arc::new(super::super::task_state::TaskState::new(2, None));
+    let awaiting = Arc::new(super::super::task_state::TaskState::new(3, None));
+    {
+        let mut inner = running.inner.lock().unwrap();
+        inner.started = true;
+    }
+    {
+        let mut inner = awaiting.inner.lock().unwrap();
+        inner.started = true;
+        inner.worker_done = true;
+    }
+    runtime.tasks.lock().unwrap().extend([admitted, running, awaiting]);
+    let snapshot = runtime.snapshot();
+    assert_eq!(1, snapshot.admitted_not_started);
+    assert_eq!(1, snapshot.worker_running);
+    assert_eq!(1, snapshot.awaiting_release);
+}
+
+#[test]
+fn test_snapshot_omits_released_tasks_and_counts_unconfirmed_marker() {
+    let runtime = borrowed_test_runtime(17);
+    let released = Arc::new(super::super::task_state::TaskState::new(1, None));
+    let mut inner = released.inner.lock().unwrap();
+    inner.started = true;
+    inner.worker_done = true;
+    inner.released = true;
+    drop(inner);
+    let pending = Arc::new(super::super::task_state::TaskState::new(2, None));
+    pending.mark_unconfirmed_provider_io();
+    runtime.tasks.lock().unwrap().extend([released, pending]);
+    let snapshot = runtime.snapshot();
+    assert_eq!(1, snapshot.admitted_not_started);
+    assert_eq!(0, snapshot.awaiting_release);
+    assert_eq!(1, snapshot.unconfirmed_provider_io);
+}
+
+#[test]
+fn test_snapshot_concurrent_with_shutdown_finishes_within_deadline() {
+    let runtime = borrowed_test_runtime(17);
+    let (started_tx, started_rx) = mpsc::channel();
+    let observer_runtime = Arc::clone(&runtime);
+    let observer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        for _ in 0..100 {
+            let snapshot = observer_runtime.snapshot();
+            assert_eq!(0, snapshot.reserved_bytes);
+        }
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+    observer.join().expect("concurrent snapshot observer should finish");
+}
+
+#[test]
+fn test_snapshot_unconfirmed_admission_drop_and_confirmed_or_unstarted_controls() {
+    let runtime = borrowed_test_runtime(17);
+    let request_runtime = Arc::clone(&runtime);
+    let mut pending_provider = Box::pin(async move {
+        let mut admission = request_runtime.reserve_for_provider(None, 2).unwrap();
+        admission.begin_provider_operation().unwrap();
+        std::future::pending::<()>().await;
+        drop(admission);
+    });
+    let waker = std::task::Waker::noop();
+    let mut context = std::task::Context::from_waker(waker);
+    assert!(matches!(pending_provider.as_mut().poll(&mut context), Poll::Pending));
+    drop(pending_provider);
+    assert_eq!(1, runtime.snapshot().unconfirmed_provider_io);
+    assert_eq!(2, runtime.snapshot().reserved_bytes);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+
+    let runtime = borrowed_test_runtime(17);
+    let mut confirmed = runtime.reserve_for_provider(None, 4).unwrap();
+    confirmed.begin_provider_operation().unwrap();
+    confirmed.provider_operation_completed();
+    drop(confirmed);
+    assert_eq!(0, runtime.snapshot().unconfirmed_provider_io);
+
+    let unstarted = runtime.reserve_for_provider(None, 2).unwrap();
+    drop(unstarted);
+    let after_unstarted = runtime.snapshot();
+    assert_eq!(0, after_unstarted.unconfirmed_provider_io);
+    assert_eq!(0, after_unstarted.reserved_bytes);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+}
+
 fn assert_scope_admission_rollback(stopped: bool) {
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = borrowed_test_runtime(8);
@@ -654,6 +760,9 @@ fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
     drop(future);
     assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(!state.inner.lock().unwrap().released);
+    let snapshot = runtime.snapshot();
+    assert_eq!(1, snapshot.unconfirmed_provider_io);
+    assert_eq!(8, snapshot.reserved_bytes);
     assert!(runtime.reserve_for_provider(None, 1).is_err());
     let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(10));
 }
@@ -1365,6 +1474,7 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
     );
     assert!(runtime.reserve_for_provider(None, 1).is_err());
     assert!(runtime.byte_budget.try_acquire(5).is_none());
+    assert!(runtime.snapshot().faulted);
 
     // Only actual provider-driver completion releases a queued bridge's resources.
     states[1].mark_driver_done();
@@ -1374,6 +1484,11 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
     let second = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
     assert!(first.worker_stopped);
     assert!(second.worker_stopped);
+    let after_shutdown = runtime.snapshot();
+    assert!(after_shutdown.faulted);
+    assert!(runtime.snapshot().faulted, "fault diagnosis remains sticky");
+    assert!(first.worker_stopped);
+    assert!(!first.worker_panicked);
 }
 
 #[test]

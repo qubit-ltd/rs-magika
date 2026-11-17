@@ -26,6 +26,8 @@ pub(super) struct TaskInner {
     pub(super) released: bool,
     /// Whether the worker has completed its participant duties.
     pub(super) worker_done: bool,
+    /// Whether a dropped provider operation had no confirmed completion.
+    pub(super) unconfirmed_provider_io: bool,
     /// Futures waiting for a result or release transition.
     pub(super) wakers: Vec<Waker>,
 }
@@ -40,6 +42,7 @@ impl TaskInner {
             business: None,
             released: false,
             worker_done: false,
+            unconfirmed_provider_io: false,
             wakers: Vec::new(),
         }
     }

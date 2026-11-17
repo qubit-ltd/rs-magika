@@ -16,6 +16,7 @@ pub(super) mod inference_future;
 pub(super) mod job;
 mod managed_inference_runtime;
 mod managed_inference_shutdown_report;
+mod managed_inference_snapshot;
 pub(super) mod provider_driver_guard;
 pub(super) mod request_admission;
 pub(super) mod request_resource_owner;
@@ -27,3 +28,4 @@ pub(super) mod worker_input;
 
 pub use managed_inference_runtime::ManagedInferenceRuntime;
 pub use managed_inference_shutdown_report::ManagedInferenceShutdownReport;
+pub use managed_inference_snapshot::ManagedInferenceSnapshot;

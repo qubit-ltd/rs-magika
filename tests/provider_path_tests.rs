@@ -639,7 +639,7 @@ impl Drop for ReleaseGateOnDrop {
 }
 
 #[test]
-fn test_shared_runtime_provider_head_of_line() {
+fn test_slow_provider_blocks_shared_worker_order() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let config = qubit_mime::MimeConfig::default();
@@ -651,7 +651,7 @@ fn test_shared_runtime_provider_head_of_line() {
     let detector = Arc::new(
         qubit_magika::MagikaMimeDetector::builder()
             .mime_config(config)
-            .managed_runtime(runtime)
+            .managed_runtime(Arc::clone(&runtime))
             .build()
             .expect("bundled ONNX Runtime should initialize"),
     );
@@ -696,6 +696,15 @@ fn test_shared_runtime_provider_head_of_line() {
     admitted_rx
         .recv_timeout(Duration::from_secs(30))
         .expect("second owned-byte request should be admitted and queued");
+    let snapshot = runtime.snapshot();
+    assert_eq!(
+        1, snapshot.worker_running,
+        "the first worker owns the gated provider read"
+    );
+    assert_eq!(
+        1, snapshot.admitted_not_started,
+        "the second admitted request waits for the worker"
+    );
 
     // The notification above is emitted only after detect_bytes_managed was
     // polled; that call reserves runtime capacity and dispatches before it
@@ -742,6 +751,128 @@ fn test_shared_runtime_provider_head_of_line() {
             .active_operations
             == 0
     );
+}
+
+fn slow_provider_latency_sample(
+    slow_detector: Arc<qubit_magika::MagikaMimeDetector>,
+    second_detector: Arc<qubit_magika::MagikaMimeDetector>,
+    service: &qubit_operation::OperationGroup,
+    delay: Duration,
+) -> (Duration, Duration) {
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let file_system = provider.async_file_system();
+    let mut first = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            slow_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/slow.py"), 4096)
+                .await
+        })
+        .unwrap();
+    gate.wait_until_entered(Duration::from_secs(30));
+
+    let submitted_at = Instant::now();
+    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+    let mut second = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, PYTHON.to_vec()));
+            let mut signaled = false;
+            std::future::poll_fn(|context| {
+                let result = inference.as_mut().poll(context);
+                if !signaled {
+                    let _ = admitted_tx.send(Instant::now());
+                    signaled = true;
+                }
+                result
+            })
+            .await
+        })
+        .unwrap();
+    let admitted_at = admitted_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("second request should be admitted");
+    let release_gate = Arc::clone(&gate);
+    let release_thread = std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        release_gate.release();
+    });
+    let start = Instant::now();
+    let outcome = run_ready(second.wait_outcome()).unwrap();
+    let elapsed = start.elapsed();
+    assert!(matches!(outcome, qubit_operation::OperationOutcome::Succeeded(Some(_))));
+    release_thread.join().unwrap();
+    let first_outcome = run_ready(first.wait_outcome()).unwrap();
+    assert!(matches!(
+        first_outcome,
+        qubit_operation::OperationOutcome::Succeeded(Some(_))
+    ));
+    assert!(run_ready(first.wait_settlement()).all_released());
+    assert!(run_ready(second.wait_settlement()).all_released());
+    (admitted_at.duration_since(submitted_at), elapsed)
+}
+
+#[test]
+#[ignore = "measures real Magika latency with controlled async Provider delays"]
+fn test_slow_provider_mixed_latency() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let make_detector = || {
+        let runtime = Arc::new(ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap());
+        Arc::new(
+            qubit_magika::MagikaMimeDetector::builder()
+                .mime_config(config.clone())
+                .managed_runtime(runtime)
+                .build()
+                .unwrap(),
+        )
+    };
+    let shared = make_detector();
+    let isolated = make_detector();
+    // Warm both real Magika sessions before collecting samples.
+    MimeDetector::detect_by_content(&*shared, PYTHON).unwrap();
+    MimeDetector::detect_by_content(&*isolated, PYTHON).unwrap();
+
+    for delay in [Duration::ZERO, Duration::from_millis(10), Duration::from_millis(100)] {
+        for (label, second) in [("shared", Arc::clone(&shared)), ("independent", Arc::clone(&isolated))] {
+            let mut admission_samples = Vec::with_capacity(30);
+            let mut completion_samples = Vec::with_capacity(30);
+            let mut admitted = 0;
+            let refused = 0;
+            for _ in 0..30 {
+                let second_detector = if label == "shared" {
+                    Arc::clone(&shared)
+                } else {
+                    second.clone()
+                };
+                let (admission, completion) =
+                    slow_provider_latency_sample(Arc::clone(&shared), second_detector, &service, delay);
+                admitted += 1;
+                admission_samples.push(admission);
+                completion_samples.push(completion);
+            }
+            let mut admission_micros: Vec<u128> = admission_samples.iter().map(|sample| sample.as_micros()).collect();
+            admission_micros.sort_unstable();
+            let mut micros: Vec<u128> = completion_samples.iter().map(|sample| sample.as_micros()).collect();
+            micros.sort_unstable();
+            let p50 = micros[micros.len() / 2];
+            let p95 = micros[(micros.len() * 95).div_ceil(100).saturating_sub(1)];
+            eprintln!(
+                "scenario={label} provider_delay_ms={} n={} admitted={admitted} refused={refused} admission_us={admission_micros:?} completion_us={micros:?} p50_us={p50} p95_us={p95}",
+                delay.as_millis(),
+                micros.len(),
+            );
+        }
+    }
+    let _ = shared.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    let _ = isolated.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
 }
 
 #[test]
@@ -908,6 +1039,11 @@ fn test_managed_provider_admission_rejects_cancelled_scope_before_provider_io() 
         })
         .unwrap();
     let _ = run_ready(handle.wait_outcome());
+    let snapshot = detector.runtime_snapshot();
+    assert_eq!(
+        0, snapshot.unconfirmed_provider_io,
+        "cancel before Provider I/O is confirmed"
+    );
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
@@ -1028,6 +1164,11 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
     gate.release();
     let mut handle = handle;
     let _ = run_ready(handle.wait_outcome());
+    let snapshot = detector.runtime_snapshot();
+    assert_eq!(
+        0, snapshot.unconfirmed_provider_io,
+        "the gated open returned Ready before cancellation settled"
+    );
     assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
@@ -1060,7 +1201,9 @@ fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close()
     let mut handle = handle;
     let _ = run_ready(handle.wait_outcome());
     let (released_tx, released_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || released_tx.send(run_ready(observer.wait_settlement())).unwrap());
+    std::thread::spawn(move || {
+        let _ = released_tx.send(run_ready(observer.wait_settlement()));
+    });
     assert!(released_rx.recv_timeout(Duration::from_millis(50)).is_err());
     let report = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
     assert!(report.admission.snapshot.service_resources != 0);
@@ -1080,12 +1223,19 @@ fn test_scope_less_dropped_provider_future_retains_pending_capacity() {
         }
     }
 
-    for point in [AsyncProviderGatePoint::Open, AsyncProviderGatePoint::Read] {
+    for (point, range) in [
+        (AsyncProviderGatePoint::Open, true),
+        (AsyncProviderGatePoint::Read, true),
+        (AsyncProviderGatePoint::Read, false),
+    ] {
         let detector = qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize");
         let gate = AsyncProviderGate::new(point);
-        let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
-            .with_random_access()
-            .with_async_gate(Arc::clone(&gate));
+        let mut first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_async_gate(Arc::clone(&gate));
+        if range {
+            first_provider = first_provider.with_random_access();
+        } else {
+            first_provider = first_provider.without_range();
+        }
         let first_fs = first_provider.async_file_system();
         let max_bytes = detector.max_buffer_size();
         let first_path = path("/dropped-scope-less.py");
@@ -1104,7 +1254,6 @@ fn test_scope_less_dropped_provider_future_retains_pending_capacity() {
             std::thread::park_timeout(Duration::from_millis(10));
         }
         drop(future);
-
         let second_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
         let second_observations = second_provider.observations();
         let second_fs = second_provider.async_file_system();

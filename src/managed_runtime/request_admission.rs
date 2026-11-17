@@ -164,26 +164,17 @@ impl RequestAdmission {
         }
     }
 
-    /// Retains one resource reference in the optional parent scope.
-    ///
-    /// # Parameters
-    ///
-    /// * `scope` - Parent scope that owns the inference request.
-    ///
-    /// # Returns
-    ///
-    /// The scope reference, or an error when the scope rejects it.
-    /// Adds a parent or child scope reference to this request's retained
-    /// resources.
+    /// Retains a resource reference in the parent operation scope.
     ///
     /// # Parameters
     ///
     /// * `scope` - Operation scope that must remain active until request
     ///   release.
     ///
-    /// # Errors
+    /// # Returns
     ///
-    /// Returns an error when the operation scope rejects the reference.
+    /// `Ok(())` when the resource was retained, or an error when the scope
+    /// rejects it.
     pub(crate) fn retain_in_scope(&mut self, scope: &OperationScope) -> MimeResult<()> {
         self.scope_resources.push(scope.manage(()).map_err(|error| {
             MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
@@ -198,6 +189,7 @@ impl Drop for RequestAdmission {
     fn drop(&mut self) {
         if !self.dispatched {
             if self.provider_pending {
+                self.state.mark_unconfirmed_provider_io();
                 // rs-fs has no observer for provider-native completion after
                 // its caller future is dropped, so retain committed resources.
                 let owner = Arc::new(RequestResourceOwner::new(

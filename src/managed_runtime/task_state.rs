@@ -194,6 +194,14 @@ impl TaskState {
         self.released.notify_all();
     }
 
+    /// Records a provider operation dropped before completion was confirmed.
+    pub(super) fn mark_unconfirmed_provider_io(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .unconfirmed_provider_io = true;
+    }
+
     #[cfg(test)]
     pub(super) fn wait_worker_done_blocking(&self, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;

@@ -41,6 +41,7 @@ use super::drive_event::DriveEvent;
 use super::inference_future::InferenceFuture;
 use super::job::Job;
 use super::managed_inference_shutdown_report::ManagedInferenceShutdownReport;
+use super::managed_inference_snapshot::ManagedInferenceSnapshot;
 use super::provider_driver_guard::ProviderDriverGuard;
 use super::request_admission::RequestAdmission;
 use super::service_permit::ServicePermit;
@@ -133,6 +134,50 @@ impl std::fmt::Debug for ManagedInferenceRuntime {
 }
 
 impl ManagedInferenceRuntime {
+    /// Reads independent diagnostic facts for all requests sharing this
+    /// runtime.
+    ///
+    /// The result is non-atomic and does not prove resources have been
+    /// released; use operation settlement to observe release completion.
+    pub fn snapshot(&self) -> ManagedInferenceSnapshot {
+        let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        let mut admitted_not_started = 0;
+        let mut worker_running = 0;
+        let mut awaiting_release = 0;
+        let mut unconfirmed_provider_io = 0;
+        for task in tasks {
+            let inner = task.inner.lock().unwrap_or_else(|error| error.into_inner());
+            if inner.released {
+                continue;
+            }
+            if !inner.started && !inner.worker_done {
+                admitted_not_started += 1;
+            } else if inner.started && !inner.worker_done {
+                worker_running += 1;
+            } else if inner.worker_done {
+                awaiting_release += 1;
+            }
+            if inner.unconfirmed_provider_io {
+                unconfirmed_provider_io += 1;
+            }
+        }
+        let (admission_closed, cancelling, faulted) = {
+            let gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+            (gate.closed, gate.cancelling, gate.faulted)
+        };
+        ManagedInferenceSnapshot {
+            admission_closed,
+            cancelling,
+            faulted,
+            admitted_not_started,
+            worker_running,
+            awaiting_release,
+            unconfirmed_provider_io,
+            reserved_bytes: self.byte_budget.used(),
+            max_in_flight_bytes: self.max_in_flight_bytes,
+        }
+    }
+
     /// Create a worker using the application-owned operation manager.
     ///
     /// # Parameters

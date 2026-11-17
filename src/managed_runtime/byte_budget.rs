@@ -61,6 +61,11 @@ impl ByteBudget {
         let mut used = self.used.lock().unwrap_or_else(|error| error.into_inner());
         *used = used.saturating_sub(amount);
     }
+
+    /// Reads the currently reserved byte count for runtime diagnostics.
+    pub(super) fn used(&self) -> usize {
+        *self.used.lock().unwrap_or_else(|error| error.into_inner())
+    }
 }
 
 #[cfg(test)]

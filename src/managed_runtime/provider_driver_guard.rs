@@ -62,6 +62,8 @@ impl<I> Drop for ProviderDriverGuard<I> {
         drop(self.driver.take());
         if !self.unconfirmed_io.load(Ordering::Relaxed) {
             self.state.mark_driver_done();
+        } else {
+            self.state.mark_unconfirmed_provider_io();
         }
     }
 }

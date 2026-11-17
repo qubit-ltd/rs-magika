@@ -93,20 +93,20 @@ impl AsyncProviderGate {
         })
     }
     async fn wait(self: &Arc<Self>) {
-        std::future::poll_fn(|cx| {
-            if self.released.load(Ordering::Acquire) {
-                return std::task::Poll::Ready(());
-            }
-            *self.waker.lock().unwrap() = Some(cx.waker().clone());
-            self.entered.store(true, Ordering::Release);
-            self.changed.notify_all();
-            if self.released.load(Ordering::Acquire) {
-                std::task::Poll::Ready(())
-            } else {
-                std::task::Poll::Pending
-            }
-        })
-        .await
+        std::future::poll_fn(|cx| self.poll_wait(cx)).await
+    }
+    fn poll_wait(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        if self.released.load(Ordering::Acquire) {
+            return std::task::Poll::Ready(());
+        }
+        *self.waker.lock().unwrap() = Some(cx.waker().clone());
+        self.entered.store(true, Ordering::Release);
+        self.changed.notify_all();
+        if self.released.load(Ordering::Acquire) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
     }
     pub(crate) fn wait_until_entered(&self, timeout: std::time::Duration) {
         let deadline = std::time::Instant::now() + timeout;
@@ -339,6 +339,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 position: 0,
                 fail_reads: self.fail_reads,
                 observations: Arc::clone(&self.observations),
+                async_gate: self.async_gate.clone(),
             }),
         ))
     }
@@ -403,6 +404,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     position: 0,
                     fail_reads: self.fail_reads,
                     observations: Arc::clone(&self.observations),
+                    async_gate: self.async_gate.clone(),
                 }),
             ))
         })
@@ -513,6 +515,7 @@ struct ProviderReader {
     position: usize,
     fail_reads: bool,
     observations: Arc<ProviderObservations>,
+    async_gate: Option<Arc<AsyncProviderGate>>,
 }
 
 impl ProviderReader {
@@ -541,11 +544,19 @@ impl AsyncInput for ProviderReader {
 
     unsafe fn poll_read_unchecked(
         mut self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
         output: &mut [u8],
         index: usize,
         count: usize,
     ) -> std::task::Poll<io::Result<usize>> {
+        if let Some(gate) = self
+            .async_gate
+            .as_ref()
+            .filter(|gate| gate.point == AsyncProviderGatePoint::Read)
+            && gate.poll_wait(cx).is_pending()
+        {
+            return std::task::Poll::Pending;
+        }
         std::task::Poll::Ready(self.read_bytes(&mut output[index..index + count]))
     }
 }
