@@ -680,6 +680,8 @@ dependencies = [
 [[package]]
 name = "qubit-operation"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b57afe76b7bc1560e3a56f556a2d5f394fb3a83dab55f43a86671071b128dc50"
 dependencies = [
  "qubit-budget",
 ]

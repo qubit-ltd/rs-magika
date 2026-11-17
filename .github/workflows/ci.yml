@@ -62,13 +62,6 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install Rust
         run: rustup toolchain install 1.94.0 --profile minimal
-      - name: Prepare pinned operation dependency
-        run: |
-          set -euo pipefail
-          git init ../rs-operation
-          git -C ../rs-operation remote add origin https://github.com/qubit-ltd/rs-operation.git
-          git -C ../rs-operation fetch origin 1fc3c8713cc30a92e18bdbde0b924ce83d53a0e7
-          git -C ../rs-operation checkout --detach FETCH_HEAD
       - name: Download and verify ONNX Runtime 1.24.2
         run: |
           set -euo pipefail
