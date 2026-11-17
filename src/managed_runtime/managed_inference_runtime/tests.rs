@@ -172,9 +172,7 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         Box::new(|| {}),
     ));
     let mut release_on_failure = ReleaseGate(Some(release_tx));
-    let inference = runtime
-        .submit(None, WorkerInput::Bytes(vec![1, 2, 3].into()))
-        .unwrap();
+    let inference = runtime.submit(None, WorkerInput::Bytes(vec![1, 2, 3].into())).unwrap();
     entered_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("engine must enter before the active-request snapshot");
@@ -194,10 +192,7 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let snapshot = observer_runtime.snapshot();
-            if snapshot.worker_running == 0
-                && snapshot.awaiting_release == 0
-                && snapshot.reserved_bytes == 0
-            {
+            if snapshot.worker_running == 0 && snapshot.awaiting_release == 0 && snapshot.reserved_bytes == 0 {
                 observer_done_tx.send(()).unwrap();
                 return;
             }
@@ -220,8 +215,7 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
         shutdown_started_tx.send(()).unwrap();
-        let report =
-            shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        let report = shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
         shutdown_done_tx.send(report).unwrap();
     });
     shutdown_started_rx
@@ -244,12 +238,8 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
     observer_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("snapshot observer must finish after registry cleanup");
-    shutdown
-        .join()
-        .expect("completed shutdown thread must be reclaimable");
-    observer
-        .join()
-        .expect("completed snapshot thread must be reclaimable");
+    shutdown.join().expect("completed shutdown thread must be reclaimable");
+    observer.join().expect("completed snapshot thread must be reclaimable");
 
     let final_snapshot = runtime.snapshot();
     assert!(final_snapshot.admission_closed);
@@ -260,12 +250,7 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         runtime.tasks.lock().unwrap().is_empty(),
         "released task must leave the registry"
     );
-    assert_eq!(
-        0,
-        runtime
-            .active_requests
-            .load(std::sync::atomic::Ordering::SeqCst)
-    );
+    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]
@@ -289,9 +274,7 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     let (request_tx, request_rx) = mpsc::sync_channel(1);
     let request_bridge = Arc::clone(&bridge);
     let request_thread = std::thread::spawn(move || {
-        request_tx
-            .send(block_on(request_bridge.next_request()))
-            .unwrap();
+        request_tx.send(block_on(request_bridge.next_request())).unwrap();
     });
     let request = request_rx
         .recv_timeout(Duration::from_secs(5))
@@ -346,8 +329,7 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
         shutdown_started_tx.send(()).unwrap();
-        let report =
-            shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        let report = shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
         shutdown_done_tx.send(report).unwrap();
     });
     shutdown_started_rx
@@ -359,10 +341,7 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
 
     drop(driver);
     state.mark_driver_done();
-    assert_eq!(
-        block_on(inference).unwrap().as_deref(),
-        Some("application/x-bytes-4")
-    );
+    assert_eq!(block_on(inference).unwrap().as_deref(), Some("application/x-bytes-4"));
     let report = shutdown_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("shutdown must finish after the known-safe driver completes");
@@ -370,12 +349,8 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     observer_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("snapshot observer must finish after registry cleanup");
-    shutdown
-        .join()
-        .expect("completed shutdown thread must be reclaimable");
-    observer
-        .join()
-        .expect("completed snapshot thread must be reclaimable");
+    shutdown.join().expect("completed shutdown thread must be reclaimable");
+    observer.join().expect("completed snapshot thread must be reclaimable");
 
     let final_snapshot = runtime.snapshot();
     assert!(final_snapshot.admission_closed);
@@ -386,12 +361,7 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
         runtime.tasks.lock().unwrap().is_empty(),
         "released task must leave the registry"
     );
-    assert_eq!(
-        0,
-        runtime
-            .active_requests
-            .load(std::sync::atomic::Ordering::SeqCst)
-    );
+    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]
