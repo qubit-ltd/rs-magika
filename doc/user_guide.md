@@ -431,7 +431,7 @@ request resources settled. Keep `shutdown_application` at a synchronous applicat
 shutdown boundary. An async-only host should run that boundary on its own
 blocking executor facility after it stops admission and awaits active requests.
 
-After runtime shutdown, inspect the shared runtime with `runtime.runtime_snapshot()`.
+After runtime shutdown, inspect the shared runtime with `detector.runtime_snapshot()`.
 The `ManagedInferenceSnapshot` is a non-atomic observation: fields may reflect
 different instants, and counts include every detector sharing that runtime.
 `faulted` records a caught inference-session panic; `worker_panicked` only records

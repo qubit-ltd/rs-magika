@@ -375,7 +375,7 @@ fn shutdown_application(
 `SettlementReport::all_released()` 检查请求资源是否已结算。`shutdown_application` 应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
 等待活动请求完成后，使用自身的阻塞执行机制调用它。
 
-runtime 关闭后，可调用 `runtime.runtime_snapshot()` 查看共享运行状态。
+runtime 关闭后，可调用 `detector.runtime_snapshot()` 查看共享运行状态。
 `ManagedInferenceSnapshot` 是非原子观测：字段可能来自略有差异的时刻，且统计
 包含共享该 runtime 的所有 detector。`faulted` 表示推理 session 曾捕获 panic；
 关闭报告的 `worker_panicked` 只表示 join 时观察到未捕获 panic。非零
