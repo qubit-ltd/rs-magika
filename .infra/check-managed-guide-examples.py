@@ -143,6 +143,9 @@ qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
 """
     parsed = tomllib.loads(block)["dependencies"]
     validate_dependencies(guide, parsed, examples)
+    registry_consumer = consumer_manifest(dependencies, Path("/project"), None)
+    assert 'qubit-operation = "0.3"' in registry_consumer
+    assert 'qubit-operation = {' not in registry_consumer
     validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
     try:
         validate_current_settlement_names(guide, "released()")
@@ -178,17 +181,23 @@ def toml_value(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def consumer_manifest(dependencies: dict[str, object], project_root: Path, operation_path: Path) -> str:
+def consumer_manifest(
+    dependencies: dict[str, object], project_root: Path, operation_path: Path | None
+) -> str:
     entries: list[str] = []
     for package, value in dependencies.items():
-        if package in ("qubit-magika", "qubit-operation"):
+        if package == "qubit-magika":
             version = dependency_version(value)
             assert version is not None
             mapped: dict[str, object] = {"version": version}
-            if package == "qubit-magika":
-                mapped["path"] = str(project_root)
-            else:
-                mapped["path"] = str(operation_path)
+            mapped["path"] = str(project_root)
+            if isinstance(value, dict):
+                mapped.update({k: v for k, v in value.items() if k != "path"})
+            value = mapped
+        elif package == "qubit-operation" and operation_path is not None:
+            version = dependency_version(value)
+            assert version is not None
+            mapped = {"version": version, "path": str(operation_path)}
             if isinstance(value, dict):
                 mapped.update({k: v for k, v in value.items() if k != "path"})
             value = mapped
@@ -218,7 +227,9 @@ def main() -> int:
     project_root = Path(__file__).resolve().parent.parent
     project_manifest = tomllib.loads((project_root / "Cargo.toml").read_text(encoding="utf-8"))
     operation_dependency = project_manifest["dependencies"]["qubit-operation"]
-    operation_path = (project_root / operation_dependency["path"]).resolve()
+    operation_path = None
+    if isinstance(operation_dependency, dict) and isinstance(operation_dependency.get("path"), str):
+        operation_path = (project_root / operation_dependency["path"]).resolve()
     target = project_root / "target"
     target.mkdir(exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(prefix="managed-guide-check-", dir=target))
