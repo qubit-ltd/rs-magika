@@ -146,6 +146,7 @@ qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
     registry_consumer = consumer_manifest(dependencies, Path("/project"), None)
     assert 'qubit-operation = "0.3"' in registry_consumer
     assert 'qubit-operation = {' not in registry_consumer
+    assert "[workspace]" in registry_consumer
     validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
     try:
         validate_current_settlement_names(guide, "released()")
@@ -210,6 +211,8 @@ def consumer_manifest(
 name = "managed-guide-example-check"
 version = "0.0.0"
 edition = "2024"
+
+[workspace]
 
 [dependencies]
 """ + "\n".join(entries) + "\n"
