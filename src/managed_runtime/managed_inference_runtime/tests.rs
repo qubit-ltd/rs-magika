@@ -120,6 +120,280 @@ fn test_snapshot_concurrent_with_shutdown_finishes_within_deadline() {
     observer.join().expect("concurrent snapshot observer should finish");
 }
 
+struct ReleaseGate(Option<mpsc::SyncSender<()>>);
+
+impl ReleaseGate {
+    fn release(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+impl Drop for ReleaseGate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn wait_for_snapshot(
+    runtime: &ManagedInferenceRuntime,
+    stage: &str,
+    condition: impl Fn(&super::super::ManagedInferenceSnapshot) -> bool,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = runtime.snapshot();
+        if condition(&snapshot) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {stage}: {snapshot:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_wait = Arc::new(Mutex::new(release_rx));
+    let engine_release = Arc::clone(&release_wait);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(move |_| {
+            entered_tx.send(()).unwrap();
+            engine_release.lock().unwrap().recv().unwrap();
+            Ok(Some("text/plain".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let mut release_on_failure = ReleaseGate(Some(release_tx));
+    let inference = runtime
+        .submit(None, WorkerInput::Bytes(vec![1, 2, 3].into()))
+        .unwrap();
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("engine must enter before the active-request snapshot");
+
+    let states = runtime.tasks.lock().unwrap().clone();
+    assert_eq!(states.len(), 1, "real submitted request must be registered");
+    let active = runtime.snapshot();
+    assert_eq!(1, active.worker_running);
+    assert_eq!(3, active.reserved_bytes);
+
+    let (observer_ready_tx, observer_ready_rx) = mpsc::sync_channel(1);
+    let (observer_done_tx, observer_done_rx) = mpsc::sync_channel(1);
+    let observer_runtime = Arc::clone(&runtime);
+    let observer = std::thread::spawn(move || {
+        let first = observer_runtime.snapshot();
+        observer_ready_tx.send(first.worker_running == 1).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = observer_runtime.snapshot();
+            if snapshot.worker_running == 0
+                && snapshot.awaiting_release == 0
+                && snapshot.reserved_bytes == 0
+            {
+                observer_done_tx.send(()).unwrap();
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                observer_done_tx.send(()).unwrap();
+                panic!("timed out observing request release: {snapshot:?}");
+            }
+            std::thread::yield_now();
+        }
+    });
+    assert!(
+        observer_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("snapshot observer must start"),
+        "observer must first see the real active request"
+    );
+
+    let (shutdown_started_tx, shutdown_started_rx) = mpsc::sync_channel(1);
+    let (shutdown_done_tx, shutdown_done_rx) = mpsc::sync_channel(1);
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_started_tx.send(()).unwrap();
+        let report =
+            shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        shutdown_done_tx.send(report).unwrap();
+    });
+    shutdown_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shutdown thread must start");
+    wait_for_snapshot(&runtime, "shutdown admission closure", |snapshot| {
+        snapshot.admission_closed
+    });
+
+    release_on_failure.release();
+    assert_eq!(
+        block_on(inference).unwrap().as_deref(),
+        Some("text/plain"),
+        "accepted inference should return its real worker result"
+    );
+    let report = shutdown_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shutdown must finish after request release");
+    assert!(report.worker_stopped);
+    observer_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("snapshot observer must finish after registry cleanup");
+    shutdown
+        .join()
+        .expect("completed shutdown thread must be reclaimable");
+    observer
+        .join()
+        .expect("completed snapshot thread must be reclaimable");
+
+    let final_snapshot = runtime.snapshot();
+    assert!(final_snapshot.admission_closed);
+    assert_eq!(0, final_snapshot.worker_running);
+    assert_eq!(0, final_snapshot.awaiting_release);
+    assert_eq!(0, final_snapshot.reserved_bytes);
+    assert!(
+        runtime.tasks.lock().unwrap().is_empty(),
+        "released task must leave the registry"
+    );
+    assert_eq!(
+        0,
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
+#[test]
+fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        4,
+        Box::new(|bytes| Ok(Some(format!("application/x-bytes-{}", bytes.len())))),
+        Box::new(|| {}),
+    ));
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
+    let driver = bridge.driver();
+    let inference = runtime
+        .submit(
+            None,
+            WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error),
+        )
+        .unwrap();
+    let state = runtime.tasks.lock().unwrap()[0].clone();
+
+    let (request_tx, request_rx) = mpsc::sync_channel(1);
+    let request_bridge = Arc::clone(&bridge);
+    let request_thread = std::thread::spawn(move || {
+        request_tx
+            .send(block_on(request_bridge.next_request()))
+            .unwrap();
+    });
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker sampling request must arrive");
+    let request = request.expect("bridge remains open while the retained driver owns it");
+    assert_eq!(0, request.offset());
+    assert_eq!(4, request.len());
+    request.respond(Ok(vec![1, 2, 3, 4]));
+    request_thread
+        .join()
+        .expect("completed sampling request thread must be reclaimable");
+    assert!(
+        state.wait_worker_done_blocking(Duration::from_secs(5)),
+        "worker must finish sampling"
+    );
+    let waiting = runtime.snapshot();
+    assert_eq!(1, waiting.awaiting_release);
+    assert_eq!(4, waiting.reserved_bytes);
+    assert!(!state.inner.lock().unwrap().released);
+
+    let (observer_ready_tx, observer_ready_rx) = mpsc::sync_channel(1);
+    let (observer_done_tx, observer_done_rx) = mpsc::sync_channel(1);
+    let observer_runtime = Arc::clone(&runtime);
+    let observer = std::thread::spawn(move || {
+        let first = observer_runtime.snapshot();
+        observer_ready_tx
+            .send(first.awaiting_release == 1 && first.reserved_bytes == 4)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = observer_runtime.snapshot();
+            if snapshot.awaiting_release == 0 && snapshot.reserved_bytes == 0 {
+                observer_done_tx.send(()).unwrap();
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                observer_done_tx.send(()).unwrap();
+                panic!("timed out observing driver release: {snapshot:?}");
+            }
+            std::thread::yield_now();
+        }
+    });
+    assert!(
+        observer_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("snapshot observer must start"),
+        "observer must see worker-done request held by the real driver"
+    );
+
+    let (shutdown_started_tx, shutdown_started_rx) = mpsc::sync_channel(1);
+    let (shutdown_done_tx, shutdown_done_rx) = mpsc::sync_channel(1);
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_started_tx.send(()).unwrap();
+        let report =
+            shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        shutdown_done_tx.send(report).unwrap();
+    });
+    shutdown_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shutdown thread must start");
+    wait_for_snapshot(&runtime, "shutdown admission closure", |snapshot| {
+        snapshot.admission_closed
+    });
+
+    drop(driver);
+    state.mark_driver_done();
+    assert_eq!(
+        block_on(inference).unwrap().as_deref(),
+        Some("application/x-bytes-4")
+    );
+    let report = shutdown_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shutdown must finish after the known-safe driver completes");
+    assert!(report.worker_stopped);
+    observer_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("snapshot observer must finish after registry cleanup");
+    shutdown
+        .join()
+        .expect("completed shutdown thread must be reclaimable");
+    observer
+        .join()
+        .expect("completed snapshot thread must be reclaimable");
+
+    let final_snapshot = runtime.snapshot();
+    assert!(final_snapshot.admission_closed);
+    assert_eq!(0, final_snapshot.worker_running);
+    assert_eq!(0, final_snapshot.awaiting_release);
+    assert_eq!(0, final_snapshot.reserved_bytes);
+    assert!(
+        runtime.tasks.lock().unwrap().is_empty(),
+        "released task must leave the registry"
+    );
+    assert_eq!(
+        0,
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
 #[test]
 fn test_snapshot_unconfirmed_admission_drop_and_confirmed_or_unstarted_controls() {
     let runtime = borrowed_test_runtime(17);
