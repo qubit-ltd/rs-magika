@@ -121,6 +121,11 @@ def validate_dependencies(
         raise ValueError(f"{guide_name}: qubit-fs is missing the async feature used by the examples")
 
 
+def validate_current_settlement_names(guide_name: str, markdown: str) -> None:
+    if re.search(r"\breleased\s*\(", markdown):
+        raise ValueError(f"{guide_name}: use wait_settlement().await instead of released()")
+
+
 def run_self_tests() -> None:
     guide = "English fixture"
     examples = ["use qubit_magika::MagikaMimeDetector;", "use qubit_operation::OperationManager;"]
@@ -138,6 +143,13 @@ qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
 """
     parsed = tomllib.loads(block)["dependencies"]
     validate_dependencies(guide, parsed, examples)
+    validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
+    try:
+        validate_current_settlement_names(guide, "released()")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted obsolete released() method fixture")
     for label, mutated, expected_message in (
         ("English missing operation", {k: v for k, v in dependencies.items() if k != "qubit-operation"}, "missing qubit-operation"),
         ("Chinese missing operation", {k: v for k, v in dependencies.items() if k != "qubit-operation"}, "missing qubit-operation"),
@@ -216,6 +228,7 @@ def main() -> int:
         for guide in GUIDES:
             guide_path = project_root / guide
             markdown = guide_path.read_text(encoding="utf-8")
+            validate_current_settlement_names(guide, markdown)
             examples = [
                 extract_example(markdown, guide),
                 extract_provider_example(markdown, guide),

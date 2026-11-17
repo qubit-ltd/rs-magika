@@ -425,10 +425,20 @@ fn shutdown_application(
 Inspect the `OperationOutcome` returned by `detect_request`: `Succeeded(Some(mime))`
 contains a classification, `Succeeded(None)` means there was no classification,
 and `Failed(error)` carries the detector error. Other variants report stopped
-or otherwise failed operation work. `released()` separately reports resource
-settlement; it has no `Result` wrapper. Keep `shutdown_application` at a synchronous application
+or otherwise failed operation work. `wait_settlement().await` returns a
+`SettlementReport`; use `SettlementReport::all_released()` to check whether the
+request resources settled. Keep `shutdown_application` at a synchronous application
 shutdown boundary. An async-only host should run that boundary on its own
 blocking executor facility after it stops admission and awaits active requests.
+
+After runtime shutdown, inspect the shared runtime with `runtime.runtime_snapshot()`.
+The `ManagedInferenceSnapshot` is a non-atomic observation: fields may reflect
+different instants, and counts include every detector sharing that runtime.
+`faulted` records a caught inference-session panic; `worker_panicked` only records
+an uncaught panic observed while joining the worker. A nonzero
+`unconfirmed_provider_io` means a pending Provider operation was dropped before
+completion could be confirmed. A snapshot does not prove settlement; continue to
+use `wait_settlement().await` for release observation.
 
 In a real application, keep the service group, supervisor, and detector for the
 application lifetime so request scopes come from the same supervisor, and call

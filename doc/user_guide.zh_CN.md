@@ -371,8 +371,16 @@ fn shutdown_application(
 
 请检查 `detect_request` 返回的 `OperationOutcome`：`Succeeded(Some(mime))` 包含识别结果，
 `Succeeded(None)` 表示没有识别结果，`Failed(error)` 携带 detector 错误。其他变体表示操作被停止或执行失败。
-`released()` 单独报告资源释放状态，它不返回 `Result`。`shutdown_application` 应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
+`wait_settlement().await` 返回 `SettlementReport`；使用
+`SettlementReport::all_released()` 检查请求资源是否已结算。`shutdown_application` 应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
 等待活动请求完成后，使用自身的阻塞执行机制调用它。
+
+runtime 关闭后，可调用 `runtime.runtime_snapshot()` 查看共享运行状态。
+`ManagedInferenceSnapshot` 是非原子观测：字段可能来自略有差异的时刻，且统计
+包含共享该 runtime 的所有 detector。`faulted` 表示推理 session 曾捕获 panic；
+关闭报告的 `worker_panicked` 只表示 join 时观察到未捕获 panic。非零
+`unconfirmed_provider_io` 表示某个 Pending Provider 操作被丢弃，完成状态无法确认。
+快照不能证明资源已结算；释放观察仍应使用 `wait_settlement().await`。
 
 真实应用应让 service group、detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
 关闭函数。`max_bytes` 既是单次采样的累计读取预算，也会占用 runtime 共享的在途字节预算。
