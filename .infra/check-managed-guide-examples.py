@@ -24,9 +24,9 @@ DEPENDENCIES_END = "<!-- managed-dependencies-end -->"
 GUIDES = ("doc/user_guide.md", "doc/user_guide.zh_CN.md")
 EXPECTED_VERSIONS = {
     "qubit-magika": "0.18",
-    "qubit-mime": "0.21",
+    "qubit-mime": "0.22",
     "qubit-operation": "0.3",
-    "qubit-fs": "0.3",
+    "qubit-fs": "0.4",
 }
 REQUIRED_IMPORTS = (
     "use qubit_magika::MagikaMimeDetector;",
@@ -131,15 +131,15 @@ def run_self_tests() -> None:
     examples = ["use qubit_magika::MagikaMimeDetector;", "use qubit_operation::OperationManager;"]
     dependencies = {
         "qubit-magika": "0.18",
-        "qubit-mime": "0.21",
+        "qubit-mime": "0.22",
         "qubit-operation": "0.3",
         "qubit-fs": {"version": "0.3", "default-features": False, "features": ["async"]},
     }
     block = """[dependencies]
 qubit-magika = "0.18"
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-operation = "0.3"
-qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
+qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 """
     parsed = tomllib.loads(block)["dependencies"]
     validate_dependencies(guide, parsed, examples)
@@ -192,6 +192,17 @@ def consumer_manifest(
             assert version is not None
             mapped: dict[str, object] = {"version": version}
             mapped["path"] = str(project_root)
+            if isinstance(value, dict):
+                mapped.update({k: v for k, v in value.items() if k != "path"})
+            value = mapped
+        elif package == "qubit-mime":
+            version = dependency_version(value)
+            assert version is not None
+            value = {"version": version, "path": str(project_root.parent / "rs-mime")}
+        elif package == "qubit-fs":
+            version = dependency_version(value)
+            assert version is not None
+            mapped = {"version": version, "path": str(project_root.parent / "rs-fs")}
             if isinstance(value, dict):
                 mapped.update({k: v for k, v in value.items() if k != "path"})
             value = mapped

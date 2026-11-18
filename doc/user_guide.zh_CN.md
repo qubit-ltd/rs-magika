@@ -40,10 +40,10 @@ inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默�
 
 ```toml
 [dependencies]
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
-qubit-fs = "0.3" # 直接调用 detect_path 时需要
+qubit-fs = "0.4" # 直接调用 detect_path 时需要
 ```
 
 默认 feature `bundled-onnxruntime` 会下载并链接默认 Magika session 所需的 ONNX
@@ -163,9 +163,9 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 ```toml
 [dependencies]
 qubit-magika = "0.18"
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-operation = "0.3"
-qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
+qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 ```
 <!-- managed-dependencies-end -->
 
@@ -225,9 +225,9 @@ provider-path 检测调用它。path backend 将候选 MIME type 返回给高层
 ```toml
 [dependencies]
 qubit-magika = { version = "0.18", default-features = false }
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-spi = "0.14"
-qubit-fs = "0.3"
+qubit-fs = "0.4"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 

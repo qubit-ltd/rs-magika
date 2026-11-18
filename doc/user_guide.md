@@ -47,10 +47,10 @@ Add the crate versions used by this release:
 
 ```toml
 [dependencies]
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
-qubit-fs = "0.3" # needed when calling detect_path directly
+qubit-fs = "0.4" # needed when calling detect_path directly
 ```
 
 The default feature, `bundled-onnxruntime`, downloads and links the ONNX Runtime
@@ -204,9 +204,9 @@ into an application:
 ```toml
 [dependencies]
 qubit-magika = "0.18"
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-operation = "0.3"
-qubit-fs = { version = "0.3", default-features = false, features = ["async"] }
+qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 ```
 <!-- managed-dependencies-end -->
 
@@ -253,9 +253,9 @@ and keep the versions aligned with `qubit-magika` 0.18:
 ```toml
 [dependencies]
 qubit-magika = { version = "0.18", default-features = false }
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-spi = "0.14"
-qubit-fs = "0.3"
+qubit-fs = "0.4"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 ```
 

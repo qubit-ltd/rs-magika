@@ -37,10 +37,10 @@ inventory = ["qubit-mime/inventory", "qubit-spi/inventory"]
 magika = "^1.1"
 qubit-io = "^0.19"
 
-qubit-fs = { version = "^0.3", default-features = false, features = ["async"] }
+qubit-fs = { version = "^0.4", path = "../rs-fs", default-features = false, features = ["async"] }
 
 qubit-spi = { version = "^0.14" }
-qubit-mime = "^0.21"
+qubit-mime = { version = "^0.22", path = "../rs-mime" }
 qubit-operation = "^0.3"
 
 [dependencies.ort]
@@ -50,7 +50,7 @@ optional = true
 
 [dev-dependencies]
 qubit-config = "^0.15"
-qubit-fs-local = "^0.11"
+qubit-fs-local = { version = "^0.11", path = "../rs-fs-local" }
 tempfile = "^3.27"
 
 
