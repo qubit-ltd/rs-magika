@@ -58,22 +58,64 @@ jobs:
   dynamic-loader:
     name: Dynamic ONNX Runtime consumer
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sources/rs-magika
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Checkout rs-magika under sources
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: sources/rs-magika
+      - name: Checkout accepted rs-mime source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-mime
+          ref: edb1c737dc4efac1bbff1e673fbc70a73d31882f
+          path: sources/rs-mime
+      - name: Checkout rs-fs dependency
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-fs
+          ref: bbb7a5d269f2f3a955fcd25839177eae4795898f
+          path: sources/rs-fs
+      - name: Checkout rs-fs-local development dependency
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-fs-local
+          ref: 1067ff1ffe75376f2349c2a484ccf2423e29d20e
+          path: sources/rs-fs-local
+      - name: Checkout rs-fs-registry transitive dependency
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-fs-registry
+          ref: f979cd4425d9a50ea0a3ca5544ab94a8bffad31b
+          path: sources/rs-fs-registry
+      - name: Checkout rs-fs-testkit transitive dependency
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-fs-testkit
+          ref: 72af3d22362de9884c77e0bcaadbccfca4725a35
+          path: sources/rs-fs-testkit
+      - name: Checkout rs-operation transitive dependency
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: qubit-ltd/rs-operation
+          ref: 7fcda0375286f9466dbdfbb63d720d10c88fb423
+          path: sources/rs-operation
       - name: Install Rust
         run: rustup toolchain install 1.94.0 --profile minimal
-      - name: Download and verify ONNX Runtime 1.24.2
+      - name: Download and verify ONNX Runtime 1.24.2 wheel
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/onnxruntime-linux-x64-1.24.2.tgz"
+          wheel="$RUNNER_TEMP/onnxruntime-1.24.2-cp311-cp311-manylinux_x86_64.whl"
           curl --fail --location --silent --show-error \
-            https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz \
-            --output "$archive"
-          echo '43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6  '"$archive" | sha256sum --check
+            https://files.pythonhosted.org/packages/2c/32/4e5921ba8b82ac37cad45f1108ca6effd430f49c7f20577d53f317d166ed/onnxruntime-1.24.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl \
+            --output "$wheel"
+          echo '93fe190ee555ae8e9c1214bcfcf13af85cd06dd835e8d835ce5a8d01056844fe  '"$wheel" | sha256sum --check
           mkdir "$RUNNER_TEMP/onnxruntime"
-          tar -xzf "$archive" -C "$RUNNER_TEMP/onnxruntime"
-          echo "ORT_LIBRARY_PATH=$RUNNER_TEMP/onnxruntime/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/onnxruntime/onnxruntime-linux-x64-1.24.2/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          unzip -q "$wheel" -d "$RUNNER_TEMP/onnxruntime"
+          echo "ORT_LIBRARY_PATH=$RUNNER_TEMP/onnxruntime/onnxruntime/capi/libonnxruntime.so.1.24.2" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/onnxruntime/onnxruntime/capi:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
       - name: Check dynamic feature selection
         run: |
           python3 .infra/check-dynamic-loader-features.py --self-test
