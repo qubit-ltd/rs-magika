@@ -27,7 +27,7 @@ the [`dynamic-loader` job](.github/workflows/ci.yml); see the
 
 ```toml
 [dependencies]
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
 ```

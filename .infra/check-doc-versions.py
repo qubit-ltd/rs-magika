@@ -11,14 +11,12 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+READMES = ("README.md", "README.zh_CN.md")
 GUIDES = ("doc/user_guide.md", "doc/user_guide.zh_CN.md")
+DOCUMENTS = READMES + GUIDES
 DOC_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi", "ort")
-STALE_REFERENCES = {
-    "qubit-magika": ("0.15", "0.17"),
-    "qubit-mime": ("0.18", "0.20"),
-    "qubit-fs": ("0.2",),
-    "qubit-spi": ("0.13",),
-}
+README_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-spi")
+MIGRATION_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi")
 
 
 def expected_versions(root: Path) -> dict[str, str]:
@@ -44,10 +42,20 @@ def toml_blocks(text: str):
         yield match.group(1)
 
 
+def migration_section(text: str) -> str:
+    headings = list(re.finditer(r"(?m)^## .+$", text))
+    for index, heading in enumerate(headings):
+        title = heading.group().casefold()
+        if "migration" in title or "迁移" in title:
+            end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+            return text[heading.end():end]
+    return ""
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     expected = expected_versions(root)
-    for relative in GUIDES:
+    for relative in DOCUMENTS:
         path = root / relative
         text = path.read_text()
         seen: set[str] = set()
@@ -73,7 +81,7 @@ def check(root: Path) -> list[str]:
                         f"{relative}: {name} version {version!r} in TOML block {block_number}; "
                         f"Cargo.toml requires {expected[name]!r}"
                     )
-        required = set(DOC_DEPENDENCIES)
+        required = set(DOC_DEPENDENCIES if relative in GUIDES else README_DEPENDENCIES)
         missing = required - seen
         if missing:
             errors.append(f"{relative}: dependency blocks do not declare {', '.join(sorted(missing))}")
@@ -85,11 +93,18 @@ def check(root: Path) -> list[str]:
                     f"{relative}: inline inventory version {inline_version!r}; "
                     f"Cargo.toml requires {expected['qubit-magika']!r}"
                 )
-        for name, stale_versions in STALE_REFERENCES.items():
-            for version in stale_versions:
-                pattern = rf"{re.escape(name)}(?:\s+|[^\n`]*?\s){re.escape(version)}(?:\b|\")"
-                if re.search(pattern, text):
-                    errors.append(f"{relative}: stale prose version {name} {version}")
+        if relative in GUIDES:
+            section = migration_section(text)
+            for name in MIGRATION_DEPENDENCIES:
+                versions = re.findall(rf"`{re.escape(name)}\s+([^`]+)`", section)
+                if not versions:
+                    errors.append(f"{relative}: migration section does not declare {name}")
+                for version in versions:
+                    if version != expected[name]:
+                        errors.append(
+                            f"{relative}: migration version {name} {version!r}; "
+                            f"Cargo.toml requires {expected[name]!r}"
+                        )
     return errors
 
 
@@ -99,7 +114,7 @@ def self_test(root: Path) -> list[str]:
         fixture_root = Path(temporary)
         shutil.copy2(root / "Cargo.toml", fixture_root / "Cargo.toml")
         (fixture_root / "doc").mkdir()
-        for relative in GUIDES:
+        for relative in DOCUMENTS:
             shutil.copy2(root / relative, fixture_root / relative)
         if check(fixture_root):
             return ["self-test baseline fixture unexpectedly failed"]
@@ -122,6 +137,31 @@ def self_test(root: Path) -> list[str]:
             if not check(fixture_root):
                 failures.append(f"self-test failed to reject changed {name} version")
             path.write_text(original)
+        negative_cases = (
+            ("README.md", "qubit-mime = \"0.22\"", "qubit-mime = \"0.21\"", "qubit-mime"),
+            ("README.zh_CN.md", "qubit-mime = \"0.22\"", "qubit-mime = \"0.21\"", "qubit-mime"),
+            ("doc/user_guide.md", "qubit-mime 0.22", "qubit-mime 0.21", "qubit-mime"),
+            ("doc/user_guide.md", "qubit-fs 0.4", "qubit-fs 0.3", "qubit-fs"),
+            ("doc/user_guide.zh_CN.md", "qubit-mime 0.22", "qubit-mime 0.21", "qubit-mime"),
+            ("doc/user_guide.zh_CN.md", "qubit-fs 0.4", "qubit-fs 0.3", "qubit-fs"),
+        )
+        for relative, current, stale, dependency in negative_cases:
+            path = fixture_root / relative
+            original = path.read_text()
+            if current not in original:
+                failures.append(f"self-test could not locate {dependency} in {relative}")
+                continue
+            path.write_text(original.replace(current, stale, 1))
+            errors = check(fixture_root)
+            if not any(relative in error and dependency in error for error in errors):
+                failures.append(f"self-test failed to reject {dependency} drift in {relative}")
+            path.write_text(original)
+        path = fixture_root / "doc/user_guide.md"
+        original = path.read_text()
+        path.write_text("Historical reference: qubit-mime 0.21.\n\n" + original)
+        if check(fixture_root):
+            failures.append("self-test rejected a historical version outside the migration section")
+        path.write_text(original)
     return failures
 
 
