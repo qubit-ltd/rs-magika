@@ -494,7 +494,7 @@ current upstream trait does not pass one.
 
 When upgrading a pre-0.14 integration, apply these changes in order:
 
-1. Upgrade to `qubit-magika 0.18`, `qubit-mime 0.21`, `qubit-fs 0.3`,
+1. Upgrade to `qubit-magika 0.18`, `qubit-mime 0.22`, `qubit-fs 0.3`,
    `qubit-spi 0.14`, and Rust 1.94.
 2. Keep provider registration and detector configuration separate: register
    `MagikaMimeDetectorProvider`, select `magika`, then call

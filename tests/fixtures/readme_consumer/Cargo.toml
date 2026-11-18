@@ -1,0 +1,13 @@
+[package]
+name = "magika-readme-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+qubit-magika = { path = "../../..", default-features = false }
+qubit-mime = { version = "^0.22", path = "../../../../rs-mime" }
+qubit-spi = "^0.14"
+ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }

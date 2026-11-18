@@ -23,7 +23,7 @@ Python 内容实际执行一次推理；依赖和启动示例见[用户手册](d
 
 ```toml
 [dependencies]
-qubit-mime = "0.21"
+qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
 ```

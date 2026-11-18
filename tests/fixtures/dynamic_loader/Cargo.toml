@@ -8,6 +8,6 @@ publish = false
 
 [dependencies]
 qubit-magika = { path = "../../..", default-features = false }
-qubit-mime = "^0.21"
+qubit-mime = { version = "^0.22", path = "../../../../rs-mime" }
 qubit-operation = "^0.3"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }

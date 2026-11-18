@@ -422,7 +422,7 @@ Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
-1. 将配套依赖升级到 `qubit-magika 0.18`、`qubit-mime 0.21`、`qubit-fs 0.3`、
+1. 将配套依赖升级到 `qubit-magika 0.18`、`qubit-mime 0.22`、`qubit-fs 0.3`、
    `qubit-spi 0.14`，并使用 Rust 1.94。
 2. 保持 provider 注册和 detector 配置分离：注册
    `MagikaMimeDetectorProvider`，选择 `magika`，然后调用
