@@ -78,5 +78,7 @@ jobs:
         run: |
           python3 .infra/check-dynamic-loader-features.py --self-test
           cargo +1.94.0 tree --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml -e features | python3 .infra/check-dynamic-loader-features.py
+      - name: Compile README consumer
+        run: cargo +1.94.0 check --locked --manifest-path tests/fixtures/readme_consumer/Cargo.toml
       - name: Run isolated dynamic loading consumer
         run: cargo +1.94.0 run --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml
