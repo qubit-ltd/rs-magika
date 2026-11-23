@@ -398,7 +398,7 @@ impl ManagedInferenceRuntime {
             WorkerInput::Bridge(_, limit, _) => *limit,
             WorkerInput::Features(_, _) => 0,
         };
-        let admission = self.reserve_request(None, byte_count)?;
+        let admission = self.reserve_request(parent, byte_count)?;
         self.submit_operation_admitted(parent, admission, input).await
     }
 
@@ -560,7 +560,6 @@ impl ManagedInferenceRuntime {
     where
         I: AsyncInput + Send + 'static,
     {
-        admission.retain_in_scope(scope)?;
         let state = Arc::clone(&admission.state);
         let state_for_stop = Arc::clone(&state);
         let worker = async move {
@@ -582,8 +581,9 @@ impl ManagedInferenceRuntime {
         };
         let mut worker = Box::pin(worker);
         let mut stop = Box::pin(scope.context().stop_requested());
+        let mut request_stop = Box::pin(state_for_stop.wait_stopped());
         poll_fn(|cx: &mut Context<'_>| {
-            if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
+            if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
                 state_for_stop.request_stop();
                 return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
             }
@@ -784,7 +784,7 @@ impl ManagedInferenceRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .push(Arc::clone(&state));
         drop(admission_gate);
-        let mut request = RequestAdmission::new(state, admission, Vec::new(), byte_permit);
+        let mut request = RequestAdmission::new(state, admission, byte_permit);
         if let Some(scope) = scope {
             request.retain_in_scope(scope)?;
         }
@@ -1077,14 +1077,16 @@ where
                         .read_at(&mut buffer, request.offset()),
                 );
                 let mut closed = Box::pin(guard.driver.as_ref().expect("driver remains owned").closed());
+                let state_for_stop = Arc::clone(&guard.state);
+                let mut stopped = Box::pin(state_for_stop.wait_stopped());
                 let read_result = poll_fn(|cx| {
+                    if stopped.as_mut().poll(cx).is_ready() || closed.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(None);
+                    }
                     guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Poll::Ready(result) = read.as_mut().poll(cx) {
                         guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
                         return Poll::Ready(Some(result));
-                    }
-                    if closed.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(None);
                     }
                     Poll::Pending
                 })
