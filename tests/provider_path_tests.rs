@@ -897,21 +897,8 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(30));
     let first_observer = first.observer();
-    let _ = first.request_stop(StopReason::UserCancelled);
-    let first_result = run_ready(first.wait_outcome());
-    assert!(matches!(
-        first_result,
-        Ok(qubit_operation::OperationOutcome::Stopped(_))
-    ));
-
-    // Cancellation stops local polling, but the gated provider read has no
-    // completion signal yet, so the first managed release remains Pending.
-    let mut first_release = Box::pin(first_observer.wait_settlement());
-    let release_state = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(first_release.as_mut().poll(context))
-    }));
-    assert!(release_state.is_pending());
-
+    // Queue the second request while the first provider read owns the worker,
+    // before cancellation can free that worker.
     let bytes = PYTHON.to_vec();
     assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
     let second_detector = Arc::clone(&detector);
@@ -951,8 +938,28 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     assert!(result_state.is_pending());
     drop(second_result);
 
-    // Releasing the read lets the second owned-byte request progress.
-    gate.release();
+    let _ = first.request_stop(StopReason::UserCancelled);
+    let first_result = run_ready(first.wait_outcome());
+    assert!(matches!(
+        first_result,
+        Ok(qubit_operation::OperationOutcome::Stopped(_))
+    ));
+    assert!(
+        gate.wait_until_read_dropped_while_pending(Duration::from_secs(30)),
+        "cancelled provider read was not dropped while its gate remained closed"
+    );
+
+    // The bridge closes on cancellation, so the first read future is dropped
+    // while pending. No completion can be observed after that drop; retain the
+    // settlement responsibility until the provider reports completion.
+    let mut first_release = Box::pin(first_observer.wait_settlement());
+    let release_state = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(first_release.as_mut().poll(context))
+    }));
+    assert!(release_state.is_pending());
+
+    // Closing the first bridge frees the inference worker for the request
+    // already known to be queued.
     let second_result = run_ready(second.wait_outcome());
     let second_settlement = run_ready(second.wait_settlement());
     assert!(matches!(
@@ -960,14 +967,16 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
     ));
     assert!(second_settlement.all_released());
-    // Even though the gate is released and the second request completes, the
-    // first provider future was dropped while pending. Its native completion
-    // cannot be observed through this fixture, so managed release stays
-    // Pending and shutdown admission remains incomplete by contract.
-    let release_state = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(first_release.as_mut().poll(context))
-    }));
-    assert!(release_state.is_pending());
+
+    // Releasing a gate after its pending future was dropped cannot confirm
+    // provider completion or release the first request's resources.
+    gate.release();
+    assert!(
+        run_ready(std::future::poll_fn(|context| {
+            Poll::Ready(first_release.as_mut().poll(context))
+        }))
+        .is_pending()
+    );
     let shutdown = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
     assert!(!shutdown.worker_stopped);
 }

@@ -7,4 +7,6 @@
 // =============================================================================
 
 pub(crate) mod internal;
+#[cfg(feature = "bundled-onnxruntime")]
+mod magika_api_tests;
 mod managed_operation_tests;

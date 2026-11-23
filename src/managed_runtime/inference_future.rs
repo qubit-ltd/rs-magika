@@ -264,4 +264,26 @@ mod tests {
         let future = InferenceFuture::new(state);
         assert!(matches!(future.wait_blocking(), Ok(None)));
     }
+
+    #[test]
+    fn test_blocking_settled_wait_recovers_a_poisoned_result_lock() {
+        let state = Arc::new(TaskState::new(104, None));
+        let poisoned_state = Arc::clone(&state);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned_state.inner.lock().unwrap();
+                panic!("poison task result lock before settled wait");
+            })
+            .join()
+            .is_err()
+        );
+        state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
+        state.mark_worker_done();
+        state.mark_released();
+
+        assert!(matches!(
+            InferenceFuture::new(state).wait_blocking_settled(),
+            Ok(Some(mime)) if mime == "text/plain"
+        ));
+    }
 }

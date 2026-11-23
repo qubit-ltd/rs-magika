@@ -17,6 +17,10 @@ use std::io;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::task::Poll;
 
 pub(crate) use async_sample_driver::AsyncSampleDriver;
@@ -37,6 +41,12 @@ pub(crate) struct AsyncSampleBridge {
     state: Mutex<BridgeState>,
     /// Wakes a worker waiting for the sole request slot.
     changed: Condvar,
+    /// Test synchronization for proving a reader reached the request-slot wait.
+    #[cfg(test)]
+    waiting_readers: AtomicUsize,
+    /// Test synchronization for proving a worker reached the response wait.
+    #[cfg(test)]
+    waiting_responses: AtomicUsize,
 }
 
 impl AsyncSampleBridge {
@@ -54,6 +64,10 @@ impl AsyncSampleBridge {
             length,
             state: Mutex::new(BridgeState::new()),
             changed: Condvar::new(),
+            #[cfg(test)]
+            waiting_readers: AtomicUsize::new(0),
+            #[cfg(test)]
+            waiting_responses: AtomicUsize::new(0),
         })
     }
 
@@ -95,7 +109,11 @@ impl AsyncSampleBridge {
         let wake = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             while !state.closed && (state.pending.is_some() || state.active.is_some()) {
+                #[cfg(test)]
+                self.waiting_readers.fetch_add(1, Ordering::Release);
                 state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner());
+                #[cfg(test)]
+                self.waiting_readers.fetch_sub(1, Ordering::Release);
             }
             if state.closed {
                 return Err(closed_error());
@@ -109,7 +127,11 @@ impl AsyncSampleBridge {
 
         let mut result = response.result.lock().unwrap_or_else(|error| error.into_inner());
         while result.is_none() {
+            #[cfg(test)]
+            self.waiting_responses.fetch_add(1, Ordering::Release);
             result = response.ready.wait(result).unwrap_or_else(|error| error.into_inner());
+            #[cfg(test)]
+            self.waiting_responses.fetch_sub(1, Ordering::Release);
         }
         match result.take().expect("response checked") {
             Ok(bytes) if bytes.len() == output.len() => {
@@ -158,6 +180,20 @@ impl AsyncSampleBridge {
             Poll::Pending
         })
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_test_waiters(&self, readers: usize, responses: usize, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if self.waiting_readers.load(Ordering::Acquire) >= readers
+                && self.waiting_responses.load(Ordering::Acquire) >= responses
+            {
+                return true;
+            }
+            std::thread::yield_now();
+        }
+        false
     }
 
     /// Creates the async-side cancellation guard for this bridge.
