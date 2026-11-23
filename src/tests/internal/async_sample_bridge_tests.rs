@@ -8,6 +8,8 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Wake;
@@ -157,6 +159,40 @@ fn test_bridge_close_wakes_pending_request_and_close_waiters() {
         Poll::Ready(None)
     ));
     assert!(Future::poll(closed.as_mut(), &mut context).is_ready());
+}
+
+#[test]
+fn test_closed_wakes_registered_waiter_and_deduplicates_proven_identity() {
+    struct CountingWake(AtomicUsize);
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let bridge = AsyncSampleBridge::new(0);
+    let counter = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    let can_prove_same_waiter = waker.will_wake(&waker.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut closed = std::pin::pin!(bridge.closed());
+
+    assert!(Future::poll(closed.as_mut(), &mut context).is_pending());
+    assert!(Future::poll(closed.as_mut(), &mut context).is_pending());
+    bridge.close();
+
+    assert!(Future::poll(closed.as_mut(), &mut context).is_ready());
+    let wakes = counter.0.load(Ordering::SeqCst);
+    assert!(wakes >= 1, "closing the bridge must wake the registered waiter");
+    if can_prove_same_waiter {
+        assert_eq!(
+            1, wakes,
+            "a waker proven equivalent to its clone should be registered once"
+        );
+    }
 }
 
 #[test]

@@ -117,9 +117,14 @@ impl Drop for ReadRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::sync::Arc;
     use std::sync::Weak;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Wake;
 
+    use super::super::AsyncSampleBridge;
     use super::ReadRequest;
     use crate::internal::async_sample_bridge::response::Response;
 
@@ -135,5 +140,57 @@ mod tests {
             std::io::ErrorKind::Interrupted,
             result.as_ref().unwrap().as_ref().unwrap_err().kind(),
         );
+    }
+
+    #[test]
+    fn test_interrupt_recovers_poisoned_bridge_lock_and_clears_active_read() {
+        let bridge = Arc::new(AsyncSampleBridge::new(8));
+        let worker_bridge = Arc::clone(&bridge);
+        let worker = std::thread::spawn(move || {
+            let mut byte = [0; 1];
+            worker_bridge.read_at(2, &mut byte)
+        });
+        let request = block_on(bridge.next_request()).expect("worker should request a range");
+
+        let poisoned_bridge = Arc::clone(&bridge);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned_bridge.state.lock().unwrap();
+                panic!("poison bridge state before request interruption");
+            })
+            .join()
+            .is_err()
+        );
+
+        drop(request);
+        assert_eq!(
+            std::io::ErrorKind::Interrupted,
+            worker.join().unwrap().unwrap_err().kind()
+        );
+        let state = bridge.state.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(state.active.is_none(), "abandoned request must release its active slot");
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        struct ThreadWake(std::thread::Thread);
+        impl Wake for ThreadWake {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
+        let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return output;
+            }
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        }
     }
 }
