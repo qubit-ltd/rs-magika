@@ -313,6 +313,7 @@ async content hook 与同步 content hook 一样返回 backend 原始 Magika 候
 启动时要向 `ManagerOptions` 注入应用的 `ClockSource`，并用同一个时钟生成观察截止时间。
 默认的 `ManagerOptions` 不含时钟；若直接使用默认值，`wait_settlement_until` 会返回
 `ClockUnavailable`。
+调用方还要按该时钟文档规定的 tick 刻度，把预期等待时长换算为 `wait_ticks` 传入；tick 数不是秒数。
 
 <!-- managed-guide-example-start -->
 ```rust,no_run
@@ -350,6 +351,7 @@ async fn detect_request(
     file_system: AsyncFileSystem,
     path: Path,
     clock: &dyn ClockSource,
+    wait_ticks: u64,
 ) -> Result<(OperationOutcome<Option<String>, qubit_mime::MimeError>, AsyncOperationObserver, SettlementWait), Box<dyn Error>> {
     let request_detector = Arc::clone(detector);
     let mut request = service
@@ -366,10 +368,15 @@ async fn detect_request(
         OperationOutcome::Failed(error) => eprintln!("检测失败：{error}"),
         other => eprintln!("检测未正常完成：{other:?}"),
     }
-    // `clock` 与 ManagerOptions 中注入的是同一时钟，deadline 使用其 tick 单位。
+    // 调用方已按此时钟的 tick 刻度换算好预期等待时长。
     let now = clock.now();
-    let deadline = Deadline::at(MonotonicTime::new(now.domain(), now.ticks().saturating_add(30)));
+    let deadline = Deadline::at(MonotonicTime::new(now.domain(), now.ticks().saturating_add(wait_ticks)));
     let settlement = observer.wait_settlement_until(deadline).await?;
+    match &settlement {
+        SettlementWait::Ready(report) if report.all_released() => println!("请求资源已释放"),
+        SettlementWait::Ready(report) => eprintln!("结算报告仍有未释放资源：{report:?}"),
+        SettlementWait::Pending(snapshot) => eprintln!("截止时结算仍在进行：{snapshot:?}"),
+    }
     Ok((outcome, observer, settlement))
 }
 
@@ -405,11 +412,13 @@ fn shutdown_application(
 业务结果与资源清理分开处理：`Succeeded(Some(mime))` 表示得到分类，`Succeeded(None)` 表示无映射，
 `Failed(error)` 保留 detector 错误，其他变体表示停止或执行失败。observer 使用的时钟就是
 `ManagerOptions` 中注入的同一个 `ClockSource`；示例通过 `clock.now()` 生成同域 deadline。
+应用应根据预期等待时长和该时钟的 tick 刻度换算后传入 `wait_ticks`，不能把 tick 当作秒。
 `wait_settlement_until(deadline)` 返回
 `Result<SettlementWait, ObservationError>`。`SettlementWait::Pending(snapshot)` 只表示
 本次有界观察结束，不能证明资源已释放。截止时间必须来自 operation 使用的 clock domain。
-保留 observer 可在之后继续检查；收到 ready report 后，再用
-`SettlementReport::all_released()` 判断资源是否完成清理。清理失败会保留未确认资源，后续重试
+示例显式匹配 Ready 和 Pending，并在 Ready 时检查 `all_released()`；返回 tuple 时仍保留
+outcome、observer 和原始 settlement 观察结果。调用方可根据负面报告执行恢复处理，也可在 Pending 后继续观察。
+清理失败会保留未确认资源，后续重试
 须通过已登记的 recovery policy/handle 观察或恢复，不能靠重提推理请求完成。关闭函数返回
 `DetectorPending` 时应先保留报告并重试 detector shutdown，不要继续关闭 manager；`ManagerPending`
 保留 snapshot 和 handle，可再次 `wait_for`；`Completed` 携带最终 manager report。`shutdown_application`

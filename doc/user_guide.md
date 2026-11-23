@@ -368,6 +368,8 @@ for the application lifetime, then pass the request scope explicitly:
 Supply the application's `ClockSource` at startup and use the same source for
 each observation deadline. `ManagerOptions::default()` has no clock, so
 `wait_settlement_until` would otherwise return `ClockUnavailable`.
+The caller also supplies `wait_ticks`, converted from the desired wait duration
+using that clock's documented tick scale; this value is not seconds.
 
 <!-- managed-guide-example-start -->
 ```rust,no_run
@@ -405,6 +407,7 @@ async fn detect_request(
     file_system: AsyncFileSystem,
     path: Path,
     clock: &dyn ClockSource,
+    wait_ticks: u64,
 ) -> Result<(OperationOutcome<Option<String>, qubit_mime::MimeError>, AsyncOperationObserver, SettlementWait), Box<dyn Error>> {
     let request_detector = Arc::clone(detector);
     let mut request = service
@@ -421,10 +424,15 @@ async fn detect_request(
         OperationOutcome::Failed(error) => eprintln!("detection failed: {error}"),
         other => eprintln!("detection did not complete successfully: {other:?}"),
     }
-    // `clock` is the same source installed in ManagerOptions; ticks are in its units.
+    // The caller converted the desired wait duration to this clock's tick units.
     let now = clock.now();
-    let deadline = Deadline::at(MonotonicTime::new(now.domain(), now.ticks().saturating_add(30)));
+    let deadline = Deadline::at(MonotonicTime::new(now.domain(), now.ticks().saturating_add(wait_ticks)));
     let settlement = observer.wait_settlement_until(deadline).await?;
+    match &settlement {
+        SettlementWait::Ready(report) if report.all_released() => println!("request resources released"),
+        SettlementWait::Ready(report) => eprintln!("settlement report has unreleased resources: {report:?}"),
+        SettlementWait::Pending(snapshot) => eprintln!("settlement is pending at the deadline: {snapshot:?}"),
+    }
     Ok((outcome, observer, settlement))
 }
 
@@ -462,11 +470,15 @@ classification, `Succeeded(None)` means there was no classification,
 `Failed(error)` carries the detector error, and the other variants report stopped
 or otherwise failed operation work. The observer uses the same `ClockSource`
 installed in `ManagerOptions`, and the sample creates its deadline from
-`clock.now()` in that source's domain. `wait_settlement_until(deadline)` returns
+`clock.now()` in that source's domain. The application converts its desired
+wait duration to that source's tick units and passes `wait_ticks`; ticks are not
+assumed to be seconds. `wait_settlement_until(deadline)` returns
 `Result<SettlementWait, ObservationError>`. `SettlementWait::Pending(snapshot)`
 is a bounded observation, not a release confirmation. The deadline must come
-from the operation's clock domain. Keep the observer to continue checking later,
-and inspect a ready report with `SettlementReport::all_released()`. Failed
+from the operation's clock domain. The example matches both variants and checks
+`all_released()` on a ready report, then returns the outcome, observer, and
+original settlement result so callers retain a negative report for recovery
+handling and can continue observation after a pending snapshot. Failed
 cleanup retains an unconfirmed resource for recovery observation; retry is
 available only through the registered recovery policy/handle, not by resubmitting
 the inference request. `shutdown_application` returns `DetectorPending` with the
