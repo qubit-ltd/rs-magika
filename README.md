@@ -96,6 +96,21 @@ scope into each managed request, and drain the detector before shutting down
 the application. The legacy `MimeDetector` hooks do not accept an operation
 scope; they keep their existing contract.
 
+The `qubit-mime` async provider registry selects and constructs an async
+backend; its hooks do not receive a parent operation scope. Inventory registers
+the unconfigured provider for that registry. Use the explicit managed entry
+point when a request must attach lifecycle observation to an application scope.
+For a reproducible checkout layout, run
+[`prepare-local-path-dependencies.sh --check-locked`](.infra/bin/prepare-local-path-dependencies.sh)
+and then use the fixed revisions in
+[`local-path-dependencies.tsv`](.infra/ci/local-path-dependencies.tsv) for:
+
+```bash
+cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
+cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/dynamic_loader/Cargo.toml
+cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/readme_consumer/Cargo.toml
+```
+
 Managed requests reserve runtime capacity, the logical `max_bytes` sampling
 budget, and the scope child before provider I/O. Closed, full, or cancelled
 requests are rejected before provider calls. Dropping a pending provider future
@@ -186,6 +201,7 @@ required.
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API documentation](https://docs.rs/qubit-magika)
 - [中文 README](README.zh_CN.md)
+- [Locked local dependency revisions](.infra/ci/local-path-dependencies.tsv)
 
 ## Testing
 

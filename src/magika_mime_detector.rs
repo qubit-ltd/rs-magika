@@ -185,6 +185,12 @@ impl MagikaMimeDetector {
     /// child settlement remain pending, potentially indefinitely; future
     /// cancellation does not prove that underlying I/O was interrupted.
     ///
+    /// A Rust panic caught during session inference is surfaced as a backend
+    /// error from this call while its child operation records `Panicked` and
+    /// the runtime becomes faulted. This is distinct from
+    /// [`ManagedInferenceShutdownReport::worker_panicked`], which reports an
+    /// uncaught panic observed while joining the worker.
+    ///
     /// # Parameters
     ///
     /// * `scope` - Parent operation scope for cancellation and settlement.
