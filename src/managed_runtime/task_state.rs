@@ -387,6 +387,30 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_stop_reason_reports_gate_state() {
+        let unregistered = TaskState::new(18, None);
+        assert_eq!(
+            "provider operation stopped before start",
+            unregistered.provider_stop_reason()
+        );
+
+        let gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
+        let state = TaskState::new_registered(19, None, None, Some(Arc::downgrade(&gate)));
+        assert_eq!("provider operation stopped before start", state.provider_stop_reason());
+
+        gate.lock().unwrap().cancelling = true;
+        assert_eq!(
+            "provider operation stopped after cancellation",
+            state.provider_stop_reason()
+        );
+        gate.lock().unwrap().faulted = true;
+        assert_eq!(
+            "provider operation stopped after worker fault",
+            state.provider_stop_reason()
+        );
+    }
+
+    #[test]
     fn test_worker_completion_recovers_a_poisoned_lifecycle_lock() {
         let state = Arc::new(TaskState::new(16, None));
         let poisoned = Arc::clone(&state);
