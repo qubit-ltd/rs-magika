@@ -258,9 +258,7 @@ fn test_public_managed_bytes_worker_panic_is_mime_failure() {
     let mut operation = group
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
-            request_runtime
-                .detect_bytes(&scope, b"sample".to_vec())
-                .await
+            request_runtime.detect_bytes(&scope, b"sample".to_vec()).await
         })
         .unwrap();
 

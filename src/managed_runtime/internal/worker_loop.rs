@@ -65,6 +65,15 @@ pub(super) fn run_worker(
 }
 
 /// Runs the worker with an optional deterministic first-receive gate.
+///
+/// # Parameters
+///
+/// * `receiver` - Queue of admitted worker jobs.
+/// * `gate` - Admission state synchronized with the queue.
+/// * `infer` - Inference operation run for each input.
+/// * `before_first_recv` - Hook called before receiving the first job.
+/// * `after_business` - Hook called after publishing each business result.
+/// * `before_exit` - Hook called before the worker exits.
 pub(super) fn run_worker_with_before_first_recv(
     receiver: mpsc::Receiver<Job>,
     gate: Arc<Mutex<AdmissionGate>>,

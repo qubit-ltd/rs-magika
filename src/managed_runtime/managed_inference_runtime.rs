@@ -35,7 +35,6 @@ use qubit_operation::ShutdownReport;
 use qubit_operation::ShutdownSnapshot;
 
 use super::bridge_sync_input::BridgeSyncInput;
-use crate::internal::{INFERENCE_OUTCOME, map_operation_outcome};
 use super::byte_budget::ByteBudget;
 use super::drive_event::DriveEvent;
 use super::inference_future::InferenceFuture;
@@ -49,7 +48,9 @@ use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 use super::worker_input::worker_bytes;
+use crate::internal::INFERENCE_OUTCOME;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
+use crate::internal::map_operation_outcome;
 use crate::magika_mime_detector::content_type_to_mime;
 use crate::magika_mime_detector::map_magika_error;
 
@@ -204,8 +205,7 @@ impl ManagedInferenceRuntime {
             ));
         }
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
-            mpsc::sync_channel(SERVICE_CAPACITY);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = match std::thread::Builder::new()
@@ -247,7 +247,9 @@ impl ManagedInferenceRuntime {
                 ));
             }
         }
-        let service_group = match manager.group(GroupOptions { capacity: SERVICE_CAPACITY }) {
+        let service_group = match manager.group(GroupOptions {
+            capacity: SERVICE_CAPACITY,
+        }) {
             Ok(service_group) => service_group,
             Err(error) => {
                 return Err(MimeError::detector_backend(
@@ -883,9 +885,7 @@ impl ManagedInferenceRuntime {
             let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
             let local_access_complete = tasks.iter().all(|task| task.access_complete());
             drop(tasks);
-            if admission.snapshot.active_operations == 0
-                && local_access_complete
-            {
+            if admission.snapshot.active_operations == 0 && local_access_complete {
                 break;
             }
             if remaining_timeout(deadline).is_zero() {

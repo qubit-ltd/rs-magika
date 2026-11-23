@@ -81,8 +81,7 @@ impl ManagedInferenceRuntime {
         after_business: Box<dyn Fn() + Send + 'static>,
         before_worker_exit: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
-            mpsc::sync_channel(super::SERVICE_CAPACITY);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(super::SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = std::thread::Builder::new()
@@ -137,8 +136,7 @@ impl ManagedInferenceRuntime {
         engine: ManagedInferenceEngine,
         before_first_recv: Box<dyn FnOnce() + Send + 'static>,
     ) -> Self {
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
-            mpsc::sync_channel(super::SERVICE_CAPACITY);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(super::SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = std::thread::Builder::new()

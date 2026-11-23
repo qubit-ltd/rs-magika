@@ -20,8 +20,8 @@ use qubit_operation::ChildOutcomeKind;
 use qubit_operation::ResourceRef;
 
 pub(super) use super::admission_gate::AdmissionGate;
-use super::task_inner::TaskInner;
 use super::task_control::register_waker;
+use super::task_inner::TaskInner;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 
 /// State observed by both the worker and operation control adapter.
@@ -39,9 +39,7 @@ pub(super) struct TaskState {
     owner: std::sync::Mutex<Option<Arc<super::request_resource_owner::RequestResourceOwner>>>,
     /// User reference to the scope-owned cleanup record, dropped after local
     /// worker and driver access ends.
-    scope_resource: std::sync::Mutex<
-        Option<ResourceRef<Arc<super::request_resource_owner::RequestResourceOwner>>>,
-    >,
+    scope_resource: std::sync::Mutex<Option<ResourceRef<Arc<super::request_resource_owner::RequestResourceOwner>>>>,
     /// Weak back-reference lets aggregate release prune the runtime's strong
     /// registry.
     active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
@@ -136,7 +134,8 @@ impl TaskState {
             .stop_requested
     }
 
-    /// Reports whether worker and provider driver have stopped accessing local state.
+    /// Reports whether worker and provider driver have stopped accessing local
+    /// state.
     pub(super) fn access_complete(&self) -> bool {
         self.inner
             .lock()
@@ -146,6 +145,11 @@ impl TaskState {
 
     /// Polls whether stop was requested, registering the caller under the
     /// same lock that protects the stop transition.
+    ///
+    /// # Parameters
+    ///
+    /// * `context` - Task context whose waker is registered while stop is
+    ///   pending.
     pub(super) fn poll_stop_requested(&self, context: &mut Context<'_>) -> Poll<()> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if inner.stop_requested {
@@ -216,9 +220,7 @@ impl TaskState {
     }
 
     /// Clones the request owner while it remains attached to this task.
-    pub(super) fn request_resource_owner(
-        &self,
-    ) -> Option<Arc<super::request_resource_owner::RequestResourceOwner>> {
+    pub(super) fn request_resource_owner(&self) -> Option<Arc<super::request_resource_owner::RequestResourceOwner>> {
         self.owner
             .lock()
             .unwrap_or_else(|error| error.into_inner())

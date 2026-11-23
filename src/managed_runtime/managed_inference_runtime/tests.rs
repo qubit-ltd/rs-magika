@@ -1907,14 +1907,8 @@ fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
     let (lock, ready) = &*gate;
     *lock.lock().unwrap() = true;
     ready.notify_all();
-    assert_eq!(
-        Some("application/x-gated".to_owned()),
-        block_on(first).unwrap()
-    );
-    assert_eq!(
-        Some("application/x-gated".to_owned()),
-        block_on(second).unwrap()
-    );
+    assert_eq!(Some("application/x-gated".to_owned()), block_on(first).unwrap());
+    assert_eq!(Some("application/x-gated".to_owned()), block_on(second).unwrap());
     assert_eq!(
         Some(qubit_operation::ChildOutcomeKind::Succeeded),
         first_state.inner.lock().unwrap().business
@@ -1924,12 +1918,7 @@ fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
         second_state.inner.lock().unwrap().business
     );
     assert_eq!(0, runtime.snapshot().reserved_bytes);
-    assert_eq!(
-        0,
-        runtime
-            .active_requests
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
+    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::Acquire));
     assert!(
         runtime
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
@@ -1946,15 +1935,7 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
         Box::new(|| panic!("test worker exits before receiving")),
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !runtime
-        .worker
-        .lock()
-        .unwrap()
-        .handle
-        .as_ref()
-        .unwrap()
-        .is_finished()
-    {
+    while !runtime.worker.lock().unwrap().handle.as_ref().unwrap().is_finished() {
         assert!(std::time::Instant::now() < deadline, "test worker did not exit");
         std::thread::yield_now();
     }
@@ -1972,10 +1953,7 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
     let error = block_on(future).unwrap_err();
     assert!(error.to_string().contains("disconnected"));
     let inner = state.inner.lock().unwrap();
-    assert_eq!(
-        Some(qubit_operation::ChildOutcomeKind::Failed),
-        inner.business
-    );
+    assert_eq!(Some(qubit_operation::ChildOutcomeKind::Failed), inner.business);
     assert!(inner.released);
     drop(inner);
     assert_eq!(0, runtime.snapshot().reserved_bytes);

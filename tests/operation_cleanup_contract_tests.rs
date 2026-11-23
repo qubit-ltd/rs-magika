@@ -54,10 +54,7 @@ impl AsyncCleanup<String> for FailingCleanup {
     }
 }
 
-fn register_failing_resource(
-    scope: &qubit_operation::OperationScope,
-    resource_id: Arc<OnceLock<ResourceId>>,
-) {
+fn register_failing_resource(scope: &qubit_operation::OperationScope, resource_id: Arc<OnceLock<ResourceId>>) {
     let cleanup = Arc::new(FailingCleanup {
         resource_id: Arc::clone(&resource_id),
         attempts: Arc::new(AtomicUsize::new(0)),
@@ -75,7 +72,7 @@ fn register_failing_resource(
 }
 
 #[test]
-fn locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release_evidence() {
+fn test_locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release_evidence() {
     let resource_id = Arc::new(OnceLock::new());
     let attempts = Arc::new(AtomicUsize::new(0));
     let resource_id_for_operation = Arc::clone(&resource_id);
@@ -101,7 +98,10 @@ fn locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release_evid
         })
         .unwrap();
 
-    assert!(matches!(handle.wait_outcome().unwrap(), OperationOutcome::Succeeded(())));
+    assert!(matches!(
+        handle.wait_outcome().unwrap(),
+        OperationOutcome::Succeeded(())
+    ));
     let settlement = handle.wait_settlement().unwrap();
     assert!(!settlement.all_released());
     assert_eq!(settlement.recovery_count, 1);
@@ -121,11 +121,16 @@ fn locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release_evid
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert!(!settlement.all_released());
 
-    drop(manager.request_shutdown(qubit_operation::ShutdownMode::Drain).wait().unwrap());
+    drop(
+        manager
+            .request_shutdown(qubit_operation::ShutdownMode::Drain)
+            .wait()
+            .unwrap(),
+    );
 }
 
 #[test]
-fn exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
+fn test_exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
     use qubit_operation::RecoveryStore;
     use qubit_operation::RecoveryStoreOptions;
     use qubit_operation::RecoveryTransferError;
@@ -143,7 +148,10 @@ fn exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
         })
         .unwrap();
 
-    assert!(matches!(handle.wait_outcome().unwrap(), OperationOutcome::Succeeded(())));
+    assert!(matches!(
+        handle.wait_outcome().unwrap(),
+        OperationOutcome::Succeeded(())
+    ));
     let settlement = handle.wait_settlement().unwrap();
     assert!(!settlement.all_released());
     assert_eq!(settlement.recovery_count, 2);
@@ -184,5 +192,10 @@ fn exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
     assert!(!settlement.all_released());
 
     store.request_shutdown().wait().unwrap();
-    drop(manager.request_shutdown(qubit_operation::ShutdownMode::Drain).wait().unwrap());
+    drop(
+        manager
+            .request_shutdown(qubit_operation::ShutdownMode::Drain)
+            .wait()
+            .unwrap(),
+    );
 }

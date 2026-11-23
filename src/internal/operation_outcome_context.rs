@@ -30,9 +30,13 @@ pub(crate) const PROVIDER_OUTCOME: OperationOutcomeContext = OperationOutcomeCon
 /// Context-specific text retained when an operation has no successful result.
 #[derive(Clone, Copy)]
 pub(crate) struct OperationOutcomeContext {
+    /// Text used when the operation is stopped.
     pub(crate) stopped: &'static str,
+    /// Text used when a child operation fails.
     pub(crate) child_failed: &'static str,
+    /// Text used when the operation panics.
     pub(crate) panicked: &'static str,
+    /// Text used when the executor fails.
     pub(crate) executor_failed: &'static str,
 }
 
@@ -42,6 +46,10 @@ pub(crate) struct OperationOutcomeContext {
 ///
 /// * `outcome` - Outcome returned by the operation manager.
 /// * `context` - Existing entry-point wording for non-business failures.
+///
+/// # Type Parameters
+///
+/// * `T` - Successful value returned by the operation.
 ///
 /// # Returns
 ///
@@ -63,12 +71,7 @@ pub(crate) fn map_operation_outcome<T>(
             "magika",
             format!("{}: {summary:?}", context.child_failed),
         )),
-        OperationOutcome::Panicked(_) => {
-            Err(MimeError::detector_backend("magika", context.panicked))
-        }
-        OperationOutcome::ExecutionFailed(_) => Err(MimeError::detector_backend(
-            "magika",
-            context.executor_failed,
-        )),
+        OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", context.panicked)),
+        OperationOutcome::ExecutionFailed(_) => Err(MimeError::detector_backend("magika", context.executor_failed)),
     }
 }

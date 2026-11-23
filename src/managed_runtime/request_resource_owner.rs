@@ -7,30 +7,16 @@
 // =============================================================================
 //! Aggregate release of runtime and byte reservations.
 
-use qubit_operation::AsyncCleanup;
-use qubit_operation::CleanupContext;
 use qubit_operation::CleanupFailure;
-use qubit_operation::CleanupFuture;
 use qubit_operation::CleanupOutcome;
 use qubit_operation::CleanupStage;
 use qubit_operation::DiagnosticSummary;
 use qubit_operation::ResourceId;
 
 use super::byte_permit::BytePermit;
+use super::request_resource_completion_facts::RequestResourceCompletionFacts;
 use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
-
-/// Resources released together after worker and provider completion.
-type RetainedResources = (ServicePermit, BytePermit);
-
-/// Completion facts needed to release one request's local access barrier.
-#[derive(Default)]
-struct CompletionFacts {
-    driver_required: bool,
-    driver_done: bool,
-    worker_done: bool,
-    completed: bool,
-}
 
 /// Holds runtime and byte capacity until the registered worker and sampling
 /// driver have both stopped accessing its state. Unknown provider I/O keeps the
@@ -39,9 +25,9 @@ pub(super) struct RequestResourceOwner {
     /// Weak task state notified on aggregate release.
     state: std::sync::Weak<TaskState>,
     /// Runtime and byte permits retained until both participants finish.
-    resources: std::sync::Mutex<Option<RetainedResources>>,
+    resources: std::sync::Mutex<Option<(ServicePermit, BytePermit)>>,
     /// Driver completion, worker completion, and release publication.
-    facts: std::sync::Mutex<CompletionFacts>,
+    facts: std::sync::Mutex<RequestResourceCompletionFacts>,
     /// Whether a provider future was dropped without completion evidence.
     unconfirmed_provider_io: std::sync::atomic::AtomicBool,
     /// Real resource identity installed after the scope reservation commits.
@@ -66,9 +52,9 @@ impl RequestResourceOwner {
         Self {
             state,
             resources: std::sync::Mutex::new(Some((service, bytes))),
-            facts: std::sync::Mutex::new(CompletionFacts {
+            facts: std::sync::Mutex::new(RequestResourceCompletionFacts {
                 driver_required,
-                ..CompletionFacts::default()
+                ..RequestResourceCompletionFacts::default()
             }),
             unconfirmed_provider_io: std::sync::atomic::AtomicBool::new(false),
             resource_id: std::sync::OnceLock::new(),
@@ -76,6 +62,10 @@ impl RequestResourceOwner {
     }
 
     /// Installs the identity returned by the committed public scope resource.
+    ///
+    /// # Parameters
+    ///
+    /// * `id` - Identity assigned to the committed scope resource.
     pub(super) fn set_resource_id(&self, id: ResourceId) {
         assert!(self.resource_id.set(id).is_ok(), "request resource ID is set once");
     }
@@ -90,7 +80,8 @@ impl RequestResourceOwner {
 
     /// Records that dropped provider I/O has no completion evidence.
     pub(super) fn mark_unconfirmed_provider_io(&self) {
-        self.unconfirmed_provider_io.store(true, std::sync::atomic::Ordering::Release);
+        self.unconfirmed_provider_io
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Records that the worker released its input and completed its work.
@@ -147,7 +138,7 @@ impl RequestResourceOwner {
 
     /// Returns release evidence or retains the owner when provider completion
     /// cannot be confirmed.
-    fn cleanup_outcome(self: std::sync::Arc<Self>) -> CleanupOutcome<std::sync::Arc<Self>> {
+    pub(super) fn cleanup_outcome(self: std::sync::Arc<Self>) -> CleanupOutcome<std::sync::Arc<Self>> {
         if self.unconfirmed_provider_io.load(std::sync::atomic::Ordering::Acquire) {
             let resource_id = *self
                 .resource_id
@@ -172,19 +163,6 @@ impl RequestResourceOwner {
     }
 }
 
-/// Cleanup policy attached to each scope-owned request resource.
-pub(super) struct RequestResourceCleanup;
-
-impl AsyncCleanup<std::sync::Arc<RequestResourceOwner>> for RequestResourceCleanup {
-    fn cleanup(
-        self: std::sync::Arc<Self>,
-        resource: std::sync::Arc<RequestResourceOwner>,
-        _context: CleanupContext,
-    ) -> CleanupFuture<std::sync::Arc<RequestResourceOwner>> {
-        Box::pin(async move { resource.cleanup_outcome() })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -203,12 +181,7 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(4));
         let permit = budget.try_acquire(4).unwrap();
         let state = Arc::new(TaskState::new(14, None));
-        let owner = Arc::new(RequestResourceOwner::new(
-            Arc::downgrade(&state),
-            service,
-            permit,
-            true,
-        ));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
 
         let poisoned_facts = Arc::clone(&owner);
         assert!(

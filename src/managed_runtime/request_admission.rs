@@ -17,8 +17,8 @@ use qubit_operation::OperationScope;
 
 use super::byte_permit::BytePermit;
 use super::job::Job;
+use super::request_resource_cleanup::RequestResourceCleanup;
 pub(super) use super::request_resource_owner::RequestResourceOwner;
-use super::request_resource_owner::RequestResourceCleanup;
 use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
@@ -51,11 +51,7 @@ impl RequestAdmission {
     /// # Returns
     ///
     /// An admission lease holding all reserved resources.
-    pub(super) fn new(
-        state: Arc<TaskState>,
-        service: ServicePermit,
-        bytes: BytePermit,
-    ) -> Self {
+    pub(super) fn new(state: Arc<TaskState>, service: ServicePermit, bytes: BytePermit) -> Self {
         Self {
             state,
             service: Some(service),
@@ -70,6 +66,16 @@ impl RequestAdmission {
     ///
     /// A stop before the provider future's first poll is a clean rejection;
     /// dropping it after a `Pending` poll remains unconfirmed.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Parent operation scope whose stop signal is observed.
+    /// * `operation` - Provider operation to poll while admission remains
+    ///   active.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Provider future type.
     pub(crate) async fn run_provider_operation<F>(
         &mut self,
         scope: &OperationScope,
@@ -182,12 +188,8 @@ impl RequestAdmission {
             }
             Err(error) => {
                 let (rejected, reason) = match error {
-                    std::sync::mpsc::TrySendError::Full(job) => {
-                        (job, "inference worker queue is full")
-                    }
-                    std::sync::mpsc::TrySendError::Disconnected(job) => {
-                        (job, "inference worker is disconnected")
-                    }
+                    std::sync::mpsc::TrySendError::Full(job) => (job, "inference worker queue is full"),
+                    std::sync::mpsc::TrySendError::Disconnected(job) => (job, "inference worker is disconnected"),
                 };
                 if let WorkerInput::Bridge(bridge, _, _) = &rejected.input {
                     // No worker owns this bridge, so wake any provider driver
@@ -249,7 +251,9 @@ impl RequestAdmission {
         })?;
         let owner = Arc::new(RequestResourceOwner::new(
             Arc::downgrade(&self.state),
-            self.service.take().expect("unregistered admission retains service capacity"),
+            self.service
+                .take()
+                .expect("unregistered admission retains service capacity"),
             self.bytes.take().expect("unregistered admission retains byte capacity"),
             false,
         ));
@@ -342,7 +346,10 @@ mod tests {
             })
             .unwrap();
 
-        assert!(matches!(operation.wait_outcome().unwrap(), OperationOutcome::Succeeded(())));
+        assert!(matches!(
+            operation.wait_outcome().unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
         assert!(operation.wait_settlement().unwrap().all_released());
     }
 
@@ -372,10 +379,15 @@ mod tests {
             .unwrap();
 
         let state = state_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        provider_started_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        provider_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
         state.request_stop();
 
-        assert!(matches!(block_on(operation.wait_outcome()).unwrap(), OperationOutcome::Succeeded(())));
+        assert!(matches!(
+            block_on(operation.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
         let settlement = block_on(operation.wait_settlement());
         assert!(!settlement.all_released());
         assert_eq!(settlement.cleanup_failures_total, 1);
@@ -411,12 +423,7 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(700, None));
-        let owner = Arc::new(RequestResourceOwner::new(
-            Arc::downgrade(&state),
-            service,
-            permit,
-            true,
-        ));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
         state.attach_owner(Arc::clone(&owner), None);
 
         owner.worker_done();
@@ -434,12 +441,7 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(702, None));
-        let owner = Arc::new(RequestResourceOwner::new(
-            Arc::downgrade(&state),
-            service,
-            permit,
-            true,
-        ));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
         state.attach_owner(Arc::clone(&owner), None);
 
         owner.driver_done();
@@ -495,11 +497,8 @@ mod tests {
             .try_submit(qubit_operation::OperationOptions::default(), |scope| {
                 let budget = Arc::new(ByteBudget::new(8));
                 let permit = budget.try_acquire(8).unwrap();
-                let mut admission = RequestAdmission::new(
-                    Arc::new(TaskState::new(704, None)),
-                    service_resource(),
-                    permit,
-                );
+                let mut admission =
+                    RequestAdmission::new(Arc::new(TaskState::new(704, None)), service_resource(), permit);
                 admission.retain_in_scope(&scope).unwrap();
                 assert!(admission.state.request_resource_owner().is_some());
                 Ok::<_, ()>(())

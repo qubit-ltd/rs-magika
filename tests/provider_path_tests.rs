@@ -2098,12 +2098,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
         .try_submit(OperationOptions::default(), move |scope| async move {
             if managed {
                 request_detector
-                    .detect_async_provider_path_managed(
-                        &scope,
-                        &file_system,
-                        &path("/runtime-cancel.py"),
-                        4096,
-                    )
+                    .detect_async_provider_path_managed(&scope, &file_system, &path("/runtime-cancel.py"), 4096)
                     .await
                     .map(|_| ())
             } else {
@@ -2158,9 +2153,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     let settlement_poll = run_ready(std::future::poll_fn(|context| {
         Poll::Ready(settlement_after.as_mut().poll(context))
     }));
-    if managed
-        && gate_was_entered
-        && matches!(settlement_before_release, Poll::Ready(report) if report.all_released())
+    if managed && gate_was_entered && matches!(settlement_before_release, Poll::Ready(report) if report.all_released())
     {
         failures.push(format!(
             "managed scope reported Released while Provider future remained Pending; point={point:?}, session={session}, range={range}"
@@ -2256,7 +2249,10 @@ fn test_managed_provider_routes_fit_single_resource_scope_quota() {
     if shutdown.admission.snapshot.service_resources != 0 {
         failures.push(format!("runtime still owns service permits at shutdown: {shutdown:?}"));
     }
-    assert!(failures.is_empty(), "single-resource provider quota failures: {failures:#?}");
+    assert!(
+        failures.is_empty(),
+        "single-resource provider quota failures: {failures:#?}"
+    );
 }
 
 #[test]
@@ -2414,12 +2410,13 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
     if !cancelled_bridge_exited_while_pending {
         failures.push(format!(
             "runtime-only Cancel did not finish before gate release; shutdown_returned={}, bridge_returned={}",
-            shutdown_returned_before_gate_release,
-            bridge_returned_before_gate_release
+            shutdown_returned_before_gate_release, bridge_returned_before_gate_release
         ));
     }
     if !shutdown_report.as_ref().is_some_and(|report| report.worker_stopped) {
-        failures.push(format!("runtime worker did not stop before gate release: {shutdown_report:?}"));
+        failures.push(format!(
+            "runtime worker did not stop before gate release: {shutdown_report:?}"
+        ));
     }
     if operation_outcome.is_err() {
         failures.push("bridge operation did not finish after gate cleanup".to_owned());
@@ -2431,10 +2428,15 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         Ok(_) => {}
         Err(()) => failures.push(format!(
             "post-drop observer timed out Pending; after gate release report state was {:?}",
-            settlement_after_gate_release.as_ref().map(|report| report.all_released())
+            settlement_after_gate_release
+                .as_ref()
+                .map(|report| report.all_released())
         )),
     }
-    assert!(failures.is_empty(), "last-runtime release evidence failures: {failures:#?}");
+    assert!(
+        failures.is_empty(),
+        "last-runtime release evidence failures: {failures:#?}"
+    );
 }
 
 #[test]

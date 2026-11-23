@@ -37,14 +37,14 @@ use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 
 use crate::internal::AsyncProviderInput;
+use crate::internal::PROVIDER_OUTCOME;
+use crate::internal::ProviderPathRoute;
 use crate::internal::ReadSeekInput;
 use crate::internal::ReaderScope;
 use crate::internal::SyncProviderInput;
-use crate::internal::map_provider_magika_error;
-use crate::internal::map_operation_outcome;
-use crate::internal::PROVIDER_OUTCOME;
-use crate::internal::ProviderPathRoute;
 use crate::internal::is_unsupported_provider_error;
+use crate::internal::map_operation_outcome;
+use crate::internal::map_provider_magika_error;
 use crate::internal::select_provider_path_route;
 use crate::managed_runtime::ManagedInferenceRuntime;
 use crate::managed_runtime::ManagedInferenceShutdownReport;
@@ -281,7 +281,10 @@ impl MagikaMimeDetector {
     ) -> MimeResult<Option<String>> {
         admission.retain_in_scope(scope)?;
         let open_result = admission
-            .run_provider_operation(scope, file_system.open_random_access_reader(path, ReadOptions::default()))
+            .run_provider_operation(
+                scope,
+                file_system.open_random_access_reader(path, ReadOptions::default()),
+            )
             .await?;
         match open_result {
             Ok(reader) => {
@@ -303,9 +306,7 @@ impl MagikaMimeDetector {
         let stat_result = admission.run_provider_operation(scope, file_system.stat(path)).await?;
         let metadata = match stat_result {
             Ok(metadata) => Some(metadata),
-            Err(error) if is_unsupported_provider_error(&error) => {
-                None
-            }
+            Err(error) if is_unsupported_provider_error(&error) => None,
             Err(error) => return Err(error.into()),
         };
         let capabilities = file_system.properties().capabilities();
@@ -325,7 +326,10 @@ impl MagikaMimeDetector {
                     .await;
             }
             ProviderPathRoute::TooLarge { requested } => {
-                return Err(MimeError::BufferLimitExceeded { requested, limit: max_bytes });
+                return Err(MimeError::BufferLimitExceeded {
+                    requested,
+                    limit: max_bytes,
+                });
             }
             ProviderPathRoute::ReadAll => {}
         }
@@ -720,9 +724,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         }
         let metadata = match file_system.stat(path) {
             Ok(metadata) => Some(metadata),
-            Err(error) if is_unsupported_provider_error(&error) => {
-                None
-            }
+            Err(error) if is_unsupported_provider_error(&error) => None,
             Err(error) => return Err(error.into()),
         };
         let capabilities = file_system.properties().capabilities();

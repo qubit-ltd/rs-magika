@@ -23,13 +23,25 @@ pub(crate) enum ProviderPathRoute {
     /// Read the complete resource within the caller's bound.
     ReadAll,
     /// Known-length content exceeds the bound and cannot use ranges.
-    TooLarge { requested: usize },
+    TooLarge {
+        /// Requested content size that exceeded the configured bound.
+        requested: usize,
+    },
 }
 
-/// Identifies the unsupported errors that provider-route callers handle specially.
+/// Identifies the unsupported errors that provider-route callers handle
+/// specially.
 ///
 /// Callers decide the meaning by operation: unsupported session open permits
 /// a legacy route, while unsupported stat means only that length is unknown.
+///
+/// # Parameters
+///
+/// * `error` - Error returned by the provider operation.
+///
+/// # Returns
+///
+/// Whether the provider reports an unsupported operation or capability.
 pub(crate) fn is_unsupported_provider_error(error: &FsError) -> bool {
     matches!(
         error.kind(),
