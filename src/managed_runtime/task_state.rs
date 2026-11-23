@@ -303,6 +303,7 @@ fn wake_all(wakers: Vec<Waker>) {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use qubit_operation::ChildOutcomeKind;
 
@@ -562,6 +563,69 @@ mod tests {
 
         assert!(state.inner.lock().unwrap().released);
         assert!(tasks.lock().unwrap_or_else(|error| error.into_inner()).is_empty());
+    }
+
+    #[test]
+    fn test_lifecycle_recovers_poisoned_locks_when_attaching_resources() {
+        let state = Arc::new(TaskState::new(18, None));
+        let poisoned_bridge = Arc::clone(&state);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned_bridge.bridge.lock().unwrap();
+                panic!("poison bridge lock before late attachment");
+            })
+            .join()
+            .is_err()
+        );
+        let poisoned_owner = Arc::clone(&state);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned_owner.owner.lock().unwrap();
+                panic!("poison owner lock before attachment");
+            })
+            .join()
+            .is_err()
+        );
+        let poisoned_inner = Arc::clone(&state);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned_inner.inner.lock().unwrap();
+                panic!("poison lifecycle lock before provider completion");
+            })
+            .join()
+            .is_err()
+        );
+
+        state.mark_unconfirmed_provider_io();
+        state.request_stop();
+
+        let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
+        state.attach_bridge(Arc::downgrade(&bridge));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        let mut closed = std::pin::pin!(bridge.closed());
+        assert!(std::future::Future::poll(closed.as_mut(), &mut context).is_ready());
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let service = crate::managed_runtime::service_permit::ServicePermit::try_acquire(&active, 1).unwrap();
+        let budget = Arc::new(crate::managed_runtime::byte_budget::ByteBudget::new(4));
+        let bytes = budget.try_acquire(4).unwrap();
+        let owner = Arc::new(crate::managed_runtime::request_admission::RequestResourceOwner::new(
+            Arc::downgrade(&state),
+            service,
+            bytes,
+            Vec::new(),
+            false,
+        ));
+        state.attach_owner(Arc::clone(&owner));
+        state.mark_driver_done();
+        owner.worker_done();
+
+        let inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(inner.unconfirmed_provider_io);
+        assert!(inner.released);
+        assert_eq!(0, active.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(0, budget.used());
     }
 
     #[test]
