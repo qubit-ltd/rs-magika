@@ -904,13 +904,19 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         Ok(qubit_operation::OperationOutcome::Stopped(_))
     ));
 
-    // Cancellation stops local polling, but the gated provider read has no
-    // completion signal yet, so the first managed release remains Pending.
+    // Cancellation may settle the local scope immediately, but the gated
+    // Provider read still lacks completion evidence. Accept only a real
+    // negative settlement that retains recovery or cleanup diagnostics.
     let mut first_release = Box::pin(first_observer.wait_settlement());
     let release_state = run_ready(std::future::poll_fn(|context| {
         Poll::Ready(first_release.as_mut().poll(context))
     }));
-    assert!(release_state.is_pending());
+    let mut first_settlement = match release_state {
+        Poll::Ready(report) => Some(report),
+        Poll::Pending => None,
+    };
+    drop(first_release);
+    let retained_snapshot = detector.runtime_snapshot();
 
     let bytes = PYTHON.to_vec();
     assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
@@ -960,16 +966,36 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
     ));
     assert!(second_settlement.all_released());
-    // Even though the gate is released and the second request completes, the
-    // first provider future was dropped while pending. Its native completion
-    // cannot be observed through this fixture, so managed release stays
-    // Pending and shutdown admission remains incomplete by contract.
-    let release_state = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(first_release.as_mut().poll(context))
-    }));
-    assert!(release_state.is_pending());
-    let shutdown = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
-    assert!(!shutdown.worker_stopped);
+    if first_settlement.is_none() {
+        first_settlement = run_until(first_observer.wait_settlement(), Duration::from_secs(2)).ok();
+    }
+    let shutdown = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+    let settlement_diagnostics = first_settlement.as_ref().is_some_and(|report| {
+        report.recovery_count > 0
+            || report.recoveries_total > 0
+            || report.cleanup_failures_total > 0
+            || report.transferred_count > 0
+    });
+    assert!(
+        first_settlement.as_ref().is_some_and(|report| !report.all_released()),
+        "cancelled pending Provider request must yield a real negative settlement: {first_settlement:?}"
+    );
+    assert!(
+        settlement_diagnostics,
+        "negative settlement must retain recovery or cleanup diagnostics: {first_settlement:?}"
+    );
+    assert!(
+        retained_snapshot.reserved_bytes >= 4096,
+        "runtime must retain the request's byte capacity with its negative settlement: {retained_snapshot:?}"
+    );
+    assert!(
+        shutdown.admission.snapshot.service_resources > 0,
+        "runtime cancellation must retain the admission permit with its recovery payload: {shutdown:?}"
+    );
+    assert!(
+        shutdown.worker_stopped,
+        "the inference worker should stop even while recovery retains the Provider request: {shutdown:?}"
+    );
 }
 
 #[test]
@@ -1200,15 +1226,35 @@ fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close()
     let _ = handle.request_stop(StopReason::UserCancelled);
     let mut handle = handle;
     let _ = run_ready(handle.wait_outcome());
-    let (released_tx, released_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = released_tx.send(run_ready(observer.wait_settlement()));
-    });
-    assert!(released_rx.recv_timeout(Duration::from_millis(50)).is_err());
-    let report = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50));
-    assert!(report.admission.snapshot.service_resources != 0);
+    let settlement = run_until(observer.wait_settlement(), Duration::from_millis(100));
+    let snapshot = detector.runtime_snapshot();
+    let report = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
     // The async fs contract does not let us certify provider-native completion.
     gate.release();
+    let settlement = settlement.expect("bridge closure should produce a real cleanup or recovery report");
+    assert!(
+        !settlement.all_released(),
+        "pending Provider I/O must not be reported Released: {settlement:?}"
+    );
+    assert!(
+        settlement.recovery_count > 0
+            || settlement.recoveries_total > 0
+            || settlement.cleanup_failures_total > 0
+            || settlement.transferred_count > 0,
+        "negative settlement must retain recovery or cleanup diagnostics: {settlement:?}"
+    );
+    assert!(
+        snapshot.unconfirmed_provider_io > 0,
+        "runtime diagnostics must retain the unconfirmed I/O fact: {snapshot:?}"
+    );
+    assert!(
+        report.admission.snapshot.service_resources != 0,
+        "runtime permit must stay with the recovery payload: {report:?}"
+    );
+    assert!(
+        report.worker_stopped,
+        "worker shutdown must finish despite retained recovery state: {report:?}"
+    );
 }
 
 #[test]
