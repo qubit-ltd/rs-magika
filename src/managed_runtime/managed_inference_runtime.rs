@@ -67,6 +67,9 @@ mod test_support;
 /// Monotonically allocates identifiers for runtime child operations.
 static NEXT_CHILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Maximum number of admitted requests retained by the runtime.
+const SERVICE_CAPACITY: usize = 2;
+
 /// Shareable managed execution runtime. One worker owns its Magika session and
 /// one queued request; the supervisor service group admits at most one running
 /// and one queued request.
@@ -201,7 +204,8 @@ impl ManagedInferenceRuntime {
             ));
         }
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(1);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
+            mpsc::sync_channel(SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = match std::thread::Builder::new()
@@ -243,7 +247,7 @@ impl ManagedInferenceRuntime {
                 ));
             }
         }
-        let service_group = match manager.group(GroupOptions { capacity: 2 }) {
+        let service_group = match manager.group(GroupOptions { capacity: SERVICE_CAPACITY }) {
             Ok(service_group) => service_group,
             Err(error) => {
                 return Err(MimeError::detector_backend(
@@ -769,7 +773,7 @@ impl ManagedInferenceRuntime {
             .byte_budget
             .try_acquire(byte_count)
             .ok_or_else(|| MimeError::detector_backend("magika", "runtime in-flight byte budget is full"))?;
-        let admission = ServicePermit::try_acquire(&self.active_requests, 2)
+        let admission = ServicePermit::try_acquire(&self.active_requests, SERVICE_CAPACITY)
             .ok_or_else(|| MimeError::detector_backend("magika", "runtime service capacity is full"))?;
         after_service_reservation();
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

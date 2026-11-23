@@ -1869,3 +1869,118 @@ fn block_on<F: Future>(future: F) -> F::Output {
         }
     }
 }
+
+#[test]
+fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let worker_gate = Arc::clone(&gate);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
+        supervisor,
+        16,
+        Box::new(|_| Ok(Some("application/x-gated".to_owned()))),
+        Box::new(move || {
+            entered_tx.send(()).unwrap();
+            let (lock, ready) = &*worker_gate;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = ready.wait(open).unwrap();
+            }
+        }),
+    ));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let first = runtime.reserve_request(None, 3).unwrap();
+    let first_state = Arc::clone(&first.state);
+    let first = runtime
+        .dispatch(first, WorkerInput::Bytes(vec![b'a'; 3].into()))
+        .unwrap();
+    let second = runtime.reserve_request(None, 4).unwrap();
+    let second_state = Arc::clone(&second.state);
+    let second = runtime
+        .dispatch(second, WorkerInput::Bytes(vec![b'b'; 4].into()))
+        .unwrap();
+    assert!(runtime.reserve_request(None, 1).is_err());
+    assert_eq!(7, runtime.snapshot().reserved_bytes);
+
+    let (lock, ready) = &*gate;
+    *lock.lock().unwrap() = true;
+    ready.notify_all();
+    assert_eq!(
+        Some("application/x-gated".to_owned()),
+        block_on(first).unwrap()
+    );
+    assert_eq!(
+        Some("application/x-gated".to_owned()),
+        block_on(second).unwrap()
+    );
+    assert_eq!(
+        Some(qubit_operation::ChildOutcomeKind::Succeeded),
+        first_state.inner.lock().unwrap().business
+    );
+    assert_eq!(
+        Some(qubit_operation::ChildOutcomeKind::Succeeded),
+        second_state.inner.lock().unwrap().business
+    );
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    assert_eq!(
+        0,
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
+            .worker_stopped
+    );
+}
+
+#[test]
+fn test_receiver_disconnect_settles_undelivered_dispatch() {
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        16,
+        Box::new(|_| Ok(None)),
+        Box::new(|| panic!("test worker exits before receiving")),
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime
+        .worker
+        .lock()
+        .unwrap()
+        .handle
+        .as_ref()
+        .unwrap()
+        .is_finished()
+    {
+        assert!(std::time::Instant::now() < deadline, "test worker did not exit");
+        std::thread::yield_now();
+    }
+    let admission = runtime.reserve_request(None, 4).unwrap();
+    let state = Arc::clone(&admission.state);
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
+    let future = runtime
+        .dispatch(
+            admission,
+            WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error),
+        )
+        .unwrap();
+
+    assert!(block_on(bridge.next_request()).is_none());
+    let error = block_on(future).unwrap_err();
+    assert!(error.to_string().contains("disconnected"));
+    let inner = state.inner.lock().unwrap();
+    assert_eq!(
+        Some(qubit_operation::ChildOutcomeKind::Failed),
+        inner.business
+    );
+    assert!(inner.released);
+    drop(inner);
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    assert_eq!(0, runtime.snapshot().admitted_not_started);
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+    assert!(report.worker_panicked);
+}
