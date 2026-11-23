@@ -274,10 +274,7 @@ mod tests {
             panic!("poison result lock before settled wait");
         })
         .join();
-        state.finish_business(
-            Ok(Some("text/plain".to_owned())),
-            ChildOutcomeKind::Succeeded,
-        );
+        state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
         let (result_tx, result_rx) = mpsc::channel();
         let waiter_state = Arc::clone(&state);
         let waiter = std::thread::spawn(move || {

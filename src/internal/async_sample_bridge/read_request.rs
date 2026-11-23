@@ -156,7 +156,15 @@ mod tests {
 
         assert_eq!(
             std::io::ErrorKind::Interrupted,
-            response.result.lock().unwrap().as_ref().unwrap().as_ref().unwrap_err().kind(),
+            response
+                .result
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .kind(),
         );
         assert!(
             bridge

@@ -1093,7 +1093,11 @@ mod tests {
             .expect_err("a reader position past EOF cannot form a remaining window");
 
         assert!(matches!(error, MimeError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::InvalidInput));
-        assert_eq!(5, reader.position(), "the original reader position is restored on error");
+        assert_eq!(
+            5,
+            reader.position(),
+            "the original reader position is restored on error"
+        );
     }
 
     #[test]

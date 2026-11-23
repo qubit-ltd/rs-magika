@@ -512,18 +512,10 @@ mod tests {
     #[test]
     fn test_unconfirmed_io_stays_visible_after_local_access_completes() {
         let tasks = Arc::new(Mutex::new(Vec::new()));
-        let state = Arc::new(TaskState::new_registered(
-            3,
-            None,
-            Some(Arc::downgrade(&tasks)),
-            None,
-        ));
+        let state = Arc::new(TaskState::new_registered(3, None, Some(Arc::downgrade(&tasks)), None));
         tasks.lock().unwrap().push(Arc::clone(&state));
 
-        assert_eq!(
-            state.provider_stop_reason(),
-            "provider operation stopped before start"
-        );
+        assert_eq!(state.provider_stop_reason(), "provider operation stopped before start");
 
         poison_mutex(&state.inner);
         poison_mutex(&state.owner);
@@ -538,26 +530,27 @@ mod tests {
         let mut context = std::task::Context::from_waker(waker);
         assert!(state.poll_stop_requested(&mut context).is_pending());
         state.mark_unconfirmed_provider_io();
-        assert!(state
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .unconfirmed_provider_io);
+        assert!(
+            state
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .unconfirmed_provider_io
+        );
 
         state.mark_access_complete();
         assert!(state.access_complete());
-        assert!(state
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .unconfirmed_provider_io);
+        assert!(
+            state
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .unconfirmed_provider_io
+        );
 
         state.request_stop();
         state.mark_released();
-        assert!(tasks
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_empty());
+        assert!(tasks.lock().unwrap_or_else(|error| error.into_inner()).is_empty());
     }
 
     #[test]
