@@ -460,6 +460,28 @@ mod tests {
     }
 
     #[test]
+    fn test_unconfirmed_provider_io_completes_local_access_but_retains_permits() {
+        let service = service_resource();
+        let budget = Arc::new(ByteBudget::new(8));
+        let permit = budget.try_acquire(8).unwrap();
+        let state = Arc::new(TaskState::new(706, None));
+        let owner = Arc::new(RequestResourceOwner::new(
+            Arc::downgrade(&state),
+            service,
+            permit,
+            false,
+        ));
+        state.attach_owner(Arc::clone(&owner), None);
+
+        owner.mark_unconfirmed_provider_io();
+        owner.worker_done();
+
+        assert!(state.access_complete());
+        assert!(!state.inner.lock().unwrap().released);
+        assert!(budget.try_acquire(1).is_none());
+    }
+
+    #[test]
     fn test_public_operation_scope_can_retain_admission_resources() {
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
         let mut operation = manager

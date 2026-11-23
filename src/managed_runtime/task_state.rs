@@ -136,6 +136,14 @@ impl TaskState {
             .stop_requested
     }
 
+    /// Reports whether worker and provider driver have stopped accessing local state.
+    pub(super) fn access_complete(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .access_complete
+    }
+
     /// Polls whether stop was requested, registering the caller under the
     /// same lock that protects the stop transition.
     pub(super) fn poll_stop_requested(&self, context: &mut Context<'_>) -> Poll<()> {
@@ -321,6 +329,7 @@ impl TaskState {
         let wakers = {
             let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
             inner.released = true;
+            inner.access_complete = true;
             std::mem::take(&mut inner.wakers)
         };
         wake_all(wakers);
@@ -344,6 +353,13 @@ impl TaskState {
     /// Drops the scope reference once worker and driver access is over, while
     /// keeping unknown provider I/O visible to runtime observers.
     pub(super) fn mark_access_complete(&self) {
+        let wakers = {
+            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            inner.access_complete = true;
+            std::mem::take(&mut inner.wakers)
+        };
+        wake_all(wakers);
+        self.released.notify_all();
         let scope_resource = self
             .scope_resource
             .lock()

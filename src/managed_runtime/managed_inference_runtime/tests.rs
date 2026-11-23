@@ -103,6 +103,23 @@ fn test_snapshot_omits_released_tasks_and_counts_unconfirmed_marker() {
 }
 
 #[test]
+fn test_shutdown_stops_worker_after_local_access_without_releasing_unknown_io() {
+    let runtime = borrowed_test_runtime(17);
+    let state = Arc::new(super::super::task_state::TaskState::new(4, None));
+    state.mark_unconfirmed_provider_io();
+    state.mark_access_complete();
+    runtime.tasks.lock().unwrap().push(Arc::clone(&state));
+
+    let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+
+    assert!(report.worker_stopped);
+    assert!(state.access_complete());
+    assert!(!state.inner.lock().unwrap().released);
+    assert_eq!(1, runtime.snapshot().unconfirmed_provider_io);
+    assert_eq!(1, runtime.tasks.lock().unwrap().len());
+}
+
+#[test]
 fn test_snapshot_concurrent_with_shutdown_finishes_within_deadline() {
     let runtime = borrowed_test_runtime(17);
     let (started_tx, started_rx) = mpsc::channel();

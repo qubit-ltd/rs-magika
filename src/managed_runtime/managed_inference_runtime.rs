@@ -888,8 +888,11 @@ impl ManagedInferenceRuntime {
         after_task_scan();
         loop {
             let admission = self.admission_report();
+            let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+            let local_access_complete = tasks.iter().all(|task| task.access_complete());
+            drop(tasks);
             if admission.snapshot.active_operations == 0
-                && self.tasks.lock().unwrap_or_else(|error| error.into_inner()).is_empty()
+                && local_access_complete
             {
                 break;
             }
