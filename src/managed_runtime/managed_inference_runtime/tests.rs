@@ -1872,8 +1872,23 @@ fn block_on<F: Future>(future: F) -> F::Output {
 
 #[test]
 fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
+    struct WorkerGateRelease(Arc<(Mutex<bool>, Condvar)>);
+    impl WorkerGateRelease {
+        fn open(&self) {
+            let (lock, ready) = &*self.0;
+            *lock.lock().unwrap() = true;
+            ready.notify_all();
+        }
+    }
+    impl Drop for WorkerGateRelease {
+        fn drop(&mut self) {
+            self.open();
+        }
+    }
+
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let release_worker = WorkerGateRelease(Arc::clone(&gate));
     let worker_gate = Arc::clone(&gate);
     let (entered_tx, entered_rx) = mpsc::channel();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
@@ -1901,14 +1916,16 @@ fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
     let second = runtime
         .dispatch(second, WorkerInput::Bytes(vec![b'b'; 4].into()))
         .unwrap();
-    assert!(runtime.reserve_request(None, 1).is_err());
-    assert_eq!(7, runtime.snapshot().reserved_bytes);
+    let third_admission = runtime.reserve_request(None, 1);
+    let reserved_while_worker_is_gated = runtime.snapshot().reserved_bytes;
+    release_worker.open();
+    assert!(third_admission.is_err());
+    assert_eq!(7, reserved_while_worker_is_gated);
 
-    let (lock, ready) = &*gate;
-    *lock.lock().unwrap() = true;
-    ready.notify_all();
     assert_eq!(Some("application/x-gated".to_owned()), block_on(first).unwrap());
     assert_eq!(Some("application/x-gated".to_owned()), block_on(second).unwrap());
+    assert!(first_state.wait_released_blocking(Duration::from_secs(2)));
+    assert!(second_state.wait_released_blocking(Duration::from_secs(2)));
     assert_eq!(
         Some(qubit_operation::ChildOutcomeKind::Succeeded),
         first_state.inner.lock().unwrap().business
