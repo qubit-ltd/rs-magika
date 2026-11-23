@@ -7,26 +7,45 @@
 // =============================================================================
 //! Aggregate release of runtime and byte reservations.
 
-use qubit_operation::ResourceRef;
+use qubit_operation::AsyncCleanup;
+use qubit_operation::CleanupContext;
+use qubit_operation::CleanupFailure;
+use qubit_operation::CleanupFuture;
+use qubit_operation::CleanupOutcome;
+use qubit_operation::CleanupStage;
+use qubit_operation::DiagnosticSummary;
+use qubit_operation::ResourceId;
 
 use super::byte_permit::BytePermit;
 use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
 
 /// Resources released together after worker and provider completion.
-type RetainedResources = (ServicePermit, BytePermit, Vec<ResourceRef<()>>);
+type RetainedResources = (ServicePermit, BytePermit);
+
+/// Completion facts needed to release one request's local access barrier.
+#[derive(Default)]
+struct CompletionFacts {
+    driver_required: bool,
+    driver_done: bool,
+    worker_done: bool,
+    completed: bool,
+}
 
 /// Holds runtime and byte capacity until the registered worker and sampling
-/// driver have both completed. A dropped Pending provider read intentionally
-/// leaves `driver_done` false: the filesystem API cannot prove native work has
-/// stopped in that case.
+/// driver have both stopped accessing its state. Unknown provider I/O keeps the
+/// permits in the scope-owned payload until cleanup can report a failure.
 pub(super) struct RequestResourceOwner {
     /// Weak task state notified on aggregate release.
     state: std::sync::Weak<TaskState>,
     /// Runtime and byte permits retained until both participants finish.
     resources: std::sync::Mutex<Option<RetainedResources>>,
     /// Driver completion, worker completion, and release publication.
-    facts: std::sync::Mutex<(bool, bool, bool)>,
+    facts: std::sync::Mutex<CompletionFacts>,
+    /// Whether a provider future was dropped without completion evidence.
+    unconfirmed_provider_io: std::sync::atomic::AtomicBool,
+    /// Real resource identity installed after the scope reservation commits.
+    resource_id: std::sync::OnceLock<ResourceId>,
 }
 
 impl RequestResourceOwner {
@@ -42,14 +61,36 @@ impl RequestResourceOwner {
         state: std::sync::Weak<TaskState>,
         service: ServicePermit,
         bytes: BytePermit,
-        scope_resources: Vec<ResourceRef<()>>,
         driver_required: bool,
     ) -> Self {
         Self {
             state,
-            resources: std::sync::Mutex::new(Some((service, bytes, scope_resources))),
-            facts: std::sync::Mutex::new((!driver_required, false, false)),
+            resources: std::sync::Mutex::new(Some((service, bytes))),
+            facts: std::sync::Mutex::new(CompletionFacts {
+                driver_required,
+                ..CompletionFacts::default()
+            }),
+            unconfirmed_provider_io: std::sync::atomic::AtomicBool::new(false),
+            resource_id: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Installs the identity returned by the committed public scope resource.
+    pub(super) fn set_resource_id(&self, id: ResourceId) {
+        assert!(self.resource_id.set(id).is_ok(), "request resource ID is set once");
+    }
+
+    /// Adds the provider driver to the completion barrier before dispatch.
+    pub(super) fn require_driver(&self) {
+        self.facts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .driver_required = true;
+    }
+
+    /// Records that dropped provider I/O has no completion evidence.
+    pub(super) fn mark_unconfirmed_provider_io(&self) {
+        self.unconfirmed_provider_io.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Records that the worker released its input and completed its work.
@@ -73,23 +114,74 @@ impl RequestResourceOwner {
         let complete = {
             let mut facts = self.facts.lock().unwrap_or_else(|error| error.into_inner());
             if driver {
-                facts.0 = true;
+                facts.driver_done = true;
             } else {
-                facts.1 = true;
+                facts.worker_done = true;
             }
-            if facts.0 && facts.1 && !facts.2 {
-                facts.2 = true;
+            if facts.worker_done && (!facts.driver_required || facts.driver_done) && !facts.completed {
+                facts.completed = true;
                 true
             } else {
                 false
             }
         };
         if complete {
-            self.resources.lock().unwrap_or_else(|error| error.into_inner()).take();
+            if let Some(state) = self.state.upgrade() {
+                if self.unconfirmed_provider_io.load(std::sync::atomic::Ordering::Acquire) {
+                    state.mark_access_complete();
+                } else {
+                    self.release_resources();
+                    state.mark_released();
+                }
+            } else if !self.unconfirmed_provider_io.load(std::sync::atomic::Ordering::Acquire) {
+                self.release_resources();
+            }
+        }
+    }
+
+    /// Drops runtime and byte permits after confirmed local access completion.
+    fn release_resources(&self) {
+        let resources = self.resources.lock().unwrap_or_else(|error| error.into_inner()).take();
+        drop(resources);
+    }
+
+    /// Returns release evidence or retains the owner when provider completion
+    /// cannot be confirmed.
+    fn cleanup_outcome(self: std::sync::Arc<Self>) -> CleanupOutcome<std::sync::Arc<Self>> {
+        if self.unconfirmed_provider_io.load(std::sync::atomic::Ordering::Acquire) {
+            let resource_id = *self
+                .resource_id
+                .get()
+                .expect("a scoped request owner has a committed resource identity");
+            CleanupOutcome::Failed {
+                failure: CleanupFailure {
+                    resource_id,
+                    stage: CleanupStage::AsyncRelease,
+                    summary: DiagnosticSummary::new("provider I/O completion is unconfirmed"),
+                    source: None,
+                },
+                resource: self,
+            }
+        } else {
+            self.release_resources();
             if let Some(state) = self.state.upgrade() {
                 state.mark_released();
             }
+            CleanupOutcome::Released
         }
+    }
+}
+
+/// Cleanup policy attached to each scope-owned request resource.
+pub(super) struct RequestResourceCleanup;
+
+impl AsyncCleanup<std::sync::Arc<RequestResourceOwner>> for RequestResourceCleanup {
+    fn cleanup(
+        self: std::sync::Arc<Self>,
+        resource: std::sync::Arc<RequestResourceOwner>,
+        _context: CleanupContext,
+    ) -> CleanupFuture<std::sync::Arc<RequestResourceOwner>> {
+        Box::pin(async move { resource.cleanup_outcome() })
     }
 }
 
@@ -115,7 +207,6 @@ mod tests {
             Arc::downgrade(&state),
             service,
             permit,
-            Vec::new(),
             true,
         ));
 

@@ -279,11 +279,9 @@ impl MagikaMimeDetector {
         max_bytes: usize,
     ) -> MimeResult<Option<String>> {
         admission.retain_in_scope(scope)?;
-        admission.begin_provider_operation()?;
-        let open_result = file_system
-            .open_random_access_reader(path, ReadOptions::default())
-            .await;
-        admission.provider_operation_completed();
+        let open_result = admission
+            .run_provider_operation(scope, file_system.open_random_access_reader(path, ReadOptions::default()))
+            .await?;
         match open_result {
             Ok(reader) => {
                 let max_segment = file_system
@@ -305,9 +303,7 @@ impl MagikaMimeDetector {
             Err(error) => return Err(error.into()),
         }
 
-        admission.begin_provider_operation()?;
-        let stat_result = file_system.stat(path).await;
-        admission.provider_operation_completed();
+        let stat_result = admission.run_provider_operation(scope, file_system.stat(path)).await?;
         let metadata = match stat_result {
             Ok(metadata) => Some(metadata),
             Err(error)
@@ -342,9 +338,9 @@ impl MagikaMimeDetector {
                 });
             }
         }
-        admission.begin_provider_operation()?;
-        let read_result = file_system.read_all(path, ReadOptions::default(), max_bytes).await;
-        admission.provider_operation_completed();
+        let read_result = admission
+            .run_provider_operation(scope, file_system.read_all(path, ReadOptions::default(), max_bytes))
+            .await?;
         let bytes = read_result?;
         runtime.detect_bytes_admitted(admission, bytes).await
     }
