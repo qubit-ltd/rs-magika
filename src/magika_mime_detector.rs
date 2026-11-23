@@ -20,7 +20,6 @@ use magika::SyncInput;
 use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
 use qubit_fs::Path as FsPath;
-use qubit_fs::error::FsErrorKind;
 use qubit_fs::metadata::FileSystemCapability;
 use qubit_fs::read::ReadOptions;
 use qubit_io::std_io::ReadSeek;
@@ -34,7 +33,6 @@ use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
 use qubit_operation::ChildRequirement;
 use qubit_operation::OperationOptions;
-use qubit_operation::OperationOutcome;
 use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 
@@ -43,6 +41,11 @@ use crate::internal::ReadSeekInput;
 use crate::internal::ReaderScope;
 use crate::internal::SyncProviderInput;
 use crate::internal::map_provider_magika_error;
+use crate::internal::map_operation_outcome;
+use crate::internal::PROVIDER_OUTCOME;
+use crate::internal::ProviderPathRoute;
+use crate::internal::is_unsupported_provider_error;
+use crate::internal::select_provider_path_route;
 use crate::managed_runtime::ManagedInferenceRuntime;
 use crate::managed_runtime::ManagedInferenceShutdownReport;
 use crate::managed_runtime::ManagedInferenceSnapshot;
@@ -231,21 +234,10 @@ impl MagikaMimeDetector {
             .map_err(|error| {
                 MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
             })?;
-        match operation.wait_outcome().await.map_err(|error| {
+        let outcome = operation.wait_outcome().await.map_err(|error| {
             MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
-        })? {
-            OperationOutcome::Succeeded(result) => Ok(result),
-            OperationOutcome::Failed(error) => Err(error),
-            OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "provider inference stopped")),
-            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
-                "magika",
-                format!("provider child failed: {summary:?}"),
-            )),
-            OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "provider operation panicked")),
-            OperationOutcome::ExecutionFailed(_) => {
-                Err(MimeError::detector_backend("magika", "provider executor failed"))
-            }
-        }
+        })?;
+        map_operation_outcome(outcome, PROVIDER_OUTCOME)
     }
 
     /// Runs the shared provider route after its request and byte capacity are
@@ -259,6 +251,9 @@ impl MagikaMimeDetector {
     ///
     /// * `admission` - Capacity reservation created by the selected public
     ///   entry point.
+    /// * `runtime` - Shared worker runtime that owns Magika inference.
+    /// * `scope` - Operation scope used to retain provider work and observe
+    ///   cancellation.
     /// * `file_system` - Async provider serving the requested path.
     /// * `path` - Provider path used for sampling or fallback reading.
     /// * `max_bytes` - Cumulative sampling and fallback-read budget.
@@ -295,48 +290,38 @@ impl MagikaMimeDetector {
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
-                ) => {}
+            Err(error) if is_unsupported_provider_error(&error) => {}
             Err(error) => return Err(error.into()),
         }
 
         let stat_result = admission.run_provider_operation(scope, file_system.stat(path)).await?;
         let metadata = match stat_result {
             Ok(metadata) => Some(metadata),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
-                ) =>
-            {
+            Err(error) if is_unsupported_provider_error(&error) => {
                 None
             }
             Err(error) => return Err(error.into()),
         };
         let capabilities = file_system.properties().capabilities();
-        if let Some(metadata) = metadata.as_ref()
-            && let Some(length) = metadata.len()
-        {
-            if capabilities.supports(FileSystemCapability::RangeRead) {
-                let version = capabilities
-                    .supports(FileSystemCapability::ConditionalRead)
-                    .then(|| metadata.etag().cloned())
-                    .flatten();
+        let route = select_provider_path_route(
+            metadata.as_ref().and_then(|metadata| metadata.len()),
+            metadata.as_ref().and_then(|metadata| metadata.etag().cloned()),
+            capabilities.supports(FileSystemCapability::RangeRead),
+            capabilities.supports(FileSystemCapability::ConditionalRead),
+            max_bytes,
+        );
+        match route {
+            ProviderPathRoute::Range { length, version } => {
                 let input =
                     AsyncProviderInput::new_owned(file_system.clone(), path.clone(), length, version, max_bytes);
                 return runtime
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
-            if length > max_bytes as u64 {
-                return Err(MimeError::BufferLimitExceeded {
-                    requested: usize::try_from(length).unwrap_or(usize::MAX),
-                    limit: max_bytes,
-                });
+            ProviderPathRoute::TooLarge { requested } => {
+                return Err(MimeError::BufferLimitExceeded { requested, limit: max_bytes });
             }
+            ProviderPathRoute::ReadAll => {}
         }
         let read_result = admission
             .run_provider_operation(scope, file_system.read_all(path, ReadOptions::default(), max_bytes))
@@ -585,7 +570,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// policy selection are handled by the higher-level detector API.
     ///
     /// # Errors
-    /// Propagates Magika inference and media-classifier errors.
+    /// Returns Magika inference or worker errors. This low-level hook only
+    /// maps Magika candidates; media-stream refinement belongs to the higher-
+    /// level detector API.
     fn guess_from_content(&self, content: &[u8]) -> MimeResult<Vec<String>> {
         self.guess_from_magika_input(content)
     }
@@ -722,53 +709,48 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
-                ) => {}
+            Err(error) if is_unsupported_provider_error(&error) => {}
             Err(error) => return Err(error.into()),
         }
         let metadata = match file_system.stat(path) {
             Ok(metadata) => Some(metadata),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    FsErrorKind::UnsupportedOperation | FsErrorKind::UnsupportedCapability
-                ) =>
-            {
+            Err(error) if is_unsupported_provider_error(&error) => {
                 None
             }
             Err(error) => return Err(error.into()),
         };
         let capabilities = file_system.properties().capabilities();
-        if let Some(metadata) = metadata.as_ref()
-            && let Some(length) = metadata.len()
-        {
-            if capabilities.supports(FileSystemCapability::RangeRead) {
-                let version = capabilities
-                    .supports(FileSystemCapability::ConditionalRead)
-                    .then(|| metadata.etag().cloned())
-                    .flatten();
+        let route = select_provider_path_route(
+            metadata.as_ref().and_then(|metadata| metadata.len()),
+            metadata.as_ref().and_then(|metadata| metadata.etag().cloned()),
+            capabilities.supports(FileSystemCapability::RangeRead),
+            capabilities.supports(FileSystemCapability::ConditionalRead),
+            max_bytes,
+        );
+        match route {
+            ProviderPathRoute::Range { length, version } => {
                 let input = SyncProviderInput::new(file_system, path, length, version, max_bytes);
                 let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
                 let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
-            let requested = usize::try_from(length).unwrap_or(usize::MAX);
-            if length > max_bytes as u64 {
+            ProviderPathRoute::TooLarge { requested } => {
                 return Err(MimeError::BufferLimitExceeded {
                     requested,
                     limit: max_bytes,
                 });
             }
+            ProviderPathRoute::ReadAll => {}
         }
         let bytes = file_system.read_all(path, ReadOptions::default(), max_bytes)?;
         let candidates = self.guess_from_magika_input(bytes.as_slice())?;
         Ok((candidates, None))
     }
 
-    /// Detects MIME candidates from an asynchronous filesystem path.
+    /// Detects MIME candidates from an asynchronous filesystem path using this
+    /// detector's shared inference runtime. This legacy MIME hook has no
+    /// caller-provided operation scope; it waits for the submitted internal
+    /// operation's settlement before returning.
     ///
     /// # Parameters
     ///
@@ -778,8 +760,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Errors
     ///
-    /// Returns a MIME error when metadata, filesystem reads, or Magika
-    /// inference fails.
+    /// Returns a size-limit, provider, admission, Magika, or worker error.
     fn guess_from_async_provider_path<'a>(
         &'a self,
         file_system: &'a AsyncFileSystem,
@@ -820,25 +801,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 .map_err(|error| {
                     MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
                 })?;
-            let result = match operation.wait_outcome().await.map_err(|error| {
+            let outcome = operation.wait_outcome().await.map_err(|error| {
                 MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
-            })? {
-                OperationOutcome::Succeeded(result) => Ok(result),
-                OperationOutcome::Failed(error) => Err(error),
-                OperationOutcome::Stopped(_) => {
-                    Err(MimeError::detector_backend("magika", "provider inference stopped"))
-                }
-                OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
-                    "magika",
-                    format!("provider child failed: {summary:?}"),
-                )),
-                OperationOutcome::Panicked(_) => {
-                    Err(MimeError::detector_backend("magika", "provider operation panicked"))
-                }
-                OperationOutcome::ExecutionFailed(_) => {
-                    Err(MimeError::detector_backend("magika", "provider executor failed"))
-                }
-            }?;
+            })?;
+            let result = map_operation_outcome(outcome, PROVIDER_OUTCOME)?;
             Ok((result.into_iter().collect(), None))
         })
     }

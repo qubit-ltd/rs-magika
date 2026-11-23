@@ -29,13 +29,13 @@ use qubit_operation::GroupOptions;
 use qubit_operation::OperationGroup;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
-use qubit_operation::OperationOutcome;
 use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 use qubit_operation::ShutdownReport;
 use qubit_operation::ShutdownSnapshot;
 
 use super::bridge_sync_input::BridgeSyncInput;
+use crate::internal::{INFERENCE_OUTCOME, map_operation_outcome};
 use super::byte_budget::ByteBudget;
 use super::drive_event::DriveEvent;
 use super::inference_future::InferenceFuture;
@@ -489,19 +489,7 @@ impl ManagedInferenceRuntime {
             // this operation's resources have actually been released.
             let _settlement = operation.wait_settlement().await;
         }
-        match outcome {
-            OperationOutcome::Succeeded(result) => Ok(result),
-            OperationOutcome::Failed(error) => Err(error),
-            OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "inference stopped")),
-            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
-                "magika",
-                format!("inference child failed: {summary:?}"),
-            )),
-            OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "inference operation panicked")),
-            OperationOutcome::ExecutionFailed(_) => {
-                Err(MimeError::detector_backend("magika", "inference executor failed"))
-            }
-        }
+        map_operation_outcome(outcome, INFERENCE_OUTCOME)
     }
 
     /// Reserves operation and byte capacity before a provider performs I/O.
