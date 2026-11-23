@@ -94,12 +94,20 @@ mod tests {
     #[test]
     fn test_poisoned_budget_lock_is_recovered_for_acquire_and_release() {
         let budget = std::sync::Arc::new(ByteBudget::new(1));
+        let permit = budget.try_acquire(1).expect("reservation should fit before poisoning");
         let poisoned = std::sync::Arc::clone(&budget);
         let _ = std::thread::spawn(move || {
             let _guard = poisoned.used.lock().unwrap();
             panic!("poison budget lock for recovery test");
         })
         .join();
+        assert_eq!(1, budget.used(), "diagnostics should recover the reserved byte count");
+        drop(permit);
+        assert_eq!(
+            0,
+            budget.used(),
+            "released permits should remain visible after recovery"
+        );
         let permit = budget.try_acquire(1).expect("poisoned lock should be recovered");
         drop(permit);
         budget.release(0);

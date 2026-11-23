@@ -411,6 +411,57 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_stop_reason_recovers_a_poisoned_gate_lock() {
+        let gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
+        gate.lock().unwrap().cancelling = true;
+        let state = TaskState::new_registered(20, None, None, Some(Arc::downgrade(&gate)));
+        let poisoned = Arc::clone(&gate);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned.lock().unwrap();
+                panic!("poison admission gate for provider stop reason test");
+            })
+            .join()
+            .is_err()
+        );
+
+        assert_eq!(
+            "provider operation stopped after cancellation",
+            state.provider_stop_reason()
+        );
+        gate.lock().unwrap_or_else(|error| error.into_inner()).faulted = true;
+        assert_eq!(
+            "provider operation stopped after worker fault",
+            state.provider_stop_reason()
+        );
+    }
+
+    #[test]
+    fn test_mark_unconfirmed_provider_io_recovers_poisoned_state_lock() {
+        let state = Arc::new(TaskState::new(21, None));
+        let poisoned = Arc::clone(&state);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned.inner.lock().unwrap();
+                panic!("poison task state before unconfirmed provider I/O marker");
+            })
+            .join()
+            .is_err()
+        );
+
+        state.mark_unconfirmed_provider_io();
+        assert!(
+            state
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .unconfirmed_provider_io
+        );
+        state.mark_worker_done();
+        assert!(state.wait_worker_done_blocking(std::time::Duration::from_millis(1)));
+    }
+
+    #[test]
     fn test_worker_completion_recovers_a_poisoned_lifecycle_lock() {
         let state = Arc::new(TaskState::new(16, None));
         let poisoned = Arc::clone(&state);
