@@ -181,14 +181,21 @@ impl RequestAdmission {
                 Ok(Arc::clone(&self.state))
             }
             Err(error) => {
-                let rejected = match error {
-                    std::sync::mpsc::TrySendError::Full(job) | std::sync::mpsc::TrySendError::Disconnected(job) => job,
+                let (rejected, reason) = match error {
+                    std::sync::mpsc::TrySendError::Full(job) => {
+                        (job, "inference worker queue is full")
+                    }
+                    std::sync::mpsc::TrySendError::Disconnected(job) => {
+                        (job, "inference worker is disconnected")
+                    }
                 };
+                if let WorkerInput::Bridge(bridge, _, _) = &rejected.input {
+                    // No worker owns this bridge, so wake any provider driver
+                    // instead of waiting for a read that cannot be requested.
+                    bridge.close();
+                }
                 rejected.state.finish_business(
-                    Err(MimeError::detector_backend(
-                        "magika",
-                        "inference worker queue is full or closed",
-                    )),
+                    Err(MimeError::detector_backend("magika", reason)),
                     ChildOutcomeKind::Failed,
                 );
                 let state = Arc::clone(&rejected.state);

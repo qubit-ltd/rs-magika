@@ -26,6 +26,7 @@ use super::ManagedInferenceRuntime;
 use super::WorkerInput;
 use super::map_magika_error;
 use super::worker_loop::run_worker;
+use super::worker_loop::run_worker_with_before_first_recv;
 use super::worker_state::WorkerState;
 
 /// Owned byte classifier used by the worker thread.
@@ -80,7 +81,8 @@ impl ManagedInferenceRuntime {
         after_business: Box<dyn Fn() + Send + 'static>,
         before_worker_exit: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(1);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
+            mpsc::sync_channel(super::SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = std::thread::Builder::new()
@@ -111,7 +113,57 @@ impl ManagedInferenceRuntime {
             })
             .expect("test inference worker should start");
         let service_group = supervisor
-            .group(GroupOptions { capacity: 2 })
+            .group(GroupOptions {
+                capacity: super::SERVICE_CAPACITY,
+            })
+            .expect("operation group should construct");
+        Self {
+            sender: Mutex::new(Some(sender)),
+            worker: Mutex::new(WorkerState::new(worker)),
+            service_group,
+            active_requests: Arc::new(AtomicUsize::new(0)),
+            max_in_flight_bytes,
+            byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
+            tasks: Arc::new(Mutex::new(Vec::new())),
+            admission_gate,
+        }
+    }
+
+    /// Creates a worker paused immediately before its first queue receive.
+    #[cfg(test)]
+    pub(crate) fn with_engine_before_first_recv(
+        supervisor: OperationManager,
+        max_in_flight_bytes: usize,
+        engine: ManagedInferenceEngine,
+        before_first_recv: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Self {
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
+            mpsc::sync_channel(super::SERVICE_CAPACITY);
+        let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
+        let worker_admission_gate = Arc::clone(&admission_gate);
+        let worker = std::thread::Builder::new()
+            .name("magika-test-inference".to_owned())
+            .spawn(move || {
+                run_worker_with_before_first_recv(
+                    receiver,
+                    worker_admission_gate,
+                    move |input| match input {
+                        WorkerInput::Bytes(bytes) => engine(bytes.into_vec()),
+                        _ => Err(qubit_mime::MimeError::detector_backend(
+                            "magika",
+                            "unsupported test input",
+                        )),
+                    },
+                    before_first_recv,
+                    || {},
+                    || {},
+                );
+            })
+            .expect("test inference worker should start");
+        let service_group = supervisor
+            .group(GroupOptions {
+                capacity: super::SERVICE_CAPACITY,
+            })
             .expect("operation group should construct");
         Self {
             sender: Mutex::new(Some(sender)),
