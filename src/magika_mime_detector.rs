@@ -231,21 +231,10 @@ impl MagikaMimeDetector {
             .map_err(|error| {
                 MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
             })?;
-        match operation.wait_outcome().await.map_err(|error| {
+        let outcome = operation.wait_outcome().await.map_err(|error| {
             MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
-        })? {
-            OperationOutcome::Succeeded(result) => Ok(result),
-            OperationOutcome::Failed(error) => Err(error),
-            OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "provider inference stopped")),
-            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
-                "magika",
-                format!("provider child failed: {summary:?}"),
-            )),
-            OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "provider operation panicked")),
-            OperationOutcome::ExecutionFailed(_) => {
-                Err(MimeError::detector_backend("magika", "provider executor failed"))
-            }
-        }
+        })?;
+        map_provider_operation_outcome(outcome)
     }
 
     /// Runs the shared provider route after its request and byte capacity are
@@ -824,27 +813,39 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 .map_err(|error| {
                     MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
                 })?;
-            let result = match operation.wait_outcome().await.map_err(|error| {
+            let outcome = operation.wait_outcome().await.map_err(|error| {
                 MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
-            })? {
-                OperationOutcome::Succeeded(result) => Ok(result),
-                OperationOutcome::Failed(error) => Err(error),
-                OperationOutcome::Stopped(_) => {
-                    Err(MimeError::detector_backend("magika", "provider inference stopped"))
-                }
-                OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
-                    "magika",
-                    format!("provider child failed: {summary:?}"),
-                )),
-                OperationOutcome::Panicked(_) => {
-                    Err(MimeError::detector_backend("magika", "provider operation panicked"))
-                }
-                OperationOutcome::ExecutionFailed(_) => {
-                    Err(MimeError::detector_backend("magika", "provider executor failed"))
-                }
-            }?;
+            })?;
+            let result = map_provider_operation_outcome(outcome)?;
             Ok((result.into_iter().collect(), None))
         })
+    }
+}
+
+/// Maps the managed provider operation state to its MIME result.
+///
+/// # Type Parameters
+///
+/// * `T` - Value returned by a successful provider operation.
+///
+/// # Parameters
+///
+/// * `outcome` - Terminal operation state to map to a MIME result.
+///
+/// # Returns
+///
+/// The successful value, the operation error, or a mapped backend error.
+fn map_provider_operation_outcome<T>(outcome: OperationOutcome<T, MimeError>) -> MimeResult<T> {
+    match outcome {
+        OperationOutcome::Succeeded(result) => Ok(result),
+        OperationOutcome::Failed(error) => Err(error),
+        OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "provider inference stopped")),
+        OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
+            "magika",
+            format!("provider child failed: {summary:?}"),
+        )),
+        OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "provider operation panicked")),
+        OperationOutcome::ExecutionFailed(_) => Err(MimeError::detector_backend("magika", "provider executor failed")),
     }
 }
 
@@ -966,10 +967,85 @@ mod tests {
     use qubit_mime::MimeDetector;
     use qubit_mime::MimeDetectorBackend;
     use qubit_mime::MimeError;
+    use qubit_operation::ChildFailureSummary;
+    use qubit_operation::ChildOutcomeKind;
+    use qubit_operation::ChildOutcomeSummary;
+    use qubit_operation::DiagnosticSummary;
+    use qubit_operation::ExecutionFailure;
+    use qubit_operation::ExecutionPhase;
+    use qubit_operation::ManagerOptions;
+    use qubit_operation::OperationManager;
+    use qubit_operation::OperationOptions;
+    use qubit_operation::OperationOutcome;
+    use qubit_operation::PanicSummary;
+    use qubit_operation::StopReason;
+    use qubit_operation::StopReport;
     use tempfile::NamedTempFile;
 
     use super::MagikaMimeDetector;
     use super::content_type_to_mime;
+    use super::map_provider_operation_outcome;
+
+    #[test]
+    fn test_provider_operation_outcomes_preserve_success_and_classify_failures() {
+        let success = map_provider_operation_outcome(OperationOutcome::Succeeded("text/plain"));
+        assert_eq!("text/plain", success.unwrap());
+
+        let application_error = MimeError::detector_backend("magika", "provider read failed");
+        let failed = map_provider_operation_outcome::<&str>(OperationOutcome::Failed(application_error));
+        assert!(failed.unwrap_err().to_string().contains("provider read failed"));
+
+        let manager = OperationManager::new(ManagerOptions::default()).expect("manager should initialize");
+        let mut handle = manager
+            .as_sync()
+            .try_submit(OperationOptions::default(), |scope| Ok::<_, MimeError>(scope.id()))
+            .expect("operation should be admitted");
+        let operation_id = match handle.wait_outcome().expect("operation should finish") {
+            OperationOutcome::Succeeded(operation_id) => operation_id,
+            other => panic!("operation did not succeed: {other:?}"),
+        };
+        let child_failure = ChildFailureSummary {
+            operation_id,
+            outcome: ChildOutcomeSummary {
+                operation_id,
+                kind: ChildOutcomeKind::Failed,
+                summary: DiagnosticSummary::new("child failed"),
+            },
+        };
+        let child_failed = map_provider_operation_outcome::<&str>(OperationOutcome::ChildFailed(child_failure));
+        assert!(child_failed.unwrap_err().to_string().contains("provider child failed"));
+
+        let stopped = map_provider_operation_outcome::<&str>(OperationOutcome::Stopped(StopReport {
+            reason: StopReason::Timeout,
+            accepted_at: None,
+        }));
+        assert!(stopped.unwrap_err().to_string().contains("provider inference stopped"));
+
+        let panicked = map_provider_operation_outcome::<&str>(OperationOutcome::Panicked(PanicSummary {
+            operation_id,
+            phase: ExecutionPhase::Running,
+            summary: DiagnosticSummary::new("provider panicked"),
+        }));
+        assert!(
+            panicked
+                .unwrap_err()
+                .to_string()
+                .contains("provider operation panicked")
+        );
+
+        let execution_failed =
+            map_provider_operation_outcome::<&str>(OperationOutcome::ExecutionFailed(ExecutionFailure {
+                operation_id,
+                summary: DiagnosticSummary::new("executor unavailable"),
+                source: None,
+            }));
+        assert!(
+            execution_failed
+                .unwrap_err()
+                .to_string()
+                .contains("provider executor failed")
+        );
+    }
 
     struct CallerThreadInput {
         caller_thread: std::thread::ThreadId,
@@ -998,6 +1074,9 @@ mod tests {
     #[test]
     fn test_constructor_and_builder_detect_python_content() {
         let detector = MagikaMimeDetector::new().expect("detector should initialize");
+        let snapshot = detector.runtime_snapshot();
+        assert_eq!(detector.max_buffer_size(), snapshot.max_in_flight_bytes);
+        assert_eq!(0, snapshot.reserved_bytes);
         assert_eq!(
             Some("application/pdf".to_owned()),
             detector.guess_from_filename("document.pdf").first().cloned()
