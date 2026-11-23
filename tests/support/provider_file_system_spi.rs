@@ -78,6 +78,7 @@ pub(crate) struct AsyncProviderGate {
     point: AsyncProviderGatePoint,
     entered: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
+    wait_dropped: std::sync::atomic::AtomicBool,
     waker: Mutex<Option<Waker>>,
     changed: Condvar,
 }
@@ -88,11 +89,13 @@ impl AsyncProviderGate {
             point,
             entered: std::sync::atomic::AtomicBool::new(false),
             released: std::sync::atomic::AtomicBool::new(false),
+            wait_dropped: std::sync::atomic::AtomicBool::new(false),
             waker: Mutex::new(None),
             changed: Condvar::new(),
         })
     }
     async fn wait(self: &Arc<Self>) {
+        let _drop_observed = AsyncProviderGateDropObserver(Arc::clone(self));
         std::future::poll_fn(|cx| self.poll_wait(cx)).await
     }
     fn poll_wait(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
@@ -130,6 +133,24 @@ impl AsyncProviderGate {
             );
         }
     }
+    pub(crate) fn wait_until_wait_dropped(&self, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut waker = self.waker.lock().unwrap();
+        while !self.wait_dropped.load(Ordering::Acquire) {
+            let now = std::time::Instant::now();
+            assert!(now < deadline, "provider operation {:?} was not dropped", self.point);
+            let (next, result) = self
+                .changed
+                .wait_timeout(waker, deadline.saturating_duration_since(now))
+                .unwrap();
+            waker = next;
+            assert!(
+                !result.timed_out() || self.wait_dropped.load(Ordering::Acquire),
+                "provider operation {:?} was not dropped",
+                self.point
+            );
+        }
+    }
     pub(crate) fn release(&self) {
         self.released.store(true, Ordering::Release);
         if let Some(waker) = self.waker.lock().unwrap().take() {
@@ -139,6 +160,15 @@ impl AsyncProviderGate {
 
     pub(crate) fn is_entered(&self) -> bool {
         self.entered.load(Ordering::Acquire)
+    }
+}
+
+struct AsyncProviderGateDropObserver(Arc<AsyncProviderGate>);
+
+impl Drop for AsyncProviderGateDropObserver {
+    fn drop(&mut self) {
+        self.0.wait_dropped.store(true, Ordering::Release);
+        self.0.changed.notify_all();
     }
 }
 

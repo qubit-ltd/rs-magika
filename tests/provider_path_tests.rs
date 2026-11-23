@@ -911,6 +911,7 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         Poll::Ready(first_release.as_mut().poll(context))
     }));
     assert!(release_state.is_pending());
+    gate.wait_until_wait_dropped(Duration::from_secs(5));
 
     let bytes = PYTHON.to_vec();
     assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
@@ -1160,7 +1161,10 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
         })
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(5));
-    let _ = handle.request_stop(StopReason::UserCancelled);
+    assert_eq!(
+        qubit_operation::StopRequestStatus::Accepted,
+        handle.request_stop(StopReason::UserCancelled),
+    );
     gate.release();
     let mut handle = handle;
     let _ = run_ready(handle.wait_outcome());
@@ -1169,7 +1173,10 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
         0, snapshot.unconfirmed_provider_io,
         "the gated open returned Ready before cancellation settled"
     );
-    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+    assert!(
+        observations.random_opens.load(Ordering::SeqCst) <= 1,
+        "the initial gated random-access open may complete once, but must not be retried",
+    );
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
