@@ -41,7 +41,7 @@ qubit-fs = { version = "^0.4", path = "../rs-fs", default-features = false, feat
 
 qubit-spi = { version = "^0.14" }
 qubit-mime = { version = "^0.22", path = "../rs-mime" }
-qubit-operation = "^0.3"
+qubit-operation = { version = "^0.3.2", path = "../rs-operation" }
 
 [dependencies.ort]
 version = ">=2.0.0-rc.12,<2.1"
@@ -52,6 +52,9 @@ optional = true
 qubit-config = "^0.15"
 qubit-fs-local = { version = "^0.11", path = "../rs-fs-local" }
 tempfile = "^3.27"
+
+[patch.crates-io]
+qubit-operation = { path = "../rs-operation" }
 
 
 [[test]]
