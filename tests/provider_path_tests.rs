@@ -1640,6 +1640,36 @@ fn test_provider_path_sync_uses_one_random_access_session_without_stat() {
 }
 
 #[test]
+fn test_provider_path_rejects_zero_sized_session_range_limit() {
+    let sync_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_max_read_range_bytes(0);
+    let sync_error = detector()
+        .detect_path(
+            &sync_provider.file_system(),
+            &path("/script.py"),
+            8192,
+            MimeDetectionPolicy::VerifyContent,
+        )
+        .expect_err("sync session must reject a provider that permits no range bytes");
+    assert!(matches!(sync_error, MimeError::Io(_)));
+    assert_eq!(0, sync_provider.observations().random_reads.load(Ordering::SeqCst));
+
+    let async_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_max_read_range_bytes(0);
+    let async_error = run_ready(detector().detect_async_path(
+        &async_provider.async_file_system(),
+        &path("/script.py"),
+        8192,
+        MimeDetectionPolicy::VerifyContent,
+    ))
+    .expect_err("async session must reject a provider that permits no range bytes");
+    assert!(matches!(async_error, MimeError::Io(_)));
+    assert_eq!(0, async_provider.observations().random_reads.load(Ordering::SeqCst));
+}
+
+#[test]
 fn test_provider_path_async_uses_one_random_access_session_without_stat() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();

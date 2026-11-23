@@ -223,6 +223,23 @@ fn test_reader_window_content_backend_restores_after_failure() {
     assert_eq!(0, reader.position());
 }
 
+#[test]
+fn test_remaining_reader_rejects_start_past_end_and_restores_position() {
+    let detector = detector();
+    let mut reader = Cursor::new(b"script".to_vec());
+    reader.set_position(100);
+
+    let error = MimeContentBackend::detect_reader(detector, &mut reader)
+        .expect_err("remaining window must reject a start beyond the reader end");
+
+    assert!(matches!(error, MimeError::Io(_)));
+    assert_eq!(
+        100,
+        reader.position(),
+        "failed detection must restore the original position"
+    );
+}
+
 /// The complete-content contract survives an `Arc<dyn MimeDetector>` wrapper.
 #[test]
 fn test_magika_complete_content_contract_survives_shared_detector_wrapper() {

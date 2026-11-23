@@ -45,6 +45,17 @@ fn test_bounded_input_rejects_base_offset_overflow() {
 }
 
 #[test]
+fn test_bounded_input_rejects_relative_offset_overflow_at_base() {
+    let mut reader = Cursor::new(vec![0_u8; 1]);
+    let mut input = ReadSeekInput::new(&mut reader, u64::MAX, 2);
+    let mut buffer = [0_u8; 1];
+    assert!(
+        SyncInput::read_at(&mut input, &mut buffer, 1).is_err(),
+        "adding a valid relative offset to the base must reject overflow"
+    );
+}
+
+#[test]
 fn test_bounded_input_rejects_relative_offset_overflow() {
     let mut reader = Cursor::new(vec![0_u8; 1]);
     let mut input = ReadSeekInput::new(&mut reader, 0, u64::MAX);
