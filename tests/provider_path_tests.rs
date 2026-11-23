@@ -2012,6 +2012,207 @@ fn test_provider_path_async_short_read_is_an_io_error() {
     assert!(matches!(error, MimeError::Io(_)));
 }
 
+/// A runtime-only Cancel must wake either async Provider entrance while the
+/// Provider future is Pending. Always release the fixture gate before joining
+/// the shutdown thread so a regression cannot strand the test process.
+fn assert_runtime_cancel_returns_while_provider_is_pending(
+    managed: bool,
+    point: AsyncProviderGatePoint,
+    session: bool,
+    range: bool,
+) -> Option<String> {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    let gate = AsyncProviderGate::new(point);
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
+    let mut provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_async_gate(Arc::clone(&gate));
+    if session {
+        provider = provider.with_random_access();
+    } else if range {
+        provider = provider.with_range();
+    } else {
+        provider = provider.without_range();
+    }
+    let file_system = provider.async_file_system();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let request_detector = Arc::clone(&detector);
+    let mut operation = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            if managed {
+                request_detector
+                    .detect_async_provider_path_managed(
+                        &scope,
+                        &file_system,
+                        &path("/runtime-cancel.py"),
+                        4096,
+                    )
+                    .await
+                    .map(|_| ())
+            } else {
+                MimeDetectorBackend::guess_from_async_provider_path(
+                    &*request_detector,
+                    &file_system,
+                    &path("/runtime-cancel.py"),
+                    4096,
+                )
+                .await
+                .map(|_| ())
+            }
+        })
+        .unwrap();
+    let gate_deadline = Instant::now() + Duration::from_secs(5);
+    while !gate.is_entered() && Instant::now() < gate_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let gate_was_entered = gate.is_entered();
+    let observer = operation.observer();
+    let shutdown_detector = Arc::clone(&detector);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let report = shutdown_detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+        finished_tx.send((Instant::now(), report)).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let before_release = finished_rx.recv_timeout(Duration::from_millis(250));
+    let returned_before_release = before_release.is_ok();
+    let mut settlement_before = Box::pin(observer.wait_settlement());
+    let settlement_before_release = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(settlement_before.as_mut().poll(context))
+    }));
+    drop(settlement_before);
+    gate.release();
+    let completed = match before_release {
+        Ok(completed) => Ok(completed),
+        Err(_) => finished_rx.recv_timeout(Duration::from_secs(3)),
+    };
+    shutdown.join().unwrap();
+    let (finished_at, report) = completed.expect("runtime Cancel should finish after the gate is released");
+    let mut failures = Vec::new();
+    if !gate_was_entered || !returned_before_release || !report.worker_stopped {
+        failures.push(format!(
+            "managed={managed}, point={point:?}, session={session}, range={range}, gate_entered={gate_was_entered}, returned_before_release={returned_before_release}, report={report:?}, completed_at={finished_at:?}"
+        ));
+    }
+    let _ = run_ready(operation.wait_outcome());
+    let mut settlement_after = Box::pin(observer.wait_settlement());
+    let settlement_poll = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(settlement_after.as_mut().poll(context))
+    }));
+    if managed
+        && gate_was_entered
+        && matches!(settlement_before_release, Poll::Ready(report) if report.all_released())
+    {
+        failures.push(format!(
+            "managed scope reported Released while Provider future remained Pending; point={point:?}, session={session}, range={range}"
+        ));
+    }
+    let _settlement_after_release = settlement_poll;
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    (!failures.is_empty()).then(|| failures.join("; "))
+}
+
+#[test]
+fn test_runtime_only_cancel_wakes_provider_pending_at_each_entry_boundary() {
+    let mut failures = Vec::new();
+    for managed in [false, true] {
+        for (point, session, range) in [
+            (AsyncProviderGatePoint::Stat, false, false),
+            (AsyncProviderGatePoint::Open, false, false),
+            (AsyncProviderGatePoint::Read, false, false),
+            (AsyncProviderGatePoint::Read, false, true),
+            (AsyncProviderGatePoint::Open, true, false),
+            (AsyncProviderGatePoint::Read, true, false),
+        ] {
+            if let Some(failure) =
+                assert_runtime_cancel_returns_while_provider_is_pending(managed, point, session, range)
+            {
+                failures.push(failure);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "runtime-only Cancel failures: {failures:#?}");
+}
+
+#[test]
+fn test_managed_provider_routes_fit_single_resource_scope_quota() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let request_detector = Arc::clone(&detector);
+    let mut operation = service
+        .as_async()
+        .try_submit(
+            OperationOptions {
+                limits: ScopeLimits {
+                    resources: 1,
+                    ..ScopeLimits::default()
+                },
+                ..OperationOptions::default()
+            },
+            move |scope| async move {
+                for provider in [
+                    ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access(),
+                    ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range(),
+                    ProviderFileSystemSpi::new(PYTHON.to_vec()).without_range(),
+                ] {
+                    let mime = request_detector
+                        .detect_async_provider_path_managed(
+                            &scope,
+                            &provider.async_file_system(),
+                            &path("/quota.py"),
+                            4096,
+                        )
+                        .await?;
+                    assert_eq!(Some("text/x-python".to_owned()), mime);
+                }
+                Ok::<(), MimeError>(())
+            },
+        )
+        .unwrap();
+    let outcome = run_ready(operation.wait_outcome()).unwrap();
+    assert!(run_ready(operation.wait_settlement()).all_released());
+    assert_eq!(
+        0,
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+            .admission
+            .snapshot
+            .service_resources
+    );
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    assert!(
+        matches!(outcome, qubit_operation::OperationOutcome::Succeeded(())),
+        "single-resource managed Provider route failed: {outcome:?}"
+    );
+}
+
 #[test]
 fn test_provider_path_sync_read_failure_is_an_io_error() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().fail_reads();
