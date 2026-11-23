@@ -2012,6 +2012,385 @@ fn test_provider_path_async_short_read_is_an_io_error() {
     assert!(matches!(error, MimeError::Io(_)));
 }
 
+/// A runtime-only Cancel must wake either async Provider entrance while the
+/// Provider future is Pending. Always release the fixture gate before joining
+/// the shutdown thread so a regression cannot strand the test process.
+fn assert_runtime_cancel_returns_while_provider_is_pending(
+    managed: bool,
+    point: AsyncProviderGatePoint,
+    session: bool,
+    range: bool,
+) -> Option<String> {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    let gate = AsyncProviderGate::new(point);
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
+    let mut provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_async_gate(Arc::clone(&gate));
+    if session {
+        provider = provider.with_random_access();
+    } else if range {
+        provider = provider.with_range();
+    } else {
+        provider = provider.without_range();
+    }
+    let file_system = provider.async_file_system();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let request_detector = Arc::clone(&detector);
+    let mut operation = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            if managed {
+                request_detector
+                    .detect_async_provider_path_managed(
+                        &scope,
+                        &file_system,
+                        &path("/runtime-cancel.py"),
+                        4096,
+                    )
+                    .await
+                    .map(|_| ())
+            } else {
+                MimeDetectorBackend::guess_from_async_provider_path(
+                    &*request_detector,
+                    &file_system,
+                    &path("/runtime-cancel.py"),
+                    4096,
+                )
+                .await
+                .map(|_| ())
+            }
+        })
+        .unwrap();
+    let gate_deadline = Instant::now() + Duration::from_secs(5);
+    while !gate.is_entered() && Instant::now() < gate_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let gate_was_entered = gate.is_entered();
+    let observer = operation.observer();
+    let shutdown_detector = Arc::clone(&detector);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let report = shutdown_detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+        finished_tx.send((Instant::now(), report)).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let before_release = finished_rx.recv_timeout(Duration::from_millis(250));
+    let returned_before_release = before_release.is_ok();
+    let mut settlement_before = Box::pin(observer.wait_settlement());
+    let settlement_before_release = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(settlement_before.as_mut().poll(context))
+    }));
+    drop(settlement_before);
+    gate.release();
+    let completed = match before_release {
+        Ok(completed) => Ok(completed),
+        Err(_) => finished_rx.recv_timeout(Duration::from_secs(3)),
+    };
+    shutdown.join().unwrap();
+    let (finished_at, report) = completed.expect("runtime Cancel should finish after the gate is released");
+    let mut failures = Vec::new();
+    if !gate_was_entered || !returned_before_release || !report.worker_stopped {
+        failures.push(format!(
+            "managed={managed}, point={point:?}, session={session}, range={range}, gate_entered={gate_was_entered}, returned_before_release={returned_before_release}, report={report:?}, completed_at={finished_at:?}"
+        ));
+    }
+    let _ = run_ready(operation.wait_outcome());
+    let mut settlement_after = Box::pin(observer.wait_settlement());
+    let settlement_poll = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(settlement_after.as_mut().poll(context))
+    }));
+    if managed
+        && gate_was_entered
+        && matches!(settlement_before_release, Poll::Ready(report) if report.all_released())
+    {
+        failures.push(format!(
+            "managed scope reported Released while Provider future remained Pending; point={point:?}, session={session}, range={range}"
+        ));
+    }
+    let _settlement_after_release = settlement_poll;
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    (!failures.is_empty()).then(|| failures.join("; "))
+}
+
+#[test]
+fn test_runtime_only_cancel_wakes_provider_pending_at_each_entry_boundary() {
+    let mut failures = Vec::new();
+    for managed in [false, true] {
+        for (point, session, range) in [
+            (AsyncProviderGatePoint::Stat, false, false),
+            (AsyncProviderGatePoint::Open, false, false),
+            (AsyncProviderGatePoint::Read, false, false),
+            (AsyncProviderGatePoint::Read, false, true),
+            (AsyncProviderGatePoint::Open, true, false),
+            (AsyncProviderGatePoint::Read, true, false),
+        ] {
+            if let Some(failure) =
+                assert_runtime_cancel_returns_while_provider_is_pending(managed, point, session, range)
+            {
+                failures.push(failure);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "runtime-only Cancel failures: {failures:#?}");
+}
+
+#[test]
+fn test_managed_provider_routes_fit_single_resource_scope_quota() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let mut failures = Vec::new();
+    for provider in [
+        ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec()).without_range(),
+    ] {
+        let request_detector = Arc::clone(&detector);
+        let mut operation = service
+            .as_async()
+            .try_submit(
+                OperationOptions {
+                    limits: ScopeLimits {
+                        resources: 1,
+                        ..ScopeLimits::default()
+                    },
+                    ..OperationOptions::default()
+                },
+                move |scope| async move {
+                    let mime = request_detector
+                        .detect_async_provider_path_managed(
+                            &scope,
+                            &provider.async_file_system(),
+                            &path("/quota.py"),
+                            4096,
+                        )
+                        .await?;
+                    assert_eq!(Some("text/x-python".to_owned()), mime);
+                    Ok::<(), MimeError>(())
+                },
+            )
+            .unwrap();
+        let outcome = run_ready(operation.wait_outcome()).unwrap();
+        let settlement = run_ready(operation.wait_settlement());
+        if !matches!(outcome, qubit_operation::OperationOutcome::Succeeded(())) {
+            failures.push(format!("single-resource provider route failed: {outcome:?}"));
+        }
+        if !settlement.all_released() {
+            failures.push("single-resource route did not settle all resources".to_owned());
+        }
+    }
+    let shutdown = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    if shutdown.admission.snapshot.service_resources != 0 {
+        failures.push(format!("runtime still owns service permits at shutdown: {shutdown:?}"));
+    }
+    assert!(failures.is_empty(), "single-resource provider quota failures: {failures:#?}");
+}
+
+#[test]
+fn test_managed_provider_returns_runtime_permits_while_scope_remains_open() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let request_detector = Arc::clone(&detector);
+    let mut operation = service
+        .as_async()
+        .try_submit(
+            OperationOptions {
+                limits: ScopeLimits {
+                    resources: 8,
+                    ..ScopeLimits::default()
+                },
+                ..OperationOptions::default()
+            },
+            move |scope| async move {
+                for provider in [
+                    ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access(),
+                    ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range(),
+                    ProviderFileSystemSpi::new(PYTHON.to_vec()).without_range(),
+                    ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access(),
+                ] {
+                    let mime = request_detector
+                        .detect_async_provider_path_managed(
+                            &scope,
+                            &provider.async_file_system(),
+                            &path("/long-lived-scope.py"),
+                            4096,
+                        )
+                        .await?;
+                    assert_eq!(Some("text/x-python".to_owned()), mime);
+                }
+                Ok::<(), MimeError>(())
+            },
+        )
+        .unwrap();
+    let outcome = run_ready(operation.wait_outcome()).unwrap();
+    let settled = run_ready(operation.wait_settlement());
+    let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    assert!(
+        matches!(outcome, qubit_operation::OperationOutcome::Succeeded(())),
+        "sequential routes in a long-lived scope should not exhaust two runtime permits: {outcome:?}"
+    );
+    assert!(settled.all_released());
+    assert_eq!(0, report.admission.snapshot.service_resources);
+}
+
+#[test]
+fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    drop(runtime);
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let request_detector = Arc::clone(&detector);
+    let mut operation = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            request_detector
+                .detect_async_provider_path_managed(
+                    &scope,
+                    &provider.async_file_system(),
+                    &path("/unconfirmed.py"),
+                    4096,
+                )
+                .await
+        })
+        .unwrap();
+    let gate_deadline = Instant::now() + Duration::from_secs(5);
+    while !gate.is_entered() && Instant::now() < gate_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let gate_was_entered = gate.is_entered();
+    let observer = operation.observer();
+    let mut before_bridge = Box::pin(observer.wait_settlement());
+    let before_bridge_state = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(before_bridge.as_mut().poll(context))
+    }));
+    drop(before_bridge);
+    let observer_was_pending_before_bridge = matches!(before_bridge_state, Poll::Pending);
+
+    let shutdown_detector = Arc::clone(&detector);
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    let shutdown_thread = std::thread::spawn(move || {
+        let report = shutdown_detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+        let _ = shutdown_tx.send(report);
+    });
+    let shutdown_before_gate_release = shutdown_rx.recv_timeout(Duration::from_millis(250)).ok();
+    let bridge_outcome_before_gate_release = run_until(operation.wait_outcome(), Duration::from_millis(250));
+    let shutdown_returned_before_gate_release = shutdown_before_gate_release.is_some();
+    let bridge_returned_before_gate_release = bridge_outcome_before_gate_release.is_ok();
+    let cancelled_bridge_exited_while_pending =
+        shutdown_returned_before_gate_release && bridge_returned_before_gate_release;
+    if !cancelled_bridge_exited_while_pending {
+        gate.release();
+    }
+    let shutdown_report = match shutdown_before_gate_release {
+        Some(report) => Some(report),
+        None => shutdown_rx.recv_timeout(Duration::from_secs(3)).ok(),
+    };
+    let operation_outcome = match bridge_outcome_before_gate_release {
+        Ok(outcome) => Ok(outcome),
+        Err(()) => run_until(operation.wait_outcome(), Duration::from_secs(3)),
+    };
+    shutdown_thread.join().unwrap();
+    drop(detector);
+    let settlement_after_last_runtime_drop = if cancelled_bridge_exited_while_pending {
+        run_until(observer.wait_settlement(), Duration::from_secs(2))
+    } else {
+        Err(())
+    };
+    gate.release();
+    let settlement_after_gate_release = run_until(observer.wait_settlement(), Duration::from_secs(2));
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+
+    let mut failures = Vec::new();
+    if !gate_was_entered {
+        failures.push("Provider read did not reach Pending before runtime Cancel".to_owned());
+    }
+    if !observer_was_pending_before_bridge {
+        failures.push("pre-bridge observer was Ready while Provider I/O was Pending".to_owned());
+    }
+    if !cancelled_bridge_exited_while_pending {
+        failures.push(format!(
+            "runtime-only Cancel did not finish before gate release; shutdown_returned={}, bridge_returned={}",
+            shutdown_returned_before_gate_release,
+            bridge_returned_before_gate_release
+        ));
+    }
+    if !shutdown_report.as_ref().is_some_and(|report| report.worker_stopped) {
+        failures.push(format!("runtime worker did not stop before gate release: {shutdown_report:?}"));
+    }
+    if operation_outcome.is_err() {
+        failures.push("bridge operation did not finish after gate cleanup".to_owned());
+    }
+    match settlement_after_last_runtime_drop {
+        Ok(report) if report.all_released() => {
+            failures.push("post-drop settlement report incorrectly had all_released=true".to_owned());
+        }
+        Ok(_) => {}
+        Err(()) => failures.push(format!(
+            "post-drop observer timed out Pending; after gate release report state was {:?}",
+            settlement_after_gate_release.as_ref().map(|report| report.all_released())
+        )),
+    }
+    assert!(failures.is_empty(), "last-runtime release evidence failures: {failures:#?}");
+}
+
 #[test]
 fn test_provider_path_sync_read_failure_is_an_io_error() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().fail_reads();
