@@ -385,6 +385,7 @@ fn wake_all(wakers: Vec<Waker>) {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::task::Wake;
@@ -393,6 +394,13 @@ mod tests {
     use qubit_operation::ChildOutcomeKind;
 
     use super::TaskState;
+
+    fn poison_mutex<T>(mutex: &Mutex<T>) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("poison mutex for recovery assertion");
+        }));
+    }
 
     struct WakeCounter(AtomicUsize);
 
@@ -499,6 +507,85 @@ mod tests {
         drop(expired);
         let state = TaskState::new_registered(11, None, None, Some(expired_weak));
         assert!(!state.try_start_provider_operation());
+    }
+
+    #[test]
+    fn test_unconfirmed_io_stays_visible_after_local_access_completes() {
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(TaskState::new_registered(
+            3,
+            None,
+            Some(Arc::downgrade(&tasks)),
+            None,
+        ));
+        tasks.lock().unwrap().push(Arc::clone(&state));
+
+        assert_eq!(
+            state.provider_stop_reason(),
+            "provider operation stopped before start"
+        );
+
+        poison_mutex(&state.inner);
+        poison_mutex(&state.owner);
+        poison_mutex(&state.scope_resource);
+        poison_mutex(&state.bridge);
+        poison_mutex(&tasks);
+
+        assert!(!state.access_complete());
+        assert!(state.request_resource_owner().is_none());
+
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(state.poll_stop_requested(&mut context).is_pending());
+        state.mark_unconfirmed_provider_io();
+        assert!(state
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .unconfirmed_provider_io);
+
+        state.mark_access_complete();
+        assert!(state.access_complete());
+        assert!(state
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .unconfirmed_provider_io);
+
+        state.request_stop();
+        state.mark_released();
+        assert!(tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty());
+    }
+
+    #[test]
+    fn test_provider_stop_reason_reports_cancellation_and_worker_fault() {
+        let gate = Arc::new(std::sync::Mutex::new(super::AdmissionGate::new()));
+        let state = TaskState::new_registered(4, None, None, Some(Arc::downgrade(&gate)));
+
+        gate.lock().unwrap().cancelling = true;
+        assert_eq!(
+            state.provider_stop_reason(),
+            "provider operation stopped after cancellation"
+        );
+
+        {
+            let mut gate = gate.lock().unwrap();
+            gate.cancelling = false;
+            gate.faulted = true;
+        }
+        assert_eq!(
+            state.provider_stop_reason(),
+            "provider operation stopped after worker fault"
+        );
+
+        poison_mutex(&gate);
+        assert_eq!(
+            state.provider_stop_reason(),
+            "provider operation stopped after worker fault"
+        );
     }
 
     #[test]
