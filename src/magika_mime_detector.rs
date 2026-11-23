@@ -279,7 +279,7 @@ impl MagikaMimeDetector {
         max_bytes: usize,
     ) -> MimeResult<Option<String>> {
         admission.retain_in_scope(scope)?;
-        admission.begin_provider_operation()?;
+        admission.begin_provider_operation_in_scope(scope)?;
         let open_result = file_system
             .open_random_access_reader(path, ReadOptions::default())
             .await;
@@ -305,7 +305,7 @@ impl MagikaMimeDetector {
             Err(error) => return Err(error.into()),
         }
 
-        admission.begin_provider_operation()?;
+        admission.begin_provider_operation_in_scope(scope)?;
         let stat_result = file_system.stat(path).await;
         admission.provider_operation_completed();
         let metadata = match stat_result {
@@ -342,7 +342,7 @@ impl MagikaMimeDetector {
                 });
             }
         }
-        admission.begin_provider_operation()?;
+        admission.begin_provider_operation_in_scope(scope)?;
         let read_result = file_system.read_all(path, ReadOptions::default(), max_bytes).await;
         admission.provider_operation_completed();
         let bytes = read_result?;

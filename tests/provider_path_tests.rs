@@ -1154,13 +1154,14 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Open);
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation)
         .with_async_gate(Arc::clone(&gate));
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
-    let handle = service
+    let mut handle = service
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
@@ -1170,15 +1171,25 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(5));
     let _ = handle.request_stop(StopReason::UserCancelled);
+    let outcome = run_ready(handle.wait_outcome());
+    assert!(matches!(outcome, Ok(qubit_operation::OperationOutcome::Stopped(_))));
+    let observer = handle.observer();
+    let mut settlement = Box::pin(observer.wait_settlement());
+    assert!(
+        run_ready(std::future::poll_fn(|context| Poll::Ready(
+            settlement.as_mut().poll(context)
+        )))
+        .is_pending(),
+        "settlement should remain pending while the provider open is in flight"
+    );
     gate.release();
-    let mut handle = handle;
-    let _ = run_ready(handle.wait_outcome());
+    assert!(run_ready(settlement).all_released());
     let snapshot = detector.runtime_snapshot();
     assert_eq!(
         0, snapshot.unconfirmed_provider_io,
         "the gated open returned Ready before cancellation settled"
     );
-    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(1, observations.random_opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));

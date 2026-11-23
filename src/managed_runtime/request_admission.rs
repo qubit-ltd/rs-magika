@@ -85,6 +85,22 @@ impl RequestAdmission {
         Ok(())
     }
 
+    /// Starts provider work only while its owning operation scope is active.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Operation scope that owns this provider request.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when provider I/O may begin; otherwise returns a backend error.
+    pub(crate) fn begin_provider_operation_in_scope(&mut self, scope: &OperationScope) -> MimeResult<()> {
+        if scope.context().stop_reason().is_some() {
+            self.state.request_stop();
+        }
+        self.begin_provider_operation()
+    }
+
     /// Records that the provider operation completed normally.
     pub(crate) fn provider_operation_completed(&mut self) {
         self.provider_pending = false;
