@@ -2321,6 +2321,7 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         Poll::Ready(before_bridge.as_mut().poll(context))
     }));
     drop(before_bridge);
+    let observer_was_pending_before_bridge = matches!(before_bridge_state, Poll::Pending);
 
     let shutdown_detector = Arc::clone(&detector);
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
@@ -2330,8 +2331,10 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
     });
     let shutdown_before_gate_release = shutdown_rx.recv_timeout(Duration::from_millis(250)).ok();
     let bridge_outcome_before_gate_release = run_until(operation.wait_outcome(), Duration::from_millis(250));
+    let shutdown_returned_before_gate_release = shutdown_before_gate_release.is_some();
+    let bridge_returned_before_gate_release = bridge_outcome_before_gate_release.is_ok();
     let cancelled_bridge_exited_while_pending =
-        shutdown_before_gate_release.is_some() && bridge_outcome_before_gate_release.is_ok();
+        shutdown_returned_before_gate_release && bridge_returned_before_gate_release;
     if !cancelled_bridge_exited_while_pending {
         gate.release();
     }
@@ -2355,30 +2358,37 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
     let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
     let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
 
-    assert!(gate_was_entered, "Provider read must be Pending before runtime Cancel");
-    assert!(
-        matches!(before_bridge_state, Poll::Pending),
-        "scope observer must not certify release before bridge cancellation"
-    );
-    assert!(
-        cancelled_bridge_exited_while_pending,
-        "runtime-only Cancel must return while Provider I/O is still Pending"
-    );
-    assert!(
-        shutdown_report.is_some_and(|report| report.worker_stopped),
-        "runtime worker should stop before the Provider gate is released"
-    );
-    assert!(operation_outcome.is_ok(), "bridge operation must finish after gate cleanup");
-    match settlement_after_last_runtime_drop {
-        Ok(report) => assert!(
-            !report.all_released(),
-            "a real post-drop settlement report must retain the unconfirmed Provider I/O"
-        ),
-        Err(()) => panic!(
-            "post-drop scope observer timed out Pending; after cleanup it was {:?}",
-            settlement_after_gate_release.as_ref().map(|report| report.all_released())
-        ),
+    let mut failures = Vec::new();
+    if !gate_was_entered {
+        failures.push("Provider read did not reach Pending before runtime Cancel".to_owned());
     }
+    if !observer_was_pending_before_bridge {
+        failures.push("pre-bridge observer was Ready while Provider I/O was Pending".to_owned());
+    }
+    if !cancelled_bridge_exited_while_pending {
+        failures.push(format!(
+            "runtime-only Cancel did not finish before gate release; shutdown_returned={}, bridge_returned={}",
+            shutdown_returned_before_gate_release,
+            bridge_returned_before_gate_release
+        ));
+    }
+    if !shutdown_report.as_ref().is_some_and(|report| report.worker_stopped) {
+        failures.push(format!("runtime worker did not stop before gate release: {shutdown_report:?}"));
+    }
+    if operation_outcome.is_err() {
+        failures.push("bridge operation did not finish after gate cleanup".to_owned());
+    }
+    match settlement_after_last_runtime_drop {
+        Ok(report) if report.all_released() => {
+            failures.push("post-drop settlement report incorrectly had all_released=true".to_owned());
+        }
+        Ok(_) => {}
+        Err(()) => failures.push(format!(
+            "post-drop observer timed out Pending; after gate release report state was {:?}",
+            settlement_after_gate_release.as_ref().map(|report| report.all_released())
+        )),
+    }
+    assert!(failures.is_empty(), "last-runtime release evidence failures: {failures:#?}");
 }
 
 #[test]
