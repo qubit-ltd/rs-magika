@@ -38,6 +38,9 @@ use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorAdapter;
 use qubit_mime::MimeDetectorBackend;
 use qubit_mime::MimeError;
+use qubit_operation::ManagerOptions;
+use qubit_operation::OperationManager;
+use qubit_operation::ShutdownMode;
 use tempfile::NamedTempFile;
 
 use crate::support::FailingReadSeek;
@@ -301,6 +304,25 @@ fn test_magika_detector_builder_applies_mime_configuration() {
     );
 }
 
+/// Verifies the public builder accepts an application-owned operation manager.
+#[test]
+fn test_magika_detector_builder_uses_application_operation_manager() {
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let builder = MagikaMimeDetector::builder()
+        .media_stream_classifier(None)
+        .operation_manager(manager);
+    assert!(format!("{builder:?}").contains("MagikaMimeDetectorBuilder"));
+    let detector = builder
+        .build()
+        .expect("configured detector should initialize");
+
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(1))
+            .worker_stopped
+    );
+}
+
 /// Verifies filename-preferred detection skips conflicting content inference.
 #[test]
 fn test_magika_detector_detect_prefers_filename_without_content_detection() {
@@ -396,6 +418,27 @@ fn test_magika_detector_restores_reader_position() {
 
     assert_eq!(Some("text/x-shellscript".to_owned()), detected);
     assert_eq!(2, reader.position());
+}
+
+/// Verifies a past-EOF reader error preserves its public error and cursor.
+#[test]
+fn test_magika_detector_reader_past_eof_returns_invalid_input_and_restores_position() {
+    let detector = detector();
+    let mut reader = Cursor::new(b"data".to_vec());
+    reader.set_position(5);
+
+    let error = MimeContentBackend::detect_reader(detector, &mut reader)
+        .expect_err("a reader position past EOF cannot form a remaining window");
+
+    assert!(matches!(
+        error,
+        MimeError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    assert_eq!(
+        5,
+        reader.position(),
+        "the original reader position is restored on error"
+    );
 }
 
 /// Verifies reader detection uses the configured stream classifier for
@@ -536,16 +579,29 @@ fn test_magika_reader_detects_real_fixtures_without_consuming_position() {
     }
 }
 
-/// Verifies Magika maps empty content to the empty-file MIME type.
+/// Verifies empty content remains classifiable after runtime shutdown.
 #[test]
-fn test_magika_detector_empty_content_returns_empty_file_mime_type() {
-    let detector = detector();
+fn test_magika_detector_empty_content_survives_runtime_shutdown() {
+    let detector =
+        MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
+    let mime = Some("inode/x-empty".to_owned());
 
     assert_eq!(
-        Some("inode/x-empty".to_owned()),
+        mime,
         detector
             .detect_by_content(b"")
-            .expect("content detection should succeed")
+            .expect("empty content should classify")
+    );
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(30))
+            .worker_stopped
+    );
+    assert_eq!(
+        mime,
+        detector
+            .detect_by_content(b"")
+            .expect("ruled empty content remains available after runtime shutdown")
     );
 }
 
