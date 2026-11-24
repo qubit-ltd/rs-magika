@@ -12,7 +12,7 @@
 
 **原提案要求先实现并验收 rs-operation 0.1.0 的基础协议，再开始库实现。** 这段记录描述的是 2026-11-11 的设计前置条件，不适用于已使用 `qubit-operation ^0.3` 的当前实现；本篇仍是历史设计，不是当前接入指南。
 
-上游入口为 [rs-operation 设计](../../rs-operation/doc/design-0.1.0.zh_CN.md)。开始实施前，必须固定其已验收版本/不可变提交并验证：同步/异步观察同一操作、取消树与单调期限、子操作 reserve/attach/commit、ResourceUse、OwnedCleanup、恢复所有权、结果与释放分离、Drop 托管及 shutdown 超期继续观察。若上游缺少必需能力，应先在 rs-operation 补齐契约和测试，不在下游复制一套替代机制。
+上游入口为 [rs-operation 设计](https://github.com/qubit-ltd/rs-operation/blob/31628d378098d36dbb466350846cc4051a24adbb/doc/design-0.1.0.zh_CN.md)。开始实施前，必须固定其已验收版本/不可变提交并验证：同步/异步观察同一操作、取消树与单调期限、子操作 reserve/attach/commit、ResourceUse、OwnedCleanup、恢复所有权、结果与释放分离、Drop 托管及 shutdown 超期继续观察。若上游缺少必需能力，应先在 rs-operation 补齐契约和测试，不在下游复制一套替代机制。
 
 ### 0.1 统一职责与接口规则
 
@@ -179,7 +179,7 @@ MagikaRuntime 通过公共 supervisor 创建服务子 scope，model prepare、�
 
 发布链：operation → command/local-files/fs → 适配器与 mime → magika → 全链消费测试。复用 scope 不能双重登记或重复预算。保持同步 MIME 映射、对象采样一致性和初始化错误分类；不增加 progress/event-bus 依赖。
 
-关联资料：[mime 用户指南](../../rs-mime/doc/user_guide.md)、[fs 设计](../../rs-fs/doc/design-0.4.0.zh_CN.md)、[local-files 设计](../../rs-local-files/doc/design-0.6.0.zh_CN.md)。
+关联资料：[mime 用户指南](https://github.com/qubit-ltd/rs-mime/blob/main/doc/user_guide.md)、[fs 设计](https://github.com/qubit-ltd/rs-fs/blob/2d59666c11d9c783fa12e34f7c65ed591f6946c1/doc/design-0.4.0.zh_CN.md)、[local-files 设计](https://github.com/qubit-ltd/rs-local-files/blob/5b52230e0af2997fadc45b5ff48be65b0ca5a70d/doc/design-0.6.0.zh_CN.md)。
 
 ## 11. 验收与性能证据
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -97,6 +98,7 @@ def find_errors(root: Path) -> list[str]:
             try:
                 resolved.relative_to(root.resolve())
             except ValueError:
+                errors.append(f"{relative}: target outside repository: {target}")
                 continue
             if not resolved.exists():
                 errors.append(f"{relative}: missing local target: {target}")
@@ -113,6 +115,27 @@ def self_test() -> None:
     assert local_targets(sample) == ["guide.md", "sub(dir)/guide.md", "after.md"]
     with_missing = "[bad](missing.md)"
     assert local_targets(with_missing) == ["missing.md"]
+
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory) / "repository"
+        root.mkdir()
+        for relative in DOCUMENTS:
+            document = root / relative
+            document.parent.mkdir(parents=True, exist_ok=True)
+            document.write_text("", encoding="utf-8")
+        (root / "README.md").write_text("repository root", encoding="utf-8")
+        design = root / "doc/design-0.19.0.zh_CN.md"
+        design.write_text(
+            "[outside](../../sibling/existing.md) "
+            "[back](../README.md) [web](https://example.com)",
+            encoding="utf-8",
+        )
+        sibling_target = root.parent / "sibling/existing.md"
+        sibling_target.parent.mkdir(parents=True)
+        sibling_target.write_text("exists", encoding="utf-8")
+        assert find_errors(root) == [
+            "doc/design-0.19.0.zh_CN.md: target outside repository: ../../sibling/existing.md"
+        ]
 
 
 def main() -> int:
