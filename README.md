@@ -277,10 +277,11 @@ overflow discovered during `read_all` returns `MimeError::FileSystem`. Unknown a
 undefined Magika types return `Ok(None)`, allowing the selected
 `MimeDetectionPolicy` to apply filename fallback consistently.
 Provider-native asynchronous I/O is awaited by the calling future and can remain
-pending if the provider never completes it. Once sampling is ready, Magika
-sampling and inference run on the session-owning worker. Legacy hooks have no
-parent-scope lifecycle observation; use managed APIs when scope tracking is
-required.
+pending if the provider never completes it. For session and legacy-range
+routes, the worker requests samples and waits for the caller's future to perform
+each read during sampling; `read_all` reads the complete content before
+submitting its owned buffer. Legacy hooks have no parent-scope lifecycle
+observation; use managed APIs when scope tracking is required.
 
 ## Learn More
 

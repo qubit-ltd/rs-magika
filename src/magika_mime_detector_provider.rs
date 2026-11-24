@@ -155,7 +155,10 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// [`MimeError::DetectorBackend`]. Magika's upstream error does not
     /// reliably distinguish a missing runtime from an invalid model or
     /// configuration, so `OnAbsence` fallback does not suppress initialization
-    /// failures.
+    /// failures. A zero `MimeConfig::max_buffer_size()` is rejected if this
+    /// provider creates a new runtime and is surfaced as an initialization
+    /// failure with [`MimeError::DetectorBackend`] as its source. An injected
+    /// shared runtime may be reused with that zero per-request limit.
     ///
     /// # Examples
     ///
