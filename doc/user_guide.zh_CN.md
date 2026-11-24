@@ -87,8 +87,8 @@ path 或 patch，并使用自己的 lock 文件。
 
 此根清单默认启用 `bundled-onnxruntime`。若要启用同步 Provider inventory，
 将 Magika 项改为 `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`。
-固定源码与 `--registry-only` 是依赖来源模式。普通 README checker 会编译默认和 inventory 两种应用配置；只有添加 `--run-example` 才运行示例。
-仓库的[独立 README 消费者 fixture](../tests/fixtures/readme_consumer/Cargo.toml)展示锁定后的 bundled 默认图。动态加载 CI job 用该 fixture 运行默认和 inventory 两种配置，并用独立的 [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)检查动态加载 feature 图。
+固定源码与 `--registry-only` 用于选择依赖来源。README checker 默认只用 default features 编译提取出的中英文程序；增加 `--run-example` 后，才会分别用 default 和 `inventory` 运行两份程序。
+仓库锁定的[独立 `readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml)用于隔离动态加载；它关闭了 Magika 默认 features，因此依赖图不同于本仓库根清单启用 bundled runtime 的默认图。动态加载 CI 先检查独立 [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)的 feature 图，以及 `readme_consumer` 在 default、`inventory` 下的两张 feature 图，再编译 `readme_consumer`，最后用这两种配置执行该 fixture。
 
 ## 贯穿场景
 
@@ -342,10 +342,11 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
 
 仓库的[`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)
 使用相同的 ONNX Runtime 版本和 feature 集合。Linux CI 的
-[`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)使用 ONNX Runtime
-1.24.2 验证这条动态加载路径：先初始化共享库，再创建 detector，并确认 Python 内容识别为
-`text/x-python`。该 job 还检查 Cargo feature 图，确认未启用 bundled runtime 下载。
-`ORT_LIBRARY_PATH` 必须指向共享库文件本身，而不是所在目录。
+[`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
+先检查该 fixture 的 feature 图，以及锁定的 `readme_consumer` 在 default 和 `inventory` 下的两张 feature 图，
+再编译并运行 `readme_consumer` 的两种配置。运行时使用 ONNX Runtime 1.24.2：初始化共享库、创建
+detector，并确认 Python 内容识别为 `text/x-python`。这些 feature 图检查会确认没有启用 bundled runtime
+下载。`ORT_LIBRARY_PATH` 必须指向共享库文件本身，而不是所在目录。
 
 ## 进阶用法
 

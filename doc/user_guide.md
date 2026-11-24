@@ -107,7 +107,7 @@ their own lock file.
 The published default feature, `bundled-onnxruntime`, is enabled by this root
 manifest. To use the synchronous provider inventory, change the Magika entry
 to `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`.
-Fixed source and `--registry-only` are dependency source modes. The normal README checker compiles both default and inventory application configurations; it runs them only with `--run-example`. The repository's [`readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml) shows the locked bundled default graph. Dynamic-loading CI runs that fixture with both default and inventory configurations, while the separate [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml) checks the dynamic-loader feature graph.
+Fixed source and `--registry-only` select dependency sources. The README checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both with default and `inventory` features. The repository's locked [`readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml) is an isolated dynamic-loading consumer with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loading CI first checks the separate [`dynamic_loader` fixture's](../tests/fixtures/dynamic_loader/Cargo.toml) feature graph and the `readme_consumer` graphs with default and `inventory`; it then compiles `readme_consumer` and runs it with both configurations using isolated ONNX Runtime loading.
 
 The registry versions required by the examples were not all available on
 2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
@@ -405,11 +405,13 @@ committed once.
 The repository's [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)
 uses the same ONNX Runtime version and feature set. The
 [`dynamic-loader` job in Linux CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
-checks this setup with ONNX Runtime 1.24.2: it initializes the shared library,
-constructs a detector, and verifies that Python content is classified as
-`text/x-python`. The job checks the Cargo feature graph to ensure bundled runtime
-downloads are disabled. `ORT_LIBRARY_PATH` must name the shared-library file
-itself, rather than its containing directory.
+first checks this fixture's feature graph and the locked `readme_consumer`
+graphs with default and `inventory` features. It then
+compiles and runs `readme_consumer` in both configurations with ONNX Runtime
+1.24.2, initializing the shared library, constructing a detector, and verifying
+that Python content is classified as `text/x-python`. These graph checks ensure
+bundled runtime downloads are disabled. `ORT_LIBRARY_PATH` must name the
+shared-library file itself, rather than its containing directory.
 
 ## Advanced Usage
 
