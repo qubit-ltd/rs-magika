@@ -78,7 +78,7 @@ pub(crate) struct AsyncProviderGate {
     point: AsyncProviderGatePoint,
     entered: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
-    read_dropped_while_pending: std::sync::atomic::AtomicBool,
+    wait_dropped: std::sync::atomic::AtomicBool,
     waker: Mutex<Option<Waker>>,
     changed: Condvar,
 }
@@ -89,12 +89,13 @@ impl AsyncProviderGate {
             point,
             entered: std::sync::atomic::AtomicBool::new(false),
             released: std::sync::atomic::AtomicBool::new(false),
-            read_dropped_while_pending: std::sync::atomic::AtomicBool::new(false),
+            wait_dropped: std::sync::atomic::AtomicBool::new(false),
             waker: Mutex::new(None),
             changed: Condvar::new(),
         })
     }
     async fn wait(self: &Arc<Self>) {
+        let _drop_observed = AsyncProviderGateDropObserver(Arc::clone(self));
         std::future::poll_fn(|cx| self.poll_wait(cx)).await
     }
     fn poll_wait(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
@@ -132,6 +133,24 @@ impl AsyncProviderGate {
             );
         }
     }
+    pub(crate) fn wait_until_wait_dropped(&self, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut waker = self.waker.lock().unwrap();
+        while !self.wait_dropped.load(Ordering::Acquire) {
+            let now = std::time::Instant::now();
+            assert!(now < deadline, "provider operation {:?} was not dropped", self.point);
+            let (next, result) = self
+                .changed
+                .wait_timeout(waker, deadline.saturating_duration_since(now))
+                .unwrap();
+            waker = next;
+            assert!(
+                !result.timed_out() || self.wait_dropped.load(Ordering::Acquire),
+                "provider operation {:?} was not dropped",
+                self.point
+            );
+        }
+    }
     pub(crate) fn release(&self) {
         self.released.store(true, Ordering::Release);
         if let Some(waker) = self.waker.lock().unwrap().take() {
@@ -139,57 +158,17 @@ impl AsyncProviderGate {
         }
     }
 
-    pub(crate) fn wait_until_read_dropped_while_pending(&self, timeout: std::time::Duration) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        let mut waker = self.waker.lock().unwrap();
-        while !self.read_dropped_while_pending.load(Ordering::Acquire) {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return false;
-            }
-            let (next, result) = self
-                .changed
-                .wait_timeout(waker, deadline.saturating_duration_since(now))
-                .unwrap();
-            waker = next;
-            if result.timed_out() && !self.read_dropped_while_pending.load(Ordering::Acquire) {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn mark_read_dropped_while_pending(&self) {
-        let _waker = self.waker.lock().unwrap();
-        self.read_dropped_while_pending.store(true, Ordering::Release);
-        self.changed.notify_all();
-    }
-
     pub(crate) fn is_entered(&self) -> bool {
         self.entered.load(Ordering::Acquire)
     }
 }
 
-struct ReadGateDropGuard {
-    gate: Arc<AsyncProviderGate>,
-    completed: bool,
-}
+struct AsyncProviderGateDropObserver(Arc<AsyncProviderGate>);
 
-impl ReadGateDropGuard {
-    fn new(gate: Arc<AsyncProviderGate>) -> Self {
-        Self { gate, completed: false }
-    }
-
-    fn mark_completed(&mut self) {
-        self.completed = true;
-    }
-}
-
-impl Drop for ReadGateDropGuard {
+impl Drop for AsyncProviderGateDropObserver {
     fn drop(&mut self) {
-        if !self.completed && self.gate.entered.load(Ordering::Acquire) && !self.gate.released.load(Ordering::Acquire) {
-            self.gate.mark_read_dropped_while_pending();
-        }
+        self.0.wait_dropped.store(true, Ordering::Release);
+        self.0.changed.notify_all();
     }
 }
 
@@ -547,22 +526,16 @@ impl qubit_fs::spi::AsyncRandomAccessReadSession for ProviderSession {
         output: &'a mut [u8],
     ) -> SpiFuture<'a, FsResult<usize>> {
         Box::pin(async move {
-            let gate = self
+            if let Some(gate) = self
                 .as_ref()
                 .get_ref()
                 .async_gate
                 .as_ref()
                 .filter(|g| g.point == AsyncProviderGatePoint::Read)
-                .cloned();
-            let mut drop_guard = gate.as_ref().map(|gate| ReadGateDropGuard::new(Arc::clone(gate)));
-            if let Some(gate) = &gate {
+            {
                 gate.wait().await;
             }
-            let result = self.get_mut().read_at(offset, output);
-            if let Some(drop_guard) = &mut drop_guard {
-                drop_guard.mark_completed();
-            }
-            result
+            self.get_mut().read_at(offset, output)
         })
     }
 }

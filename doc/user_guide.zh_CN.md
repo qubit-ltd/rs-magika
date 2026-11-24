@@ -28,6 +28,13 @@ inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默�
 `repository`。配置媒体流分类器的 Provider 仍需显式构造和注册。
 应用中还应加入 `use qubit_magika as _;`，使 inventory 提交项参与链接。
 
+`qubit-mime` 的 async provider registry 负责选择并创建
+`AsyncMimeDetectorBackend`，但其 async hooks 仍不会收到 parent operation scope。
+Inventory 只向该 registry 注册 Provider。应用若要把 Provider 采样挂到某个 operation
+scope，需显式调用 managed API。复现本文所用的固定本地依赖布局时，可运行
+[`prepare-local-path-dependencies.sh --check-locked`](../.infra/lib/prepare-local-path-dependencies.sh)，
+并按 [`local-path-dependencies.tsv`](../.infra/ci/local-path-dependencies.tsv) 核对固定版本。
+
 ## 贯穿场景
 
 假设应用接收一个上传的 Python 脚本：它需要根据内容得到 MIME 类型，同时保留对普通
@@ -303,6 +310,10 @@ async content hook 与同步 content hook 一样返回 backend 原始 Magika 候
 如果应用需要把异步 Provider 采样纳入 `qubit-operation` 的取消和释放观察，可使用
 `detect_async_provider_path_managed`。启动时共享一个 supervisor 和 detector，再把每个
 请求的 scope 显式传入：
+启动时要向 `ManagerOptions` 注入应用的 `ClockSource`，并用同一个时钟生成观察截止时间。
+默认的 `ManagerOptions` 不含时钟；若直接使用默认值，`wait_settlement_until` 会返回
+`ClockUnavailable`。
+调用方还要按该时钟文档规定的 tick 刻度，把预期等待时长换算为 `wait_ticks` 传入；tick 数不是秒数。
 
 <!-- managed-guide-example-start -->
 ```rust,no_run
@@ -312,21 +323,26 @@ use std::time::Duration;
 
 use qubit_fs::{AsyncFileSystem, Path};
 use qubit_magika::MagikaMimeDetector;
+use qubit_magika::ManagedInferenceShutdownReport;
 use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};
+use qubit_operation::{AsyncOperationObserver, ClockSource, Deadline, MonotonicTime, SettlementWait, ShutdownHandle, ShutdownReport, ShutdownSnapshot, ShutdownWait};
 
-fn prepare_application() -> Result<(
+fn prepare_application(clock: Arc<dyn ClockSource>) -> Result<(
     OperationManager,
     qubit_operation::OperationGroup,
     Arc<MagikaMimeDetector>,
+    Arc<dyn ClockSource>,
 ), Box<dyn Error>> {
-    let manager = OperationManager::new(ManagerOptions::default())?;
+    let mut options = ManagerOptions::default();
+    options.clock = Some(Arc::clone(&clock));
+    let manager = OperationManager::new(options)?;
     let service = manager.group(GroupOptions { capacity: 4 })?;
     let detector = Arc::new(
         MagikaMimeDetector::builder()
             .operation_manager(manager.clone())
             .build()?,
     );
-    Ok((manager, service, detector))
+    Ok((manager, service, detector, clock))
 }
 
 async fn detect_request(
@@ -334,7 +350,9 @@ async fn detect_request(
     detector: &Arc<MagikaMimeDetector>,
     file_system: AsyncFileSystem,
     path: Path,
-) -> Result<(), Box<dyn Error>> {
+    clock: &dyn ClockSource,
+    wait_ticks: u64,
+) -> Result<(OperationOutcome<Option<String>, qubit_mime::MimeError>, AsyncOperationObserver, SettlementWait), Box<dyn Error>> {
     let request_detector = Arc::clone(detector);
     let mut request = service
         .as_async()
@@ -343,36 +361,68 @@ async fn detect_request(
                 .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
                 .await
         })?;
-    match request.wait_outcome().await? {
-        OperationOutcome::Succeeded(mime) => println!("detected MIME: {mime:?}"),
-        other => return Err(format!("detection operation did not succeed: {other:?}").into()),
+    let observer = request.observer();
+    let outcome = request.wait_outcome().await?;
+    match &outcome {
+        OperationOutcome::Succeeded(mime) => println!("检测完成：{mime:?}"),
+        OperationOutcome::Failed(error) => eprintln!("检测失败：{error}"),
+        other => eprintln!("检测未正常完成：{other:?}"),
     }
-    let settlement = request.wait_settlement().await;
-    if !settlement.all_released() {
-        return Err("request resources are still in use".into());
+    // 调用方已按此时钟的 tick 刻度换算好预期等待时长。
+    let now = clock.now();
+    let deadline = Deadline::at(MonotonicTime::new(now.domain(), now.ticks().saturating_add(wait_ticks)));
+    let settlement = observer.wait_settlement_until(deadline).await?;
+    match &settlement {
+        SettlementWait::Ready(report) if report.all_released() => println!("请求资源已释放"),
+        SettlementWait::Ready(report) => eprintln!("结算报告仍有未释放资源：{report:?}"),
+        SettlementWait::Pending(snapshot) => eprintln!("截止时结算仍在进行：{snapshot:?}"),
     }
-    Ok(())
+    Ok((outcome, observer, settlement))
+}
+
+enum ShutdownProgress {
+    DetectorPending(ManagedInferenceShutdownReport),
+    ManagerPending {
+        detector: ManagedInferenceShutdownReport,
+        handle: ShutdownHandle,
+        snapshot: ShutdownSnapshot,
+    },
+    Complete { detector: ManagedInferenceShutdownReport, manager: ShutdownReport },
 }
 
 fn shutdown_application(
     manager: &OperationManager,
     detector: &MagikaMimeDetector,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<ShutdownProgress, Box<dyn Error>> {
     let detector_report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
-    assert!(detector_report.worker_stopped);
-    let manager_report = manager
-        .request_shutdown(ShutdownMode::Drain)
-        .wait_for(Duration::from_secs(30))?;
-    let _snapshot = manager_report;
-    Ok(())
+    if !detector_report.worker_stopped {
+        return Ok(ShutdownProgress::DetectorPending(detector_report));
+    }
+    let handle = manager.request_shutdown(ShutdownMode::Drain);
+    match handle.wait_for(Duration::from_secs(30))? {
+        ShutdownWait::Completed(report) => Ok(ShutdownProgress::Complete { detector: detector_report, manager: report }),
+        ShutdownWait::Pending(snapshot) => Ok(ShutdownProgress::ManagerPending { detector: detector_report, handle, snapshot }),
+    }
 }
 ```
 <!-- managed-guide-example-end -->
 
-请检查 `detect_request` 返回的 `OperationOutcome`：`Succeeded(Some(mime))` 包含识别结果，
-`Succeeded(None)` 表示没有识别结果，`Failed(error)` 携带 detector 错误。其他变体表示操作被停止或执行失败。
-`wait_settlement().await` 返回 `SettlementReport`；使用
-`SettlementReport::all_released()` 检查请求资源是否已结算。`shutdown_application` 应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
+`detect_request` 的精确返回类型是
+`(OperationOutcome<Option<String>, MimeError>, AsyncOperationObserver, SettlementWait)`。
+业务结果与资源清理分开处理：`Succeeded(Some(mime))` 表示得到分类，`Succeeded(None)` 表示无映射，
+`Failed(error)` 保留 detector 错误，其他变体表示停止或执行失败。observer 使用的时钟就是
+`ManagerOptions` 中注入的同一个 `ClockSource`；示例通过 `clock.now()` 生成同域 deadline。
+应用应根据预期等待时长和该时钟的 tick 刻度换算后传入 `wait_ticks`，不能把 tick 当作秒。
+`wait_settlement_until(deadline)` 返回
+`Result<SettlementWait, ObservationError>`。`SettlementWait::Pending(snapshot)` 只表示
+本次有界观察结束，不能证明资源已释放。截止时间必须来自 operation 使用的 clock domain。
+示例显式匹配 Ready 和 Pending，并在 Ready 时检查 `all_released()`；返回 tuple 时仍保留
+outcome、observer 和原始 settlement 观察结果。调用方可根据负面报告执行恢复处理，也可在 Pending 后继续观察。
+清理失败会保留未确认资源，后续重试
+须通过已登记的 recovery policy/handle 观察或恢复，不能靠重提推理请求完成。关闭函数返回
+`DetectorPending` 时应先保留报告并重试 detector shutdown，不要继续关闭 manager；`ManagerPending`
+保留 snapshot 和 handle，可再次 `wait_for`；`Completed` 携带最终 manager report。`shutdown_application`
+应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
 等待活动请求完成后，使用自身的阻塞执行机制调用它。
 
 runtime 关闭后，可调用 `detector.runtime_snapshot()` 查看共享运行状态。
@@ -380,7 +430,7 @@ runtime 关闭后，可调用 `detector.runtime_snapshot()` 查看共享运行�
 包含共享该 runtime 的所有 detector。`faulted` 表示推理 session 曾捕获 panic；
 关闭报告的 `worker_panicked` 只表示 join 时观察到未捕获 panic。非零
 `unconfirmed_provider_io` 表示某个 Pending Provider 操作被丢弃，完成状态无法确认。
-快照不能证明资源已结算；释放观察仍应使用 `wait_settlement().await`。
+快照不能证明资源已结算；需使用 operation observer 的有界 settlement 等待继续观察。
 
 真实应用应让 service group、detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
 关闭函数。`max_bytes` 既是单次采样的累计读取预算，也会占用 runtime 共享的在途字节预算。

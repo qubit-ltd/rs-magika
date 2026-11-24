@@ -1,6 +1,6 @@
 # rs-magika 0.19.0 详细设计：有界采样与受管理异步推理
 
-> **历史入口更新（2026-11-16）：** 本篇仍是历史提案，不是当前实现的完整说明。此前指向的替代设计和实施计划文件不在本仓库中；当前行为以[用户指南](user_guide.md)为准。本轮 MAG-001～006 局部修复不替代或验收本提案的全部目标。完整迁移目标依赖 qubit-operation ^0.3；不能据此使用旧 ^0.1 接口或 0.2 crate-private adapter。
+> **历史入口更新（2026-11-23）：** 本篇仍是历史提案，不是当前实现的完整说明。此前指向的替代设计和实施计划文件不在本仓库中；当前行为以[用户指南](user_guide.md)为准。本篇的旧版 `qubit-operation ^0.1` 前置条件只属于当时的提案快照，不是当前实现要求。当前 managed API 依赖公开的 `qubit-operation ^0.3` 契约；不能据此使用旧 ^0.1 接口或 0.2 crate-private adapter。T0 固定依赖复现入口见[本地依赖版本表](../.infra/ci/local-path-dependencies.tsv)及[校验脚本](../.infra/lib/prepare-local-path-dependencies.sh)。
 
 - 状态：历史提案。部分机制已落地；本文不是当前实现的完整说明，也不是该提案全部要求已经验收的证明。
 - 日期：2026-11-11。
@@ -8,9 +8,9 @@
 - 与 qubit-mime 0.22.0 的异步后端契约配套。
 - 当前行为请参阅[用户指南](user_guide.md)；提案逐项状态及代码、测试证据见下方对照表。
 
-## 0. 实施前置条件：先实现 rs-operation
+## 0. 实施前置条件（历史快照，不适用于当前实现）
 
-**必须先实现并验收 rs-operation 0.1.0 的基础协议，再开始本设计的库实现。** 只有设计文档或空 crate 不满足此前置条件；本轮仅修订设计，不修改实现或 Cargo 清单。
+**原提案要求先实现并验收 rs-operation 0.1.0 的基础协议，再开始库实现。** 这段记录描述的是 2026-11-11 的设计前置条件，不适用于已使用 `qubit-operation ^0.3` 的当前实现；本篇仍是历史设计，不是当前接入指南。
 
 上游入口为 [rs-operation 设计](../../rs-operation/doc/design-0.1.0.zh_CN.md)。开始实施前，必须固定其已验收版本/不可变提交并验证：同步/异步观察同一操作、取消树与单调期限、子操作 reserve/attach/commit、ResourceUse、OwnedCleanup、恢复所有权、结果与释放分离、Drop 托管及 shutdown 超期继续观察。若上游缺少必需能力，应先在 rs-operation 补齐契约和测试，不在下游复制一套替代机制。
 
@@ -54,8 +54,10 @@
 | --- | --- | --- | --- |
 | Session 由专属 worker 创建和持有 | `src/managed_runtime/managed_inference_runtime.rs` 的 worker 启动与 `WorkerInput` 执行路径 | `src/tests/managed_operation_tests.rs` 的 worker 生命周期和关闭测试 | 已实现；不代表提案要求的多类 worker 拆分已实现 |
 | Async provider 通过容量一范围桥采样 | `src/internal/async_sample_bridge.rs`、`src/managed_runtime/managed_inference_runtime.rs` | `src/tests/internal/async_sample_bridge_tests.rs`、`src/tests/internal/random_access_session_tests.rs` | 已实现 |
-| 受理请求受 runtime 字节预算约束 | `src/managed_runtime/byte_budget.rs`、`src/managed_runtime/managed_inference_runtime.rs` | `test_byte_budget_rejects_aggregate_payload_and_shutdown_joins_worker` | 已实现；detector 单请求上限另见当前实施设计 |
-| 关闭后继续观察 worker 退出 | `src/managed_runtime/managed_inference_runtime.rs` 与 shutdown report | `managed_operation_tests.rs` 中 timeout、并发观察和 worker exit hook 测试 | 已实现 |
+| 受理请求受 runtime 字节预算约束 | `src/managed_runtime/byte_budget.rs`、`src/managed_runtime/managed_inference_runtime.rs` | `managed_runtime/managed_inference_runtime/tests.rs::test_runtime_submit_rejects_aggregate_byte_budget_overflow`、`test_scope_less_pending_read_keeps_budget_after_worker_done` | 已实现；detector 单请求上限另见当前实施设计 |
+| scope 接纳拒绝会回滚登记，不累积资源 | `src/managed_runtime/managed_inference_runtime.rs` | `managed_runtime/managed_inference_runtime/tests.rs::test_scope_admission_repeated_failures_do_not_accumulate`、`test_scope_admission_failure_preserves_other_request` | 已实现；适用于 qubit-magika 0.18 / qubit-operation ^0.3 |
+| Drain 关闭准入后仍完成已接纳请求 | `src/managed_runtime/managed_inference_runtime.rs` | `managed_runtime/managed_inference_runtime/tests.rs::test_drain_admitted_provider_completes_after_gate_closes`、`test_drain_real_managed_provider_route_completes_gated_read` | 已实现；不代表不可确认的 Provider I/O 会被强制中断 |
+| 超时后并发续观 worker 退出 | `src/managed_runtime/managed_inference_runtime.rs` 与 shutdown report | `managed_runtime/managed_inference_runtime/tests.rs::test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers` | 已实现；适用于 qubit-magika 0.18 / qubit-operation ^0.3 |
 | 为任意输入提供 async content worker hook | 由 2026-11-14 本轮实现及 `guess_from_content_async` 回归测试确认 | `test_async_content_yields_while_worker_is_gated` | 已实现；边界和错误时机见当前实施设计 |
 | 提案中的完整准备 API、同步托管 API、公共 handle 协议、性能目标及全部 feature/MSRV 验收 | 本表未逐项审计其当前代码和验收证据 | 未建立完整对应测试证据 | 未核实；不得据此声称完成 |
 

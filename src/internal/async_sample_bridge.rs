@@ -274,6 +274,23 @@ mod tests {
         assert_eq!([7, 9], worker.join().unwrap());
     }
 
+    #[test]
+    fn test_close_and_closed_recover_a_poisoned_bridge_state() {
+        let bridge = AsyncSampleBridge::new(0);
+        let poison_bridge = Arc::clone(&bridge);
+        let _ = std::thread::spawn(move || {
+            let _state = poison_bridge.state.lock().unwrap();
+            panic!("poison bridge state before close");
+        })
+        .join();
+
+        bridge.close();
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut closed = std::pin::pin!(bridge.closed());
+        assert!(Future::poll(closed.as_mut(), &mut context).is_ready());
+    }
+
     fn block_on<F: Future>(future: F) -> F::Output {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);

@@ -60,10 +60,9 @@ impl<I> Drop for ProviderDriverGuard<I> {
         // completion only when no provider-native work is unconfirmed.
         drop(self.input.take());
         drop(self.driver.take());
-        if !self.unconfirmed_io.load(Ordering::Relaxed) {
-            self.state.mark_driver_done();
-        } else {
+        if self.unconfirmed_io.load(Ordering::Relaxed) {
             self.state.mark_unconfirmed_provider_io();
         }
+        self.state.mark_driver_done();
     }
 }

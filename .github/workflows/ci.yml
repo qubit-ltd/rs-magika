@@ -66,8 +66,10 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: sources/rs-magika
-      - name: Prepare registered local path dependencies
+      - name: Prepare pinned local path dependencies
         run: .infra/lib/prepare-local-path-dependencies.sh
+      - name: Verify pinned local path dependencies
+        run: .infra/lib/prepare-local-path-dependencies.sh --check-locked
       - name: Install Rust
         run: rustup toolchain install 1.94.0 --profile minimal
       - name: Download and verify ONNX Runtime 1.24.2 wheel

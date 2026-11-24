@@ -120,7 +120,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Weak;
 
-    use super::AsyncSampleBridge;
+    use super::super::AsyncSampleBridge;
     use super::ReadRequest;
     use crate::internal::async_sample_bridge::response::Response;
 
@@ -139,6 +139,44 @@ mod tests {
     }
 
     #[test]
+    fn test_abandoned_active_request_recovers_poisoned_bridge_state() {
+        let bridge = AsyncSampleBridge::new(1);
+        let response = Arc::new(Response::new());
+        bridge.state.lock().unwrap().active = Some(Arc::clone(&response));
+        let request = ReadRequest::new(0, 1, Arc::clone(&response), Arc::downgrade(&bridge));
+
+        let poison_bridge = Arc::clone(&bridge);
+        let _ = std::thread::spawn(move || {
+            let _state = poison_bridge.state.lock().unwrap();
+            panic!("poison bridge state before request abandonment");
+        })
+        .join();
+
+        drop(request);
+
+        assert_eq!(
+            std::io::ErrorKind::Interrupted,
+            response
+                .result
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .kind(),
+        );
+        assert!(
+            bridge
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active
+                .is_none()
+        );
+    }
+
+    #[test]
     fn test_abandoning_pending_request_recovers_poisoned_bridge_state() {
         let bridge = AsyncSampleBridge::new(1);
         let response = Arc::new(Response::new());
@@ -150,6 +188,7 @@ mod tests {
             answered: true,
         };
         bridge.state.lock().unwrap().pending = Some(pending);
+
         let poison_bridge = Arc::clone(&bridge);
         assert!(
             std::thread::spawn(move || {
@@ -177,7 +216,7 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .unwrap_err()
-                .kind()
+                .kind(),
         );
     }
 }

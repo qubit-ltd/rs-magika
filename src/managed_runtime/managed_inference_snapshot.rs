@@ -21,6 +21,8 @@ pub struct ManagedInferenceSnapshot {
     /// Whether cooperative cancellation has begun.
     pub cancelling: bool,
     /// Whether the worker session faulted after a caught inference panic.
+    /// This is separate from the shutdown report's `worker_panicked`, which
+    /// records an uncaught panic observed while joining the worker.
     pub faulted: bool,
     /// Unreleased requests not yet started by the worker, including provider
     /// setup and admission queue time; this is not an exact queue length.
