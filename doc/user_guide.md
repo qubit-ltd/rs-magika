@@ -58,8 +58,12 @@ already prepared checkouts without changing them, run
 and compare against the fixed revisions in
 [`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv).
 The check reports a missing, dirty, or wrong-revision checkout; it does not
-repair or replace it. Review and resolve drift deliberately. Linux preparation
-uses GNU `mv -Tn` when publishing a newly prepared checkout.
+repair or replace it. Review and resolve drift deliberately. The normal and
+dynamic-fixture bootstrap modes share the same preparation helper. Publishing
+a newly prepared missing checkout requires GNU `mv -Tn` (or `gmv` on systems
+where GNU coreutils are installed under that name). Preparing an existing
+valid worktree and running strict `--check-locked` validation do not require
+GNU `mv`.
 
 ## Scenario
 
