@@ -18,12 +18,11 @@ use qubit_operation::ShutdownReport;
 /// view.
 ///
 /// `worker_stopped` reports the worker join only; it is independent of
-/// admission and provider settlement. It may be false while an unconfirmed
-/// provider request still retains capacity, or while the worker is still
-/// running. A false value means shutdown has not observed a completed join;
-/// the runtime retains the handle so a later shutdown call can continue
-/// observing and reap it. Shutdown does not forcibly interrupt native
-/// inference or provider I/O.
+/// admission and provider settlement. It may be true while an unconfirmed
+/// provider request still retains capacity. A false value means shutdown has
+/// not observed a completed join; the runtime retains the handle so a later
+/// shutdown call can continue observing and reap it. Shutdown does not
+/// forcibly interrupt native inference or provider I/O.
 ///
 /// `worker_panicked` records an uncaught panic reported by joining the
 /// worker. A panic caught during inference instead marks the runtime's

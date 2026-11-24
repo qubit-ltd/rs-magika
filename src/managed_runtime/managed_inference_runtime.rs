@@ -886,7 +886,7 @@ impl ManagedInferenceRuntime {
     /// # Returns
     ///
     /// Admission and worker termination facts. `worker_stopped` reports the
-    /// join only and can be false while an unconfirmed provider request still
+    /// join only and can be true while an unconfirmed provider request still
     /// retains capacity. False means shutdown has not observed a completed
     /// join; the worker handle remains available for a later call to continue
     /// observing and reap. One deadline covers service admission/settlement
