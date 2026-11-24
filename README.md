@@ -101,7 +101,7 @@ backend; its hooks do not receive a parent operation scope. Inventory registers
 the unconfigured provider for that registry. Use the explicit managed entry
 point when a request must attach lifecycle observation to an application scope.
 For a reproducible checkout layout, run
-[`prepare-local-path-dependencies.sh --check-locked`](.infra/bin/prepare-local-path-dependencies.sh)
+[`prepare-local-path-dependencies.sh --check-locked`](.infra/lib/prepare-local-path-dependencies.sh)
 and then use the fixed revisions in
 [`local-path-dependencies.tsv`](.infra/ci/local-path-dependencies.tsv) for:
 

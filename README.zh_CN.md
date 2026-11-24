@@ -94,7 +94,7 @@ supervisor 和 detector；每个受管请求显式传入 scope；应用关闭前
 不会收到 parent operation scope。Inventory 只向该 registry 注册未配置的 Provider。
 若请求需要纳入应用 scope 的生命周期观察，应显式调用 managed API。
 需要复现固定依赖布局时，先运行
-[`prepare-local-path-dependencies.sh --check-locked`](.infra/bin/prepare-local-path-dependencies.sh)，
+[`prepare-local-path-dependencies.sh --check-locked`](.infra/lib/prepare-local-path-dependencies.sh)，
 再按 [`local-path-dependencies.tsv`](.infra/ci/local-path-dependencies.tsv) 中的固定提交，
 依次检查根项目、动态加载 fixture 和 README consumer fixture 的锁定依赖：
 

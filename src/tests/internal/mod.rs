@@ -7,7 +7,7 @@
 // =============================================================================
 
 mod async_sample_bridge_tests;
-mod provider_input_fixture;
+pub(crate) mod provider_input_fixture;
 mod provider_input_tests;
 pub(crate) mod random_access_session_tests;
 mod read_budget_tests;

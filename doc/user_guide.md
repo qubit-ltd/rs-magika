@@ -38,7 +38,7 @@ The `qubit-mime` async provider registry selects and constructs an
 operation scope. Inventory only registers a provider with that registry. Use
 the explicit managed API when application code must attach provider sampling to
 an operation scope. To reproduce the tested local dependency layout, run
-[`prepare-local-path-dependencies.sh --check-locked`](../.infra/bin/prepare-local-path-dependencies.sh)
+[`prepare-local-path-dependencies.sh --check-locked`](../.infra/lib/prepare-local-path-dependencies.sh)
 and follow the fixed revisions in
 [`local-path-dependencies.tsv`](../.infra/ci/local-path-dependencies.tsv).
 

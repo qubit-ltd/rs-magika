@@ -36,10 +36,10 @@ fn test_bounded_input_rejects_out_of_range_reads() {
 #[test]
 fn test_bounded_input_rejects_base_offset_overflow() {
     let mut reader = Cursor::new(vec![0_u8; 1]);
-    let mut input = ReadSeekInput::new(&mut reader, u64::MAX, 1);
+    let mut input = ReadSeekInput::new(&mut reader, u64::MAX, 2);
     let mut buffer = [0_u8; 1];
     assert!(
-        SyncInput::read_at(&mut input, &mut buffer, 0).is_err(),
+        SyncInput::read_at(&mut input, &mut buffer, 1).is_err(),
         "overflowing base offset should be rejected"
     );
 }

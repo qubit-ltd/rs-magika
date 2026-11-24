@@ -32,7 +32,7 @@ inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默�
 `AsyncMimeDetectorBackend`，但其 async hooks 仍不会收到 parent operation scope。
 Inventory 只向该 registry 注册 Provider。应用若要把 Provider 采样挂到某个 operation
 scope，需显式调用 managed API。复现本文所用的固定本地依赖布局时，可运行
-[`prepare-local-path-dependencies.sh --check-locked`](../.infra/bin/prepare-local-path-dependencies.sh)，
+[`prepare-local-path-dependencies.sh --check-locked`](../.infra/lib/prepare-local-path-dependencies.sh)，
 并按 [`local-path-dependencies.tsv`](../.infra/ci/local-path-dependencies.tsv) 核对固定版本。
 
 ## 贯穿场景

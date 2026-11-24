@@ -35,7 +35,7 @@ impl Wake for ThreadWaker {
     }
 }
 
-fn block_on<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     let waker = std::task::Waker::from(Arc::new(ThreadWaker(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = pin!(future);

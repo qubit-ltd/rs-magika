@@ -111,5 +111,10 @@ mod tests {
         let permit = budget.try_acquire(1).expect("poisoned lock should be recovered");
         drop(permit);
         budget.release(0);
+        assert_eq!(
+            0,
+            budget.used(),
+            "diagnostic usage should recover the poisoned budget lock"
+        );
     }
 }

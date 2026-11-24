@@ -1178,7 +1178,7 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
-    let handle = service
+    let mut handle = service
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
@@ -1187,25 +1187,46 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
         })
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(5));
+    let observer = handle.observer();
     assert_eq!(
         qubit_operation::StopRequestStatus::Accepted,
         handle.request_stop(StopReason::UserCancelled),
     );
-    gate.release();
-    let mut handle = handle;
-    let _ = run_ready(handle.wait_outcome());
+    assert!(matches!(
+        run_ready(handle.wait_outcome()),
+        Ok(qubit_operation::OperationOutcome::Stopped(_))
+    ));
+    gate.wait_until_wait_dropped(Duration::from_secs(5));
+    let first_settlement = run_until(observer.wait_settlement(), Duration::from_secs(2));
     let snapshot = detector.runtime_snapshot();
     assert_eq!(
-        0, snapshot.unconfirmed_provider_io,
-        "the gated open returned Ready before cancellation settled"
+        1, snapshot.unconfirmed_provider_io,
+        "dropping a pending provider open must retain unconfirmed I/O"
     );
-    assert!(
-        observations.random_opens.load(Ordering::SeqCst) <= 1,
-        "the initial gated random-access open may complete once, but must not be retried",
+    assert_eq!(
+        0,
+        observations.random_opens.load(Ordering::SeqCst),
+        "the cancelled random-access open must not publish a completion"
     );
     assert_eq!(0, observations.stats.load(Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(Ordering::SeqCst));
     assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    gate.release();
+    let report = first_settlement.unwrap_or_else(|()| {
+        run_until(observer.wait_settlement(), Duration::from_secs(2))
+            .expect("cancelled provider open should publish settlement diagnostics")
+    });
+    assert!(
+        !report.all_released(),
+        "dropped provider open must not claim confirmed release: {report:?}"
+    );
+    assert!(
+        report.recovery_count > 0
+            || report.recoveries_total > 0
+            || report.cleanup_failures_total > 0
+            || report.transferred_count > 0,
+        "negative settlement must retain cleanup or recovery diagnostics: {report:?}"
+    );
     let _ = detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
 }
 

@@ -193,4 +193,48 @@ mod tests {
             std::thread::park_timeout(std::time::Duration::from_millis(10));
         }
     }
+
+    #[test]
+    fn test_abandoning_pending_request_recovers_poisoned_bridge_state() {
+        let bridge = AsyncSampleBridge::new(1);
+        let response = Arc::new(Response::new());
+        let pending = ReadRequest {
+            offset: 0,
+            length: 1,
+            response: Arc::clone(&response),
+            bridge: Arc::downgrade(&bridge),
+            answered: true,
+        };
+        bridge.state.lock().unwrap().pending = Some(pending);
+
+        let poison_bridge = Arc::clone(&bridge);
+        assert!(
+            std::thread::spawn(move || {
+                let _state = poison_bridge.state.lock().unwrap();
+                panic!("poison bridge state before abandoning the pending request");
+            })
+            .join()
+            .is_err()
+        );
+
+        drop(ReadRequest::new(0, 1, Arc::clone(&response), Arc::downgrade(&bridge)));
+
+        let state = bridge.state.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(
+            state.pending.is_none(),
+            "abandonment should remove the matching pending request"
+        );
+        assert_eq!(
+            std::io::ErrorKind::Interrupted,
+            response
+                .result
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .kind(),
+        );
+    }
 }

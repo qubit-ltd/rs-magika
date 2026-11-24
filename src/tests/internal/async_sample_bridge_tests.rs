@@ -29,6 +29,10 @@ fn test_async_driver_answers_worker_range_request() {
     });
     let request = block_on(bridge.next_request()).expect("worker should request a range");
     assert_eq!((7, 4), (request.offset(), request.len()));
+    assert!(
+        bridge.wait_for_test_waiters(0, 1, Duration::from_secs(2)),
+        "worker should be waiting for the provider response before it is published"
+    );
     request.respond(Ok(vec![1, 2, 3, 4]));
     assert_eq!([1, 2, 3, 4], worker.join().unwrap());
 }
@@ -151,6 +155,10 @@ fn test_bridge_close_wakes_pending_request_and_close_waiters() {
     assert!(Future::poll(request.as_mut(), &mut context).is_pending());
     let mut closed = std::pin::pin!(bridge.closed());
     assert!(Future::poll(closed.as_mut(), &mut context).is_pending());
+    assert!(
+        Future::poll(closed.as_mut(), &mut context).is_pending(),
+        "re-polling with the same waker should not register a duplicate close waiter"
+    );
 
     bridge.close();
 
@@ -209,6 +217,10 @@ fn test_bridge_never_exposes_two_unanswered_requests() {
         let mut byte = [0; 1];
         second_bridge.read_at(1, &mut byte)
     });
+    assert!(
+        bridge.wait_for_test_waiters(1, 0, Duration::from_secs(2)),
+        "second worker read should be waiting while the first request remains unanswered"
+    );
     assert!(poll_for(bridge.next_request(), Duration::from_millis(30)).is_none());
     first_request.respond(Ok(vec![10]));
     let second_request = block_on(bridge.next_request()).unwrap();
