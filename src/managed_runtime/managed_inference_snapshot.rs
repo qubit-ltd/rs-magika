@@ -12,7 +12,9 @@
 /// Fields are read independently and may reflect different instants during
 /// concurrent activity. The snapshot is diagnostic only: it is not an atomic
 /// value, a release proof, or a replacement for waiting for settlement. Counts
-/// cover every detector sharing this runtime.
+/// cover every detector sharing this runtime. A later healthy or recovered
+/// state alone does not establish that a previously pending request released
+/// its provider or worker resources.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct ManagedInferenceSnapshot {

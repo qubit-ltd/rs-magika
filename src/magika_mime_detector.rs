@@ -177,10 +177,14 @@ impl MagikaMimeDetector {
     /// a range read), the runtime reserves request capacity and the
     /// `max_bytes` accounting budget and commits the optional scope child.
     /// Closed, full, or already-cancelled requests are rejected before
-    /// provider I/O. The byte reservation bounds logical sampling and owned
+    /// provider I/O. Admission capacity is a permission/accounting reservation;
+    /// it does not prove provider completion or resource release. The byte
+    /// reservation bounds logical sampling and owned
     /// payload accounting; it is not a bound on total process memory or
     /// provider/network work. The `read_all` fallback transfers its
-    /// returned buffer to the worker without making another full-size copy.
+    /// returned buffer to the worker without an explicit clone. Converting
+    /// owned storage for worker use may still reallocate, so this is not a
+    /// guarantee of zero-copy operation.
     ///
     /// Dropping a pending provider future cancels local polling only. A
     /// provider's native or remote operation may continue, and this API has no
@@ -188,11 +192,11 @@ impl MagikaMimeDetector {
     /// child settlement remain pending, potentially indefinitely; future
     /// cancellation does not prove that underlying I/O was interrupted.
     ///
-    /// A Rust panic caught during session inference is surfaced as a backend
-    /// error from this call while its child operation records `Panicked` and
-    /// the runtime becomes faulted. This is distinct from
-    /// [`ManagedInferenceShutdownReport::worker_panicked`], which reports an
-    /// uncaught panic observed while joining the worker.
+    /// A Rust panic caught during session inference is surfaced to this call
+    /// as `Failed(MimeError::DetectorBackend)` while its child operation
+    /// records `Panicked` and the runtime becomes faulted. This is distinct
+    /// from [`ManagedInferenceShutdownReport::worker_panicked`], which
+    /// reports an uncaught panic observed while joining the worker.
     ///
     /// # Parameters
     ///
@@ -644,7 +648,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// hook has no parent operation scope. It uses both this detector's
     /// per-request owned-payload limit and the shared runtime's aggregate
     /// owned-payload byte budget. These logical byte budgets do not bound all
-    /// process memory, provider buffers, or transient allocations.
+    /// process memory, provider buffers, or transient allocations. Successful
+    /// return reports the hook's MIME result; the hook has no public operation
+    /// handle or separate settlement result. Its internal unmanaged path waits
+    /// for resource settlement before returning when cancellation has not won.
     ///
     /// # Parameters
     ///
