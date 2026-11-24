@@ -651,8 +651,10 @@ impl ManagedInferenceRuntime {
             let length = match length_result {
                 Ok(length) => length,
                 Err(error) => {
+                    let business_error = map_error(error);
+                    drop(input);
                     admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
-                    return Err(map_error(error));
+                    return Err(business_error);
                 }
             };
             let bridge = AsyncSampleBridge::new(length);
@@ -699,8 +701,10 @@ impl ManagedInferenceRuntime {
         let length = match length_result {
             Ok(length) => length,
             Err(error) => {
+                let business_error = map_error(error);
+                drop(input);
                 admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
-                return Err(map_error(error));
+                return Err(business_error);
             }
         };
         let bridge = AsyncSampleBridge::new(length);
