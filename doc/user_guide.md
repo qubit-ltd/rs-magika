@@ -107,7 +107,7 @@ their own lock file.
 The published default feature, `bundled-onnxruntime`, is enabled by this root
 manifest. To use the synchronous provider inventory, change the Magika entry
 to `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`.
-Fixed source and `--registry-only` select dependency sources. The README checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both with default and `inventory` features. The repository's locked [`readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml) is an isolated dynamic-loading consumer with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loading CI first checks the separate [`dynamic_loader` fixture's](../tests/fixtures/dynamic_loader/Cargo.toml) feature graph and the `readme_consumer` graphs with default and `inventory`; it then compiles `readme_consumer` and runs it with both configurations using isolated ONNX Runtime loading.
+Fixed source and `--registry-only` select dependency sources. The README checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both with default and `inventory` features. The repository's locked [`readme_consumer` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/readme_consumer/Cargo.toml) is an isolated dynamic-loading consumer with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loading CI first checks the separate [`dynamic_loader` fixture's](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml) feature graph and the `readme_consumer` graphs with default and `inventory`; it then compiles `readme_consumer` and runs it with both configurations using isolated ONNX Runtime loading.
 
 The registry versions required by the examples were not all available on
 2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
@@ -287,13 +287,7 @@ installed and available on `PATH`:
 Enable precise detection before starting the application by setting
 `QUBIT_MIME_ENABLE_PRECISE_DETECTION=true` (configuration key
 `mime.enable.precise.detection`). `MimeConfig::from_env()` reads this setting.
-The default ambiguous mappings cover `webm` (`video/webm` or `audio/webm`)
-and `ogg` (`video/ogg` or `audio/ogg`). With a filename extension, refinement
-requires that the extension is enabled and the initial MIME type belongs to
-its mapping. Without an extension, the initial MIME type is matched against
-configured mappings; different audio/video pairings keep the original MIME
-selection, while a pairing reused by several mappings is not a conflict. An
-extension and MIME type that do not form a configured pair are not refined.
+See [Media Refinement Support](#media-refinement-support) for the extension, MIME mapping, and conflict rules. The default ambiguous mappings cover `webm` (`video/webm` or `audio/webm`) and `ogg` (`video/ogg` or `audio/ogg`).
 
 ```rust
 use std::sync::Arc;
@@ -436,7 +430,7 @@ execution-provider libraries are discoverable by the dynamic loader. The
 `ort`) API is used; the environment is process-global and can only be
 committed once.
 
-The repository's [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)
+The repository's [`dynamic_loader` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml)
 uses the same ONNX Runtime version and feature set. The
 [`dynamic-loader` job in Linux CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
 first checks this fixture's feature graph and the locked `readme_consumer`

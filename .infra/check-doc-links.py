@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import re
 import sys
 import tempfile
+from urllib.parse import unquote, urlsplit
 from pathlib import Path
 
 
@@ -16,6 +18,14 @@ DOCUMENTS = (
     "doc/user_guide.md",
     "doc/user_guide.zh_CN.md",
     "doc/design-0.19.0.zh_CN.md",
+)
+SOURCE_FIXTURE_LINKS = (
+    ("doc/user_guide.md", "tests/fixtures/readme_consumer/Cargo.toml"),
+    ("doc/user_guide.md", "tests/fixtures/dynamic_loader/Cargo.toml"),
+    ("doc/user_guide.md", "tests/fixtures/dynamic_loader/Cargo.toml"),
+    ("doc/user_guide.zh_CN.md", "tests/fixtures/readme_consumer/Cargo.toml"),
+    ("doc/user_guide.zh_CN.md", "tests/fixtures/dynamic_loader/Cargo.toml"),
+    ("doc/user_guide.zh_CN.md", "tests/fixtures/dynamic_loader/Cargo.toml"),
 )
 LINK_START = re.compile(r"!?(?:\[[^\]]*\])\(")
 REFERENCE = re.compile(r"^\s*\[[^\]]+\]:\s*(\S+)", re.MULTILINE)
@@ -86,6 +96,36 @@ def local_targets(markdown: str) -> list[str]:
     return [target.split("#", 1)[0] for target in targets if target and not target.startswith(("http://", "https://", "mailto:", "#", "data:"))]
 
 
+def package_errors(root: Path, package_paths: set[str]) -> list[str]:
+    """Check relative links in packaged Markdown against Cargo's package file list."""
+    errors: list[str] = []
+    for relative in sorted(package_paths):
+        if not relative.lower().endswith(".md"):
+            continue
+        document = root / relative
+        if not document.is_file():
+            errors.append(f"{relative}: packaged Markdown file is missing from source tree")
+            continue
+        content = markdown_without_fences(document.read_text(encoding="utf-8"))
+        targets = inline_targets(content)
+        targets.extend(match.group(1).strip().strip("<>") for match in REFERENCE.finditer(content))
+        for target in targets:
+            parsed = urlsplit(target)
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                continue
+            path = unquote(parsed.path)
+            if path.startswith("/"):
+                continue
+            resolved = (document.parent / path).resolve()
+            try:
+                resolved_relative = resolved.relative_to(root.resolve()).as_posix()
+            except ValueError:
+                resolved_relative = ""
+            if not resolved_relative or resolved_relative not in package_paths:
+                errors.append(f"{relative}: package is missing link target: {target}")
+    return errors
+
+
 def find_errors(root: Path) -> list[str]:
     errors: list[str] = []
     for relative in DOCUMENTS:
@@ -137,21 +177,72 @@ def self_test() -> None:
             "doc/design-0.19.0.zh_CN.md: target outside repository: ../../sibling/existing.md"
         ]
 
+        legacy_links = {
+            "doc/user_guide.md": [
+                "../tests/fixtures/readme_consumer/Cargo.toml",
+                "../tests/fixtures/dynamic_loader/Cargo.toml",
+                "../tests/fixtures/dynamic_loader/Cargo.toml",
+            ],
+            "doc/user_guide.zh_CN.md": [
+                "../tests/fixtures/readme_consumer/Cargo.toml",
+                "../tests/fixtures/dynamic_loader/Cargo.toml",
+                "../tests/fixtures/dynamic_loader/Cargo.toml",
+            ],
+        }
+        packaged_markdown = set(legacy_links)
+        for document, targets in legacy_links.items():
+            path = root / document
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(" ".join(f"[fixture]({target})" for target in targets), encoding="utf-8")
+            for target in targets:
+                fixture = (path.parent / target).resolve()
+                fixture.relative_to(root.resolve())
+                fixture.parent.mkdir(parents=True, exist_ok=True)
+                fixture.write_text("[package]", encoding="utf-8")
+        expected = [
+            f"{document}: package is missing link target: {target}"
+            for document, targets in legacy_links.items()
+            for target in targets
+        ]
+        assert package_errors(root, packaged_markdown) == expected
+
+    repository_root = Path(__file__).resolve().parent.parent
+    for (document, target), expected_count in Counter(SOURCE_FIXTURE_LINKS).items():
+        markdown = (repository_root / document).read_text(encoding="utf-8")
+        source_url = f"https://github.com/qubit-ltd/rs-magika/blob/main/{target}"
+        actual_count = markdown.count(f"]({source_url})")
+        assert actual_count == expected_count, (
+            f"{document}: expected {expected_count} links to {target}, found {actual_count}"
+        )
+        assert (repository_root / target).is_file(), f"source fixture target is missing: {target}"
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--package-list", type=Path, help="file containing cargo package --list output")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         print("documentation link checker self-tests passed")
         return 0
     root = Path(__file__).resolve().parent.parent
-    errors = find_errors(root)
+    if args.package_list:
+        package_paths = {
+            line.strip().removeprefix("./")
+            for line in args.package_list.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+        errors = package_errors(root, package_paths)
+    else:
+        errors = find_errors(root)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("repository-local Markdown links are valid")
+    if args.package_list:
+        print("packaged Markdown relative links are valid")
+    else:
+        print("repository-local Markdown links are valid")
     return 0
 
 

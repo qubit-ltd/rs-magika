@@ -88,7 +88,7 @@ path 或 patch，并使用自己的 lock 文件。
 此根清单默认启用 `bundled-onnxruntime`。若要启用同步 Provider inventory，
 将 Magika 项改为 `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`。
 固定源码与 `--registry-only` 用于选择依赖来源。README checker 默认只用 default features 编译提取出的中英文程序；增加 `--run-example` 后，才会分别用 default 和 `inventory` 运行两份程序。
-仓库锁定的[独立 `readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml)用于隔离动态加载；它关闭了 Magika 默认 features，因此依赖图不同于本仓库根清单启用 bundled runtime 的默认图。动态加载 CI 先检查独立 [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)的 feature 图，以及 `readme_consumer` 在 default、`inventory` 下的两张 feature 图，再编译 `readme_consumer`，最后用这两种配置执行该 fixture。
+仓库锁定的[独立 `readme_consumer` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/readme_consumer/Cargo.toml)用于隔离动态加载；它关闭了 Magika 默认 features，因此依赖图不同于本仓库根清单启用 bundled runtime 的默认图。动态加载 CI 先检查独立 [`dynamic_loader` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml)的 feature 图，以及 `readme_consumer` 在 default、`inventory` 下的两张 feature 图，再编译 `readme_consumer`，最后用这两种配置执行该 fixture。
 
 ## 贯穿场景
 
@@ -170,11 +170,7 @@ fn classify(detector: &dyn MimeDetector) -> qubit_mime::MimeResult<()> {
 builder；通过 registry 构造时，配置 `MagikaMimeDetectorProvider::with_media_stream_classifier`
 并注册该 provider。
 
-已配置的 media-stream classifier 只用于符合条件的高层输入，并且必须启用 precise
-detection。输入带文件扩展名时，该扩展必须已启用，且初始检测出的 MIME type 必须属于该扩展
-对应的 MIME type。没有扩展名时，按初始 MIME type 查找配置的歧义映射。如果它对应多个不同的
-音视频配对，则保留原始 MIME 选择；多个映射复用同一配对不算冲突。扩展名未启用或初始 MIME type
-不属于该扩展的映射时，不执行 refinement。
+完整匹配规则见[媒体细化支持范围](#media-refinement-支持范围)。
 
 ## Provider Path 示例
 
@@ -213,16 +209,14 @@ fn detect_uploaded_path(
 
 ## Media Classifier 示例
 
-Media refinement 是可选的，遵循下方“Media refinement 支持范围”中的规则。例如，内置的
+Media refinement 是可选的，遵循[媒体细化支持范围](#media-refinement-支持范围)中的规则。例如，内置的
 ffprobe classifier 可以区分仅音频、仅视频和音视频内容。需要先安装 `ffprobe`，并确保它位于 `PATH` 中：
 
 应用启动前设置 `QUBIT_MIME_ENABLE_PRECISE_DETECTION=true`（配置键为
 `mime.enable.precise.detection`）以启用 precise detection；`MimeConfig::from_env()`
 会读取该设置。默认的歧义映射覆盖 `webm`（`video/webm` 或 `audio/webm`）和
-`ogg`（`video/ogg` 或 `audio/ogg`）。带文件扩展名时，扩展必须已启用，且初始 MIME type
-必须属于该扩展的映射。没有扩展名时，按初始 MIME type 查找配置的歧义映射；不同音视频配对
-会保留原始 MIME 选择，而多个映射复用同一配对不算冲突。扩展名与初始 MIME type 不构成已配置配对时，
-不会执行 refinement。
+`ogg`（`video/ogg` 或 `audio/ogg`）。完整的扩展名、MIME mapping 和冲突规则见
+[媒体细化支持范围](#media-refinement-支持范围)。
 
 ```rust
 use std::sync::Arc;
@@ -367,7 +361,7 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
 系统加载器找到。`ort::init_from` 必须早于第一个 detector（或其他 `ort` API）调用；
 该环境是进程级全局状态，只能 commit 一次。
 
-仓库的[`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)
+仓库的[`dynamic_loader` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml)
 使用相同的 ONNX Runtime 版本和 feature 集合。Linux CI 的
 [`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
 先检查该 fixture 的 feature 图，以及锁定的 `readme_consumer` 在 default 和 `inventory` 下的两张 feature 图，
