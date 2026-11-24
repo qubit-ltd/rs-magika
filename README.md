@@ -33,7 +33,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-The crates.io releases needed by this example are not all available yet (`qubit-magika` 0.18, `qubit-mime` 0.22, `qubit-fs` 0.4, and `qubit-operation` 0.3.2 or newer). On 2026-11-24, the registry search returned 0.16.0, 0.21.1, 0.3.3, and 0.3.1 respectively; the registry-only README check still fails to resolve `qubit-magika = "^0.18"`. Until the required releases are published, use the fixed sibling source checkouts listed in [the dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv) and run `python3 .infra/check-readme-examples.py` from this source checkout. `python3 .infra/check-readme-examples.py --registry-only` is the clean registry acceptance gate and will pass once the required releases can be resolved. Add `--run-example` to that command to execute the current `examples/basic.rs` against those registry releases; this opt-in downloads and runs the bundled ONNX Runtime and needs a supported native environment.
+The crates.io releases needed by this example are not all available yet (`qubit-magika` 0.18, `qubit-mime` 0.22, `qubit-fs` 0.4, and `qubit-operation` 0.3.2 or newer). On 2026-11-24, registry search returned 0.16.0, 0.21.1, 0.3.3, and 0.3.1 respectively, and `--registry-only` could not resolve `qubit-magika = "^0.18"`. Until those releases are available, use the fixed sibling source checkouts in [the dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv) and run `python3 .infra/check-readme-examples.py` from the repository root. `python3 .infra/check-readme-examples.py --registry-only` uses registry dependencies; once their versions resolve, it still compiles the extracted consumers and requires the normal native runtime conditions to run. Both modes extract and check the English and Chinese examples, each with default features and `inventory`. Add `--run-example` to run the extracted programs. The separate [dynamic-loader CI job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml) remains the acceptance path for isolated dynamic ONNX Runtime loading.
 
 ## Quick Start
 
@@ -120,20 +120,22 @@ The returned detection result is the business outcome. The scope observer
 reports release separately: `Pending(snapshot)` is only a bounded wait, and
 `Ready(report)` may still contain unreleased resources. Unknown provider I/O
 keeps capacity reserved; the built-in cleanup policy does not release it on a
-retry without new completion evidence. The shutdown report's `worker_stopped`
-records worker join independently of either observation.
+retry without new completion evidence. `worker_stopped == true` means the
+worker joined; `false` means join is unconfirmed. Either value is independent
+of the resource report, which callers should read separately.
 
 The inventory submits a synchronous `MimeDetectorSpec` factory only. It does
 not add a provider to `qubit-mime`'s separate async provider registry or attach
 an application scope. Selecting this sync-only `magika` provider through the
 scope-aware async `MimeRuntime` route returns `AsyncUnsupported`; it does not
-fall back to synchronous inference. The legacy content hook waits for ordinary
-inference settlement, but runtime `Cancel` may return its stop error before the
-worker releases its input and permits. The legacy provider-path hook observes
-only its child business outcome; `Cancel` can return that stop outcome while
-provider I/O remains unconfirmed. Neither legacy hook accepts a parent scope or
-exposes settlement. See the [managed lifecycle guide](doc/user_guide.md#migration-guide)
-for these distinctions.
+fall back to synchronous inference. Both legacy hooks can return their
+business result before resource settlement is confirmed. A caller that needs
+settlement can use the managed API and read its resource report separately: a
+bounded wait can be `Pending`, while `Ready` can still report that release is
+unconfirmed. Locally stopping a request does not release capacity while
+provider I/O or worker access remains unconfirmed. See the
+[managed lifecycle guide](doc/user_guide.md#migration-guide) for shutdown and
+worker reporting semantics.
 
 The inventory-enabled `MimeDetectorRegistry::builtin()` discovers the
 unconfigured sync provider; its default selection remains `repository`, so
@@ -145,9 +147,12 @@ submission.
 
 To prepare missing local dependency checkouts in a source repository, use the
 [preparation script](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh).
-Its `--check-locked` mode only checks that existing sibling repositories have
-the pinned revisions and clean worktrees; it reports missing, mismatched, or
-dirty checkouts but does not repair them. Preparation leaves existing Git
+From the repository root, use the read-only validation command
+[`check-locked-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/check-locked-local-path-dependencies.sh)
+(`.infra/lib/check-locked-local-path-dependencies.sh`).
+It checks every fixed sibling commit and worktree state, and matches the
+pinned-dependency check in [CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml).
+Preparation leaves existing Git
 checkouts untouched, so restore a drifted checkout to its pinned revision
 manually before checking again. It refuses to overwrite occupied non-checkout
 paths. Normal and dynamic-fixture bootstrap modes share the same preparation
@@ -157,7 +162,7 @@ coreutils use that command name) when available. On Darwin, if neither command
 is available, it uses Python 3's `renamex_np` (default executable `python3`;
 override it with `RS_INFRA_PYTHON`). Other platforms require GNU `mv -Tn` or
 `gmv` to publish a missing checkout. Reusing an existing valid worktree and strict
-`--check-locked` validation do not require a publisher. The package does not
+read-only validation do not require a publisher. The package does not
 ship `.infra`, so its script and [pinned revision list](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 are linked from the source repository. After preparing the sibling layout, the
 following commands verify the locked manifests:
@@ -179,9 +184,12 @@ worker error reporting, and shutdown timeouts.
 Unknown and undefined Magika predictions have no MIME candidate and produce
 `Ok(None)`, allowing the selected `MimeDetectionPolicy` to decide filename
 fallback. A shutdown timeout does not forcibly interrupt native inference or
-provider I/O; inspect `worker_stopped` and `worker_panicked` in the report. If
-the worker has not stopped, the runtime retains its handle so a later shutdown
-call can continue observing and joining it.
+provider I/O. `worker_stopped == false` means join was not confirmed before
+the deadline; `true` means the worker joined, independently of resource
+settlement. `worker_panicked` records an uncaught panic observed during join.
+A panic caught while running inference is reported as a failed operation and
+a faulted runtime. If join was not confirmed, a later shutdown call can
+continue observing the retained worker handle.
 
 Provider selection and detector configuration are separate inputs. A
 `ProviderSelection` decides which registered provider may create the service;

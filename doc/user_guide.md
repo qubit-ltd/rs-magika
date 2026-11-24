@@ -52,13 +52,16 @@ The source checkout includes dependency preparation helpers that are not
 included in the published crate. To prepare missing sibling checkouts, run
 [`prepare-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)
 without arguments. Preparation leaves any existing Git checkout untouched,
-even when its revision or working tree differs from the lock file. To verify
-already prepared checkouts without changing them, run
-[`prepare-local-path-dependencies.sh --check-locked`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)
-and compare against the fixed revisions in
-[`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv).
-The check reports a missing, dirty, or wrong-revision checkout; it does not
-repair or replace it. Review and resolve drift deliberately. The normal and
+even when its revision or working tree differs from the lock file. To validate
+the sibling layout read-only, run
+[`check-locked-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/check-locked-local-path-dependencies.sh)
+from the repository root. It checks every pinned commit and worktree state,
+reports missing, dirty, or wrong-revision checkouts, and does not repair them.
+This is the same pinned-dependency check used by
+[CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml).
+Compare the result with the fixed revisions in
+[`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
+and resolve drift deliberately. The normal and
 dynamic-fixture bootstrap modes share the same preparation helper. Publishing
 a newly prepared missing checkout requires an exclusive rename into the target
 path. The helper uses GNU `mv -Tn` (or `gmv` where GNU coreutils use that name)
@@ -66,7 +69,7 @@ when available. On Darwin, if neither GNU publisher is available, it uses
 Python 3's `renamex_np` (default executable `python3`; override it with
 `RS_INFRA_PYTHON`). Other platforms require GNU `mv -Tn` or `gmv` to publish a
 missing checkout. Preparing an existing valid worktree and running strict
-`--check-locked` validation do not require a publisher.
+read-only validation do not require a publisher.
 
 The registry versions required by the examples were not all available on
 2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
@@ -408,14 +411,12 @@ lengths do not cap total process memory, including provider buffers and
 transient allocations. After shutdown, ruled sync inputs can still return
 directly; requests needing model inference use the closed runtime and fail.
 
-The legacy `guess_from_content_async` hook waits for its internal operation to
-settle on ordinary completion. Runtime `Cancel` can return its stop error
-before the worker releases input and byte capacity. The legacy async
-provider-path hook exposes only the internal child business outcome; runtime
-`Cancel` may return that stop outcome while native or remote provider I/O is
-still unconfirmed. Neither hook accepts a parent scope or exposes settlement.
-Use the explicit managed APIs when the application needs to distinguish
-business outcome from resource release.
+Both legacy hooks can return their business result before resource settlement
+is confirmed. The managed API exposes the resource report separately: a
+bounded observation can be `Pending`, and `Ready` can still report that release
+is unconfirmed. Capacity remains reserved while provider I/O or worker access
+is unconfirmed, including after a local stop request. Use the managed APIs when
+the application needs to observe resource release independently of the result.
 
 The async content hook returns the backend's raw Magika candidate list, like
 the synchronous content hook. It does not apply high-level MIME selection or
@@ -624,11 +625,16 @@ model requests; create and register a new runtime to resume inference. This
 policy addresses Rust panics caught by the worker and does not cover native
 crashes or `panic = abort`.
 
-`shutdown_blocking` uses one deadline for service admission/settlement and
-worker exit. On timeout, `worker_stopped == false` means the worker has not
-exited and its handle is retained; a later call can continue observing and
-reap it. Shutdown does not forcibly interrupt native inference or provider
-I/O.
+`shutdown_blocking` uses one deadline for the selected shutdown mode and
+worker exit. `Drain` waits for accepted service operations to settle. `Cancel`
+waits for local provider access to finish, closes the worker sender, and tries
+to join; a queued operation may still appear in the resource-group snapshot
+until its executor retires it. On timeout, `worker_stopped == false` means join
+has not been confirmed and the worker handle is retained; `true` means the
+worker was joined, not that every operation resource was released. Read the
+resource report independently. `worker_panicked` records an uncaught panic
+observed while joining. Shutdown does not forcibly interrupt native inference
+or provider I/O.
 
 The old `MimeDetector` provider hooks remain useful for callers that do not
 manage operation scopes. They cannot attach work to a parent scope because the

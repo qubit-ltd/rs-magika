@@ -1,6 +1,6 @@
 # rs-magika 0.19.0 详细设计：有界采样与受管理异步推理
 
-> **历史入口更新（2026-11-24）：** 本篇仍是历史提案，不是当前实现的完整说明。此前指向的替代设计和实施计划文件不在本仓库中；当前行为以[用户指南](user_guide.md)为准。本篇的旧版 `qubit-operation ^0.1` 前置条件只属于当时的提案快照，不是当前实现要求。当前 managed API 依赖公开的 `qubit-operation ^0.3` 契约；不能据此使用旧 ^0.1 接口或 0.2 crate-private adapter。T0 固定依赖复现入口见[本地依赖版本表](../.infra/ci/local-path-dependencies.tsv)及[校验脚本](../.infra/bin/prepare-local-path-dependencies.sh)。
+> **历史入口更新（2026-11-24）：** 本篇仍是历史提案，不是当前实现的完整说明。此前指向的替代设计和实施计划文件不在本仓库中；当前行为以[用户指南](user_guide.md)为准。本篇的旧版 `qubit-operation ^0.1` 前置条件只属于当时的提案快照，不是当前实现要求。当前 managed API 依赖公开的 `qubit-operation ^0.3` 契约；不能据此使用旧 ^0.1 接口或 0.2 crate-private adapter。固定依赖的只读校验请从仓库根运行[`.infra/lib/check-locked-local-path-dependencies.sh`](../.infra/lib/check-locked-local-path-dependencies.sh)，其规则与[CI](../.github/workflows/ci.yml)一致；准备缺失的依赖仍使用[准备脚本](../.infra/bin/prepare-local-path-dependencies.sh)。
 
 - 状态：历史提案。部分机制已落地；本文不是当前实现的完整说明，也不是该提案全部要求已经验收的证明。
 - 日期：2026-11-11。

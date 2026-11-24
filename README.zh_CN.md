@@ -30,7 +30,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1；registry-only README 检查仍无法解析 `qubit-magika = "^0.18"`。发布完成前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并在本源码仓库运行 `python3 .infra/check-readme-examples.py`。`python3 .infra/check-readme-examples.py --registry-only` 是干净 registry 验收门禁；所需版本可解析后即可通过。给该命令增加 `--run-example` 会通过 registry 版本运行当前的 `examples/basic.rs`；此 opt-in 会下载并运行 bundled ONNX Runtime，要求当前原生环境受支持。
+此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1，`--registry-only` 仍无法解析 `qubit-magika = "^0.18"`。发布完成前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并从仓库根运行 `python3 .infra/check-readme-examples.py`。`--registry-only` 使用 registry 依赖；版本可解析后仍会编译提取出的消费者程序，运行时还需满足原生环境条件。两种模式都会提取并检查中英文示例，分别覆盖默认 feature 和 `inventory`。增加 `--run-example` 可运行提取出的程序。独立的 [dynamic-loader CI job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml) 继续负责隔离动态加载 ONNX Runtime 的验收。
 
 ## 快速开始
 
@@ -118,10 +118,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 Inventory 只提交同步 `MimeDetectorSpec` factory，不会向 `qubit-mime` 独立的 async provider
 registry 添加 Provider，也不会附加应用 scope。通过支持 scope 的 async `MimeRuntime` 路由
 选择这个仅支持同步的 `magika` Provider 时，会返回 `AsyncUnsupported`，不会回退到同步推理。
-若需 scope 跟踪，可直接调用 Magika 的 managed API。旧版 content hook 在正常完成时等待内部操作结算；
-runtime `Cancel` 可能先返回停止错误，worker 仍会保留输入和许可。旧版 provider-path hook 只观察子操作业务结果，
-`Cancel` 可在 Provider I/O 尚未确认结束时返回停止结果。两个旧 hook 都没有 parent-scope 或 settlement observer。
-区别见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
+若需 scope 跟踪，可直接调用 Magika 的 managed API。两个旧 hook 都可能在资源结算确认前返回业务结果。
+受管 API 会单独提供资源报告：有界等待可能返回 `Pending`；`Ready` 报告也可能指出释放尚未确认。
+本地停止请求不会在 Provider I/O 或 worker 访问尚未确认结束时释放容量。关闭超时时，
+`worker_stopped == false` 表示尚未确认 worker 已 join；`true` 表示已 join，但不代表资源报告中的所有资源都已释放。
+`worker_panicked` 只记录 join 时观察到的未捕获 panic。详见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
 
 启用 inventory 时，`MimeDetectorRegistry::builtin()` 会发现未配置的同步 Provider；默认选择仍是
 `repository`，因此需显式选择 `magika`。独立的 `MimeDetectorRegistry::default()` 初始为空，适合
@@ -130,12 +131,14 @@ runtime `Cancel` 可能先返回停止错误，worker 仍会保留输入和许�
 
 在源码仓库中准备缺少的本地依赖 checkout 时，请使用
 [准备脚本](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)。
-`--check-locked` 只检查现有兄弟仓库是否处于固定提交且工作区干净；发现缺失、提交不符或工作区有改动时会报错，
-但不会修复。准备操作不会改动现有 Git checkout，因此需先手动将漂移的 checkout 恢复到固定提交再检查。
+只读校验请从仓库根运行 [`check-locked-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/check-locked-local-path-dependencies.sh)
+（`.infra/lib/check-locked-local-path-dependencies.sh`）。该命令检查每个兄弟 checkout 的固定提交和干净工作区，
+缺失、提交不符或工作区有改动时会报错但不会修复；行为与 [CI 的固定依赖检查](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)一致。
+准备操作不会改动现有 Git checkout，因此需先手动将漂移的 checkout 恢复到固定提交再检查。
 常规和动态 fixture bootstrap 模式共用同一个准备 helper。发布新建的缺失 checkout 需要独占目标路径的重命名：
 工具优先使用 GNU `mv -Tn`（某些系统上命令名为 `gmv`）；在 Darwin 上找不到支持 `-T` 的 `mv` 或 `gmv` 时，
 默认调用系统 `python3` 的 `renamex_np`。可通过 `RS_INFRA_PYTHON` 指定 Python 解释器；其他平台仍需 GNU `mv -Tn` 或 `gmv`。
-复用已存在的合法 worktree 和严格的 `--check-locked` 校验不需要发布工具。它会拒绝覆盖已占用的非 Git 路径。Cargo 包不
+复用已存在的合法 worktree 和严格只读校验不需要发布工具。准备脚本会拒绝覆盖已占用的非 Git 路径。Cargo 包不
 包含 `.infra`，因此脚本和[固定提交列表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 链接到源码仓库。准备好兄弟目录后，可用以下命令检查各 manifest 的锁定依赖：
 
@@ -152,8 +155,10 @@ cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtu
 [受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)中的边界、worker 错误和关闭超时。
 
 Magika 返回 `Unknown` 或 `Undefined` 时没有 MIME 候选，结果为 `Ok(None)`，由选定的
-`MimeDetectionPolicy` 决定文件名回退。关闭超时不会强制中断 native 推理或 Provider I/O；请检查报告中的
-`worker_stopped` 和 `worker_panicked`。worker 尚未停止时，runtime 会保留句柄，后续关闭调用可继续观察并等待它退出。
+`MimeDetectionPolicy` 决定文件名回退。关闭超时不会强制中断 native 推理或 Provider I/O。
+`worker_stopped == false` 表示截止时尚未确认 join，`true` 表示 worker 已 join；两者都与资源结算报告相互独立。
+`worker_panicked` 记录 join 时观察到的未捕获 panic。推理期间捕获的 panic 会作为失败操作报告，并将 runtime 标为 faulted。
+未确认 join 时，runtime 会保留句柄，后续关闭调用可继续观察并等待 worker 退出。
 
 Provider 选择和 detector 配置是两个独立输入：`ProviderSelection` 决定允许哪个已注册
 Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的 detector 实例。

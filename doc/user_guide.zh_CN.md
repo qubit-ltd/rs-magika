@@ -42,15 +42,17 @@ Provider 读取，但不接收 parent operation scope。应用若要把 Provider
 发布的 crate 不包含源码仓库里的依赖准备脚本。需要准备缺失的兄弟 checkout 时，可运行
 [`prepare-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)
 （不带参数）。准备脚本不会覆盖已有 Git checkout，即使其提交或工作区状态与锁定值不同。
-若 checkout 已存在，只做核对时运行
-[`prepare-local-path-dependencies.sh --check-locked`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)，
-并对照固定提交清单
-[`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)。
-核对会报告缺失、脏状态或提交不符，但不会修复或替换现有目录；请先检查漂移，再决定如何处理。
+只读核验请从仓库根运行
+[`check-locked-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/check-locked-local-path-dependencies.sh)。
+它会检查每个固定提交和工作区状态，报告缺失、脏状态或提交不符，但不会修复目录；这与
+[CI 的固定依赖检查](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)一致。
+请对照固定提交清单
+[`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
+检查结果，并审慎处理漂移。
 常规和动态 fixture bootstrap 模式共用同一个准备 helper。发布新建的缺失 checkout 时，目标路径必须通过独占重命名创建。
 工具优先使用 GNU `mv -Tn`（某些系统上 GNU coreutils 命令名为 `gmv`）。在 Darwin 上找不到支持 `-T` 的 `mv` 或 `gmv` 时，
 默认调用系统 `python3` 的 `renamex_np`；可用 `RS_INFRA_PYTHON` 指定解释器。其他平台发布缺失 checkout 仍需 GNU `mv -Tn` 或 `gmv`。
-准备已存在的合法 worktree 和运行严格的 `--check-locked` 校验都不需要发布工具。
+准备已存在的合法 worktree 和运行严格只读校验都不需要发布工具。
 
 ## 贯穿场景
 
@@ -332,10 +334,9 @@ runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由
 payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
 分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
 
-旧的 `guess_from_content_async` hook 在正常完成时会等待内部操作结算。runtime `Cancel` 可能先返回停止错误，
-worker 仍持有输入和字节容量。旧的 async provider-path hook 只返回内部子操作的业务结果；runtime `Cancel`
-也可能在 Provider native 或远端 I/O 尚未确认结束时返回停止结果。两个旧 hook 都没有 parent scope，
-也不提供 settlement observer。若需区分业务结果与资源释放，应使用显式 managed API。
+两个旧 hook 都可能在资源结算确认前返回业务结果。managed API 会单独提供资源报告：有界观察可能返回
+`Pending`；`Ready` 报告也可能指出资源释放尚未确认。Provider I/O 或 worker 访问尚未确认结束时，容量会继续保留，
+即使本地已经请求停止也是如此。若需独立观察资源释放，应使用显式 managed API。
 
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
 选择或媒体细化。输入受理后会按 owned payload 计入共享 runtime 聚合字节预算；即使仓库规则原本
@@ -510,9 +511,11 @@ session；Magika 与 ONNX Runtime 均未说明 unwind 后可安全恢复 session
 模型请求；应用需要新建 runtime 并重新注册 Provider 才能恢复推理。此策略处理 worker 捕获到的
 Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 
-`shutdown_blocking` 用同一个 deadline 等待服务接纳/结算和 worker 退出。超时返回时，
-`worker_stopped == false` 表示 worker 尚未退出，运行时会保留其 handle；之后再次调用 shutdown
-可以继续观察并回收 worker。shutdown 不会强行中断 native 推理或 Provider I/O。
+`shutdown_blocking` 使用同一个 deadline 执行所选关闭模式并等待 worker 退出。`Drain` 会等待已接纳的服务操作结算。
+`Cancel` 会等待本地 Provider 访问结束，随后关闭 worker sender 并尝试 join；排队操作仍可能留在资源组快照中，
+直到其 executor 将其退休。超时时，`worker_stopped == false` 表示尚未确认 join，运行时会保留 worker handle；
+`true` 表示 worker 已 join，但不代表每项操作资源都已释放，因此仍要单独读取资源报告。
+`worker_panicked` 表示 join 时观察到未捕获 panic。shutdown 不会强行中断 native 推理或 Provider I/O。
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
