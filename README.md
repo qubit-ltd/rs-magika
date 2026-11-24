@@ -174,6 +174,9 @@ cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtu
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/readme_consumer/Cargo.toml
 ```
 
+For a standalone application manifest using these fixed checkouts, see the
+[fixed-source application example in the user guide](doc/user_guide.md#conceptual-model).
+
 Managed requests reserve runtime capacity, the logical `max_bytes` sampling
 budget, and the scope child before provider I/O. Closed, full, or cancelled
 requests are rejected before provider calls. Dropping a pending provider future

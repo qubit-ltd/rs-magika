@@ -54,6 +54,41 @@ Provider 读取，但不接收 parent operation scope。应用若要把 Provider
 默认调用系统 `python3` 的 `renamex_np`；可用 `RS_INFRA_PYTHON` 指定解释器。其他平台发布缺失 checkout 仍需 GNU `mv -Tn` 或 `gmv`。
 准备已存在的合法 worktree 和运行严格只读校验都不需要发布工具。
 
+需要使用尚未发布的依赖版本时，可把应用 workspace 根放在固定 checkout
+`rs-*` 的同级目录中，应用目录命名为 `app`。将以下清单保存为
+`app/Cargo.toml`：
+
+```toml
+[workspace]
+
+[package]
+name = "my-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+qubit-magika = { path = "../rs-magika" }
+qubit-mime = { path = "../rs-mime" }
+qubit-fs = { path = "../rs-fs", default-features = false, features = ["async"] }
+qubit-operation = { path = "../rs-operation" }
+qubit-spi = "0.14"
+
+[patch.crates-io]
+qubit-operation = { path = "../rs-operation" }
+```
+
+成员依赖路径相对 package 目录解析；workspace patch 路径相对 workspace 根目录解析。
+使用源码仓库的准备脚本准备固定 checkout，再运行
+`check-locked-local-path-dependencies.sh` 核验，然后在独立应用中生成并检查自己的
+lock 文件。本仓库源码 checker 使用相同的根清单结构。仅使用 registry 的消费者不写
+path 或 patch，并使用自己的 lock 文件。
+
+此根清单默认启用 `bundled-onnxruntime`。若要启用同步 Provider inventory，
+将 Magika 项改为 `qubit-magika = { path = "../rs-magika", features = ["inventory"] }`。
+README checker 会编译默认和 inventory 两种变体；只有添加 `--run-example` 才会运行程序。
+仓库的[独立 README 消费者 fixture](../tests/fixtures/readme_consumer/Cargo.toml)
+展示了锁定后的默认应用依赖图。
+
 ## 贯穿场景
 
 假设应用接收一个上传的 Python 脚本：它需要根据内容得到 MIME 类型，同时保留对普通
@@ -267,11 +302,15 @@ provider-path 检测调用它。path backend 将候选 MIME type 返回给高层
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.18", default-features = false }
-qubit-mime = "0.22"
+qubit-magika = { path = "../rs-magika", default-features = false }
+qubit-mime = { path = "../rs-mime" }
+qubit-operation = { path = "../rs-operation" }
+qubit-fs = { path = "../rs-fs", default-features = false, features = ["async"] }
 qubit-spi = "0.14"
-qubit-fs = "0.4"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
+
+[patch.crates-io]
+qubit-operation = { path = "../rs-operation" }
 ```
 
 创建 detector 前先初始化 runtime。Windows 使用 `onnxruntime.dll`，macOS 使用
@@ -296,7 +335,9 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
 系统加载器找到。`ort::init_from` 必须早于第一个 detector（或其他 `ort` API）调用；
 该环境是进程级全局状态，只能 commit 一次。
 
-仓库 Linux CI 的[`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)使用 ONNX Runtime
+仓库的[`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)
+使用相同的 ONNX Runtime 版本和 feature 集合。Linux CI 的
+[`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)使用 ONNX Runtime
 1.24.2 验证这条动态加载路径：先初始化共享库，再创建 detector，并确认 Python 内容识别为
 `text/x-python`。该 job 还检查 Cargo feature 图，确认未启用 bundled runtime 下载。
 `ORT_LIBRARY_PATH` 必须指向共享库文件本身，而不是所在目录。

@@ -150,6 +150,8 @@ cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtu
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/readme_consumer/Cargo.toml
 ```
 
+独立应用的固定源码清单示例见[用户手册中的固定源码应用示例](doc/user_guide.zh_CN.md#概念模型)。
+
 受管请求会在访问 Provider 之前预留 runtime 容量、逻辑上的 `max_bytes` 采样预算，
 并提交 scope 子操作；runtime 已关闭、容量已满或请求已取消时，不会调用 Provider。
 如果 Provider future 尚处于 Pending 就被丢弃，只能确认本地轮询停止。无法观察 native
