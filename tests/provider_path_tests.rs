@@ -611,7 +611,7 @@ fn assert_opened_provider_session_drops_before_stop_releases_admission(runtime_s
                 .await
         })
         .unwrap();
-    let _ = run_ready(operation.wait_outcome()).expect("request outcome should be available");
+    let outcome = run_ready(operation.wait_outcome()).expect("request outcome should be available");
     let settlement = run_ready(operation.wait_settlement());
     let shutdown_report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
     let final_snapshot = runtime.snapshot();
@@ -621,6 +621,31 @@ fn assert_opened_provider_session_drops_before_stop_releases_admission(runtime_s
     assert_eq!(1, observations.random_opens.load(Ordering::SeqCst));
     assert_eq!(1, observations.session_drops.load(Ordering::SeqCst));
     assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    assert!(
+        observations.session_read_ranges.lock().unwrap().is_empty(),
+        "setup stop must happen before any session read is attempted"
+    );
+    if runtime_stop {
+        assert!(
+            matches!(
+                &outcome,
+                qubit_operation::OperationOutcome::Failed(MimeError::DetectorBackend {
+                    backend,
+                    reason,
+                }) if backend == "magika" && reason == "provider inference stopped"
+            ),
+            "runtime stop should preserve Magika's setup stop error: {outcome:?}"
+        );
+    } else {
+        assert!(
+            matches!(
+                &outcome,
+                qubit_operation::OperationOutcome::Stopped(report)
+                    if report.reason == StopReason::UserCancelled
+            ),
+            "scope stop should report the pinned UserCancelled outcome: {outcome:?}"
+        );
+    }
     assert!(
         observations.session_drop_reserved_bytes.load(Ordering::SeqCst) >= 4096,
         "opened session must drop while byte capacity remains reserved"
@@ -3076,6 +3101,25 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
             ));
         }
     }
+    // Stat/open and random-access read expose a provider future whose Drop is
+    // observed by AsyncProviderGate. Ordinary and legacy range reads are
+    // checked through cancellation and settlement evidence below.
+    let observes_wait_drop = matches!(point, AsyncProviderGatePoint::Stat | AsyncProviderGatePoint::Open)
+        || session;
+    let provider_wait_dropped_before_release = if gate_was_entered && observes_wait_drop {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !gate.is_wait_dropped() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        gate.is_wait_dropped()
+    } else {
+        false
+    };
+    if gate_was_entered && observes_wait_drop && !provider_wait_dropped_before_release {
+        failures.push(format!(
+            "runtime Cancel must drop the pending Provider future before gate release; managed={managed}, point={point:?}, session={session}, range={range}"
+        ));
+    }
     gate.release();
     let completed = match before_release {
         Ok(completed) => Ok(completed),
@@ -3083,20 +3127,14 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     };
     shutdown.join().unwrap();
     let (finished_at, report) = completed.expect("runtime Cancel should finish after the gate is released");
-    let provider_wait_dropped_after_release = gate.is_wait_dropped();
     if !gate_was_entered || !returned_before_release || !report.worker_stopped {
         failures.push(format!(
             "managed={managed}, point={point:?}, session={session}, range={range}, gate_entered={gate_was_entered}, returned_before_release={returned_before_release}, report={report:?}, completed_at={finished_at:?}"
         ));
     }
-    // Stat/open and random-access read expose a provider future whose Drop is
-    // observed by AsyncProviderGate. Range and ordinary reads use AsyncInput
-    // polling instead, so their reader is intentionally retained in recovery.
-    if gate_was_entered && (point != AsyncProviderGatePoint::Read || session) && !provider_wait_dropped_after_release {
-        failures.push(format!(
-            "runtime Cancel must drop the pending Provider future; managed={managed}, point={point:?}, session={session}, range={range}"
-        ));
-    }
+    // The ordinary streaming and legacy range reader paths have no future-drop
+    // probe. Their stop outcome, negative settlement, retained capacity, and
+    // read-count checks below prove the unconfirmed I/O remains accounted for.
     let settlement_after = run_until(observer.wait_settlement(), Duration::from_millis(500));
     let settlement_was_published = settlement_after.is_ok();
     let mut contract_failures = Vec::new();
@@ -3165,7 +3203,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
         }
         if snapshot.unconfirmed_provider_io == 0 || snapshot.reserved_bytes == 0 {
             contract_failures.push(format!(
-                "cancelled Pending I/O must retain its reservation evidence when settlement_published={settlement_was_published}; managed={managed}, point={point:?}, session={session}, range={range}, future_dropped={provider_wait_dropped_after_release}, snapshot={snapshot:?}"
+                "cancelled Pending I/O must retain its reservation evidence when settlement_published={settlement_was_published}; managed={managed}, point={point:?}, session={session}, range={range}, future_dropped_before_release={provider_wait_dropped_before_release}, snapshot={snapshot:?}"
             ));
         }
         if report.admission.snapshot.service_resources == 0 {
