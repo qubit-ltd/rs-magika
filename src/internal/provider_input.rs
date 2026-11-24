@@ -133,6 +133,21 @@ pub(crate) async fn read_async(
     buffer: &mut [u8],
     offset: u64,
 ) -> MagikaResult<()> {
+    read_async_with_stop(file_system, path, length, version, budget, buffer, offset, || false).await
+}
+
+/// Reads an asynchronous provider range while checking cancellation between
+/// completed filesystem operations.
+pub(crate) async fn read_async_with_stop(
+    file_system: &qubit_fs::AsyncFileSystem,
+    path: &Path,
+    length: u64,
+    version: Option<&ResourceVersion>,
+    budget: &mut ReadBudget,
+    buffer: &mut [u8],
+    offset: u64,
+    should_stop: impl Fn() -> bool,
+) -> MagikaResult<()> {
     validate_request(length, budget, buffer.len(), offset)?;
     if buffer.is_empty() {
         return Ok(());
@@ -143,7 +158,7 @@ pub(crate) async fn read_async(
         .max_read_range_bytes()
         .maximum()
         .map_or(usize::MAX, |maximum| usize::try_from(maximum).unwrap_or(usize::MAX));
-    read_async_segments(file_system, path, version, buffer, offset, max_segment).await
+    read_async_segments_with_stop(file_system, path, version, buffer, offset, max_segment, should_stop).await
 }
 
 /// Reads a complete asynchronous request using the supplied maximum range.
@@ -169,11 +184,28 @@ pub(crate) async fn read_async_segments(
     offset: u64,
     max_segment: usize,
 ) -> MagikaResult<()> {
+    read_async_segments_with_stop(file_system, path, version, buffer, offset, max_segment, || false).await
+}
+
+/// Reads bounded asynchronous ranges, checking cancellation between completed
+/// provider operations.
+pub(crate) async fn read_async_segments_with_stop(
+    file_system: &qubit_fs::AsyncFileSystem,
+    path: &Path,
+    version: Option<&ResourceVersion>,
+    buffer: &mut [u8],
+    offset: u64,
+    max_segment: usize,
+    should_stop: impl Fn() -> bool,
+) -> MagikaResult<()> {
     if max_segment == 0 {
         return Err(invalid_input("provider maximum read range is zero").into());
     }
     let mut completed = 0;
     while completed < buffer.len() {
+        if should_stop() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into());
+        }
         let segment_length = (buffer.len() - completed).min(max_segment);
         let segment_offset = offset
             .checked_add(completed as u64)

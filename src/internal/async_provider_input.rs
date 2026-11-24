@@ -19,6 +19,7 @@ use qubit_fs::read::AsyncRandomAccessReader;
 
 use super::async_route::AsyncRoute;
 use super::provider_input::read_async;
+use super::provider_input::read_async_with_stop;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
 use super::session_read::read_async_session_with_stop;
@@ -123,16 +124,30 @@ impl AsyncInput for AsyncProviderInput {
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         match &mut self.route {
             AsyncRoute::OwnedLegacy { file_system, path } => {
-                read_async(
-                    file_system,
-                    path,
-                    self.length,
-                    self.version.as_ref(),
-                    &mut self.budget,
-                    buffer,
-                    offset,
-                )
-                .await
+                if let Some(state) = &self.stop_state {
+                    read_async_with_stop(
+                        file_system,
+                        path,
+                        self.length,
+                        self.version.as_ref(),
+                        &mut self.budget,
+                        buffer,
+                        offset,
+                        || state.stop_requested(),
+                    )
+                    .await
+                } else {
+                    read_async(
+                        file_system,
+                        path,
+                        self.length,
+                        self.version.as_ref(),
+                        &mut self.budget,
+                        buffer,
+                        offset,
+                    )
+                    .await
+                }
             }
             AsyncRoute::Session { reader, max_segment } => {
                 if let Some(state) = &self.stop_state {
