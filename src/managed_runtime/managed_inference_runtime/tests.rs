@@ -2053,17 +2053,25 @@ fn test_provider_read_error_is_mapped_and_settled() {
     let mapped_error = map_provider_test_error(magika::Error::IOError(std::io::Error::other("test mapping")));
     assert!(matches!(mapped_error, MimeError::DetectorBackend { .. }));
     let length_admission = runtime.reserve_for_provider(None, 8192).unwrap();
-    let length_result = block_on(runtime.detect_async_input_admitted_test(
-        length_admission,
-        FailedLengthInput,
-        8192,
-        map_provider_test_error,
-    ));
+    let timeout = Duration::from_secs(2);
+    let length_result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_async_input_admitted_test(
+            length_admission,
+            FailedLengthInput,
+            8192,
+            map_provider_test_error,
+        ),
+        "provider length error settlement",
+        timeout,
+    );
     assert!(matches!(length_result, Err(MimeError::DetectorBackend { .. })));
 
     let admission = runtime.reserve_for_provider(None, 8192).unwrap();
-    let result =
-        block_on(runtime.detect_async_input_admitted_test(admission, FailedReadInput, 8192, map_provider_test_error));
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_async_input_admitted_test(admission, FailedReadInput, 8192, map_provider_test_error),
+        "provider range read error settlement",
+        timeout,
+    );
 
     assert!(matches!(result, Err(MimeError::Io(_))));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
@@ -2875,8 +2883,16 @@ fn test_drain_admitted_provider_completes_after_gate_closes() {
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(runtime.reserve_for_provider(None, 1).is_err());
     release_tx.send(()).unwrap();
-    assert_eq!(detect.join().unwrap().unwrap(), None);
-    let report = shutdown.join().unwrap();
+    assert_eq!(
+        crate::tests::internal::bridge_wait::join_before(detect, "drained provider detection", Duration::from_secs(2))
+            .unwrap(),
+        None
+    );
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "drain shutdown after provider completion",
+        Duration::from_secs(2),
+    );
     assert_eq!(0, report.admission.snapshot.active_operations);
     assert!(report.worker_stopped);
 }
@@ -3656,10 +3672,24 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
         )
         .unwrap();
 
-    assert!(block_on(bridge.next_request()).is_none());
-    let error = block_on(future).unwrap_err();
+    assert!(crate::tests::internal::bridge_wait::poll_before(
+        bridge.next_request(),
+        "disconnected provider request closure",
+        Duration::from_secs(2),
+    )
+    .is_none());
+    let error = crate::tests::internal::bridge_wait::poll_before(
+        future,
+        "disconnected provider business result",
+        Duration::from_secs(2),
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("disconnected"));
-    block_on(bridge.closed());
+    crate::tests::internal::bridge_wait::poll_before(
+        bridge.closed(),
+        "disconnected bridge closed notification",
+        Duration::from_secs(2),
+    );
     assert!(!input_dropped.load(std::sync::atomic::Ordering::Acquire));
     {
         let inner = state.inner.lock().unwrap();
