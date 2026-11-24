@@ -111,8 +111,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 `MagikaMimeDetector::detect_async_provider_path_managed` 或 `detect_bytes_managed` 传入
 `OperationScope`。受管调用会将工作关联到该 scope，使其报告能独立跟踪资源释放和业务结果。
 应用启动时创建 runtime 和 detector，每个受管请求传入 scope，并在应用关闭时 drain runtime。
-Provider path 的 session 和旧范围读取路由由 worker 发出采样请求，并等待调用方 future 执行读取；
-`read_all` 回退则先读取完整内容，再把拥有的缓冲区提交给 worker。
+Provider path 的 session 和旧范围读取路由由 worker 发出采样请求，并等待调用方 future 执行读取；缓慢的
+范围读取可能占用共享 worker 并延迟其他请求。`read_all` 回退则先读取完整内容，再把拥有的缓冲区提交给 worker。
+丢弃请求会停止本地轮询；若无法观察 native 或远端 I/O 完成状态，对应的容量预留会继续保留。详见
+[Provider 采样与 runtime 说明](doc/user_guide.zh_CN.md#进阶用法)。
 检测 future 返回的是业务结果；scope observer 会单独报告资源结算。有界等待可能返回 `Pending(snapshot)`，
 也可能返回终态 `Ready(report)`，但 `all_released()` 仍为 false；负面报告也可能来自 scope 中其他资源，不能据此推断 Magika 仍占用容量。
 本次请求的 Provider I/O 完成状态未确认，或 worker 仍在访问请求资源时，Magika 会继续保留自己的容量。停止请求会析构本地 future、reader
@@ -146,7 +148,7 @@ runtime 取消时，两者都可能提前返回停止错误。受管 API 会单�
 默认调用系统 `python3` 的 `renamex_np`。可通过 `RS_INFRA_PYTHON` 指定 Python 解释器；其他平台仍需 GNU `mv -Tn` 或 `gmv`。
 复用已存在的合法 worktree 和严格只读校验不需要发布工具。准备脚本会拒绝覆盖已占用的非 Git 路径。Cargo 包不
 包含 `.infra`，因此脚本和[固定提交列表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
-链接到源码仓库。准备好兄弟目录后，可用以下命令检查各 manifest 的锁定依赖：
+链接到源码仓库。准备好兄弟目录后，请从源码仓库根目录运行以下命令，检查各 manifest 的锁定依赖：
 
 ```bash
 cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
@@ -224,6 +226,7 @@ Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求
 Provider 原生异步 I/O 由调用方 future 等待；若 Provider 一直不完成，future 也可能一直
 Pending。采样就绪后，Magika 采样与推理由 session-owning worker 执行。旧 hooks 不提供
 parent-scope 生命周期观察；需要 scope 跟踪时使用 managed API。
+
 
 ## 延伸阅读
 

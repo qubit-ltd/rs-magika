@@ -117,8 +117,12 @@ work to that scope so its report can track release separately from the
 business result. Create the runtime and detector at startup, pass the scope to
 each managed request, and drain the runtime during application shutdown.
 For provider paths, session and legacy-range routes have the worker issue sample
-requests while the caller's future performs the reads. The `read_all` fallback
-reads the content first, then submits the owned buffer to the worker.
+requests and wait for the caller's future to perform each read. A slow range
+read can therefore occupy the shared worker and delay other requests. The
+`read_all` fallback reads the content before submitting the owned buffer to the
+worker. Dropping a request stops local polling; when native or remote I/O
+completion is unobservable, its capacity reservation remains in place. See the
+[provider sampling and runtime guide](doc/user_guide.md#advanced-usage).
 The returned detection result is the business outcome. The scope observer
 reports settlement separately: a bounded wait may return `Pending(snapshot)`;
 it may also return terminal `Ready(report)` while `all_released()` is false.
@@ -173,8 +177,8 @@ override it with `RS_INFRA_PYTHON`). Other platforms require GNU `mv -Tn` or
 `gmv` to publish a missing checkout. Reusing an existing valid worktree and strict
 read-only validation do not require a publisher. The package does not
 ship `.infra`, so its script and [pinned revision list](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
-are linked from the source repository. After preparing the sibling layout, the
-following commands verify the locked manifests:
+are linked from the source repository. After preparing the sibling layout, run these commands from the source
+repository root to verify the locked manifests:
 
 ```bash
 cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
