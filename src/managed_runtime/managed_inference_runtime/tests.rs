@@ -782,26 +782,22 @@ fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
         assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
         std::thread::park_timeout(Duration::from_millis(1));
     }
-    let cancelled_result = match request.as_mut().poll(&mut context) {
-        Poll::Ready(result) => Some(result),
-        Poll::Pending => None,
+    let stop_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let cancelled_result = loop {
+        if let Poll::Ready(result) = request.as_mut().poll(&mut context) {
+            break result;
+        }
+        assert!(
+            std::time::Instant::now() < stop_deadline,
+            "runtime Cancel did not end business waiting while worker was gated"
+        );
+        std::thread::park_timeout(stop_deadline.saturating_duration_since(std::time::Instant::now()));
     };
-    let cancelled_before_release = cancelled_result.as_ref().is_some_and(Result::is_err);
+    let cancelled_before_release = cancelled_result.is_err();
     let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
     let worker_still_running = runtime.snapshot().worker_running == 1;
 
     gate_cleanup.release();
-    let result_after_release = if let Some(result) = cancelled_result {
-        result
-    } else {
-        loop {
-            if let Poll::Ready(result) = request.as_mut().poll(&mut context) {
-                break result;
-            }
-            assert!(std::time::Instant::now() < deadline + Duration::from_secs(2));
-            std::thread::park_timeout(Duration::from_millis(1));
-        }
-    };
     let report = shutdown.join().unwrap();
     assert!(
         cancelled_before_release,
@@ -812,7 +808,7 @@ fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
         worker_still_running,
         "worker must still be executing before the gate opens"
     );
-    let error = result_after_release.unwrap_err();
+    let error = cancelled_result.unwrap_err();
     assert!(format!("{error:?}").contains("provider operation stopped after cancellation"));
     assert!(report.worker_stopped);
 }
@@ -853,26 +849,22 @@ fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
         assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
         std::thread::park_timeout(Duration::from_millis(1));
     }
-    let cancelled_result = match request.as_mut().poll(&mut context) {
-        Poll::Ready(result) => Some(result),
-        Poll::Pending => None,
+    let stop_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let cancelled_result = loop {
+        if let Poll::Ready(result) = request.as_mut().poll(&mut context) {
+            break result;
+        }
+        assert!(
+            std::time::Instant::now() < stop_deadline,
+            "runtime Cancel did not end business waiting while worker was gated"
+        );
+        std::thread::park_timeout(stop_deadline.saturating_duration_since(std::time::Instant::now()));
     };
-    let cancelled_before_release = cancelled_result.as_ref().is_some_and(Result::is_err);
+    let cancelled_before_release = cancelled_result.is_err();
     let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
     let worker_still_running = runtime.snapshot().worker_running == 1;
 
     gate_cleanup.release();
-    let result_after_release = if let Some(result) = cancelled_result {
-        result
-    } else {
-        loop {
-            if let Poll::Ready(result) = request.as_mut().poll(&mut context) {
-                break result;
-            }
-            assert!(std::time::Instant::now() < deadline + Duration::from_secs(2));
-            std::thread::park_timeout(Duration::from_millis(1));
-        }
-    };
     let report = shutdown.join().unwrap();
     assert!(
         cancelled_before_release,
@@ -883,7 +875,7 @@ fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
         worker_still_running,
         "worker must still be executing before the gate opens"
     );
-    let error = result_after_release.unwrap_err();
+    let error = cancelled_result.unwrap_err();
     assert!(format!("{error:?}").contains("provider operation stopped after cancellation"));
     assert!(report.worker_stopped);
 }
