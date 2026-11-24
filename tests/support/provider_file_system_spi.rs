@@ -60,12 +60,14 @@ pub(crate) struct ProviderFileSystemSpi {
     stat_supported: bool,
     short_read: bool,
     fail_reads: bool,
+    interrupt_session_once: bool,
     random_access: bool,
     random_open_error: Option<FsErrorKind>,
     max_read_range_bytes: Option<u64>,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
     completion_gate: Option<Arc<ProviderReadCompletionGate>>,
+    interruption_gate: Option<Arc<ProviderReadCompletionGate>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,17 +81,21 @@ pub(crate) enum AsyncProviderGatePoint {
 /// poll returns `Ready` to the filesystem reader.
 pub(crate) struct ProviderReadCompletionGate {
     threshold: usize,
-    entered: std::sync::atomic::AtomicBool,
-    released: Mutex<bool>,
+    state: Mutex<ProviderReadCompletionGateState>,
     changed: Condvar,
+}
+
+#[derive(Default)]
+struct ProviderReadCompletionGateState {
+    entered: bool,
+    released: bool,
 }
 
 impl ProviderReadCompletionGate {
     pub(crate) fn new(threshold: usize) -> Arc<Self> {
         Arc::new(Self {
             threshold,
-            entered: std::sync::atomic::AtomicBool::new(false),
-            released: Mutex::new(false),
+            state: Mutex::new(ProviderReadCompletionGateState::default()),
             changed: Condvar::new(),
         })
     }
@@ -98,52 +104,60 @@ impl ProviderReadCompletionGate {
         if count != self.threshold {
             return;
         }
-        self.entered.store(true, Ordering::Release);
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.entered = true;
         self.changed.notify_all();
-        let mut released = self.released.lock().unwrap();
-        while !*released {
-            released = self.changed.wait(released).unwrap();
+        while !state.released {
+            state = self.changed.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
 
     pub(crate) fn wait_until_entered(&self, timeout: std::time::Duration) {
         let deadline = std::time::Instant::now() + timeout;
-        let mut released = self.released.lock().unwrap();
-        while !self.entered.load(Ordering::Acquire) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !state.entered {
             let now = std::time::Instant::now();
-            assert!(now < deadline, "provider read did not reach completion gate");
+            if now >= deadline {
+                drop(state);
+                panic!("provider read did not reach completion gate");
+            }
             let (next, result) = self
                 .changed
-                .wait_timeout(released, deadline.saturating_duration_since(now))
-                .unwrap();
-            released = next;
-            assert!(!result.timed_out() || self.entered.load(Ordering::Acquire));
+                .wait_timeout(state, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+            if result.timed_out() && !state.entered {
+                drop(state);
+                panic!("provider read did not reach completion gate");
+            }
         }
     }
 
     pub(crate) fn release(&self) {
-        *self.released.lock().unwrap() = true;
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).released = true;
         self.changed.notify_all();
     }
 }
 
 pub(crate) struct AsyncProviderGate {
     point: AsyncProviderGatePoint,
-    entered: std::sync::atomic::AtomicBool,
-    released: std::sync::atomic::AtomicBool,
-    wait_dropped: std::sync::atomic::AtomicBool,
-    waker: Mutex<Option<Waker>>,
+    state: Mutex<AsyncProviderGateState>,
     changed: Condvar,
+}
+
+#[derive(Default)]
+struct AsyncProviderGateState {
+    entered: bool,
+    released: bool,
+    wait_dropped: bool,
+    waker: Option<Waker>,
 }
 
 impl AsyncProviderGate {
     pub(crate) fn new(point: AsyncProviderGatePoint) -> Arc<Self> {
         Arc::new(Self {
             point,
-            entered: std::sync::atomic::AtomicBool::new(false),
-            released: std::sync::atomic::AtomicBool::new(false),
-            wait_dropped: std::sync::atomic::AtomicBool::new(false),
-            waker: Mutex::new(None),
+            state: Mutex::new(AsyncProviderGateState::default()),
             changed: Condvar::new(),
         })
     }
@@ -152,13 +166,14 @@ impl AsyncProviderGate {
         std::future::poll_fn(|cx| self.poll_wait(cx)).await
     }
     fn poll_wait(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        if self.released.load(Ordering::Acquire) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.released {
             return std::task::Poll::Ready(());
         }
-        *self.waker.lock().unwrap() = Some(cx.waker().clone());
-        self.entered.store(true, Ordering::Release);
+        state.waker = Some(cx.waker().clone());
+        state.entered = true;
         self.changed.notify_all();
-        if self.released.load(Ordering::Acquire) {
+        if state.released {
             std::task::Poll::Ready(())
         } else {
             std::task::Poll::Pending
@@ -166,53 +181,57 @@ impl AsyncProviderGate {
     }
     pub(crate) fn wait_until_entered(&self, timeout: std::time::Duration) {
         let deadline = std::time::Instant::now() + timeout;
-        let mut waker = self.waker.lock().unwrap();
-        while !self.entered.load(Ordering::Acquire) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !state.entered {
             let now = std::time::Instant::now();
-            assert!(
-                now < deadline,
-                "provider operation {:?} did not reach its gate",
-                self.point
-            );
+            if now >= deadline {
+                drop(state);
+                panic!("provider operation {:?} did not reach its gate", self.point);
+            }
             let (next, result) = self
                 .changed
-                .wait_timeout(waker, deadline.saturating_duration_since(now))
-                .unwrap();
-            waker = next;
-            assert!(
-                !result.timed_out() || self.entered.load(Ordering::Acquire),
-                "provider operation {:?} did not reach its gate",
-                self.point
-            );
+                .wait_timeout(state, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+            if result.timed_out() && !state.entered {
+                drop(state);
+                panic!("provider operation {:?} did not reach its gate", self.point);
+            }
         }
     }
     pub(crate) fn wait_until_wait_dropped(&self, timeout: std::time::Duration) {
         let deadline = std::time::Instant::now() + timeout;
-        let mut waker = self.waker.lock().unwrap();
-        while !self.wait_dropped.load(Ordering::Acquire) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !state.wait_dropped {
             let now = std::time::Instant::now();
-            assert!(now < deadline, "provider operation {:?} was not dropped", self.point);
+            if now >= deadline {
+                drop(state);
+                panic!("provider operation {:?} was not dropped", self.point);
+            }
             let (next, result) = self
                 .changed
-                .wait_timeout(waker, deadline.saturating_duration_since(now))
-                .unwrap();
-            waker = next;
-            assert!(
-                !result.timed_out() || self.wait_dropped.load(Ordering::Acquire),
-                "provider operation {:?} was not dropped",
-                self.point
-            );
+                .wait_timeout(state, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+            if result.timed_out() && !state.wait_dropped {
+                drop(state);
+                panic!("provider operation {:?} was not dropped", self.point);
+            }
         }
     }
     pub(crate) fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        if let Some(waker) = self.waker.lock().unwrap().take() {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.released = true;
+        let waker = state.waker.take();
+        drop(state);
+        self.changed.notify_all();
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
 
     pub(crate) fn is_entered(&self) -> bool {
-        self.entered.load(Ordering::Acquire)
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entered
     }
 }
 
@@ -220,7 +239,7 @@ struct AsyncProviderGateDropObserver(Arc<AsyncProviderGate>);
 
 impl Drop for AsyncProviderGateDropObserver {
     fn drop(&mut self) {
-        self.0.wait_dropped.store(true, Ordering::Release);
+        self.0.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).wait_dropped = true;
         self.0.changed.notify_all();
     }
 }
@@ -232,6 +251,7 @@ pub(crate) struct ProviderObservations {
     pub(crate) random_opens: AtomicUsize,
     pub(crate) random_reads: AtomicUsize,
     pub(crate) session_read_lengths: Mutex<Vec<usize>>,
+    pub(crate) session_read_ranges: Mutex<Vec<(u64, usize)>>,
     pub(crate) session_drops: AtomicUsize,
     pub(crate) read_bytes: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
@@ -247,12 +267,14 @@ impl ProviderFileSystemSpi {
             stat_supported: true,
             short_read: false,
             fail_reads: false,
+            interrupt_session_once: false,
             random_access: false,
             random_open_error: None,
             max_read_range_bytes: None,
             observations: Arc::new(ProviderObservations::default()),
             async_gate: None,
             completion_gate: None,
+            interruption_gate: None,
         }
     }
 
@@ -302,6 +324,11 @@ impl ProviderFileSystemSpi {
         self
     }
 
+    pub(crate) fn interrupt_session_once(mut self) -> Self {
+        self.interrupt_session_once = true;
+        self
+    }
+
     pub(crate) fn with_random_access(mut self) -> Self {
         self.random_access = true;
         self
@@ -314,6 +341,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn with_read_completion_gate(mut self, gate: Arc<ProviderReadCompletionGate>) -> Self {
         self.completion_gate = Some(gate);
+        self
+    }
+
+    pub(crate) fn with_session_interruption_gate(mut self, gate: Arc<ProviderReadCompletionGate>) -> Self {
+        self.interruption_gate = Some(gate);
         self
     }
 
@@ -453,9 +485,11 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 length: self.length.unwrap_or(self.content.len() as u64),
                 short_read: self.short_read,
                 fail_reads: self.fail_reads,
+                interrupt_pending: self.interrupt_session_once,
                 observations: Arc::clone(&self.observations),
                 async_gate: self.async_gate.clone(),
                 completion_gate: self.completion_gate.clone(),
+                interruption_gate: self.interruption_gate.clone(),
             }),
         ))
     }
@@ -533,9 +567,11 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     length: self.length.unwrap_or(self.content.len() as u64),
                     short_read: self.short_read,
                     fail_reads: self.fail_reads,
+                    interrupt_pending: self.interrupt_session_once,
                     observations: Arc::clone(&self.observations),
                     async_gate: self.async_gate.clone(),
                     completion_gate: self.completion_gate.clone(),
+                    interruption_gate: self.interruption_gate.clone(),
                 }),
             ))
         })
@@ -547,9 +583,11 @@ struct ProviderSession {
     length: u64,
     short_read: bool,
     fail_reads: bool,
+    interrupt_pending: bool,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
     completion_gate: Option<Arc<ProviderReadCompletionGate>>,
+    interruption_gate: Option<Arc<ProviderReadCompletionGate>>,
 }
 
 impl Drop for ProviderSession {
@@ -565,11 +603,28 @@ impl RandomAccessReadSession for ProviderSession {
             .lock()
             .unwrap()
             .push(output.len());
+        self.observations
+            .session_read_ranges
+            .lock()
+            .unwrap()
+            .push((offset, output.len()));
         if self.fail_reads {
             return Err(FsError::from_io(
                 io::Error::other("configured provider read failure"),
                 FsOperation::Read,
             ));
+        }
+        if self.interrupt_pending {
+            self.interrupt_pending = false;
+            if let Some(gate) = &self.interruption_gate {
+                gate.pause_if_reached(1);
+            }
+            return Err(FsError::new(
+                FsErrorKind::Interrupted,
+                FsOperation::Read,
+                "configured unchanged session interruption",
+            )
+            .with_effect_state(qubit_fs::error::FsEffectState::Unchanged));
         }
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         let available = usize::try_from(self.length.saturating_sub(offset)).unwrap_or(usize::MAX);

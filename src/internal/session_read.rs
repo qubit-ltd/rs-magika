@@ -109,6 +109,7 @@ fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut
 /// * `reader` - Open asynchronous session used for the read attempts.
 /// * `offset` - Fixed resource offset used for every attempt.
 /// * `output` - Buffer filled by a successful attempt.
+/// * `should_stop` - Predicate checked before each provider attempt.
 ///
 /// # Returns
 ///
@@ -116,7 +117,10 @@ fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut
 ///
 /// # Errors
 ///
-/// Returns the first error that is not a safe, unchanged interruption.
+/// Returns the first error that is not a safe, unchanged interruption. When
+/// `should_stop` is true, returns a new interrupted read error describing the
+/// stopped session; this cancellation error is distinct from an error returned
+/// by the provider and carries no provider effect-state claim.
 async fn read_async_at_retry(
     reader: &mut AsyncRandomAccessReader,
     offset: u64,

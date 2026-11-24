@@ -1610,6 +1610,23 @@ fn test_provider_stat_open_and_read_suspend_until_wake() {
 }
 
 #[test]
+fn test_provider_gate_watchdog_failure_releases_lock_and_allows_cleanup() {
+    let async_gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let async_timeout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        async_gate.wait_until_entered(Duration::ZERO);
+    }));
+    assert!(async_timeout.is_err(), "an unentered async gate must trip its watchdog");
+    async_gate.release();
+
+    let completion_gate = ProviderReadCompletionGate::new(1);
+    let completion_timeout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        completion_gate.wait_until_entered(Duration::ZERO);
+    }));
+    assert!(completion_timeout.is_err(), "an unentered completion gate must trip its watchdog");
+    completion_gate.release();
+}
+
+#[test]
 fn test_dropping_pending_provider_read_releases_session() {
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -1820,6 +1837,79 @@ fn test_provider_path_async_uses_one_random_access_session_without_stat() {
     assert_eq!(0, observations.stats.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(1, observations.session_drops.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn test_provider_path_retries_unchanged_session_interruption_and_stops_before_retry() {
+    let retry_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .interrupt_session_once();
+    let retry_observations = retry_provider.observations();
+    let retry_result = run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+        detector(),
+        &retry_provider.async_file_system(),
+        &path("/interrupt-retry.py"),
+        4096,
+    ));
+    assert!(retry_result.is_ok(), "unchanged interruption should be retried: {retry_result:?}");
+    let retry_ranges = retry_observations.session_read_ranges.lock().unwrap().clone();
+    assert!(retry_ranges.len() >= 2, "fixture should observe interruption and retry: {retry_ranges:?}");
+    assert_eq!(retry_ranges[0], retry_ranges[1], "safe retry must repeat the exact range");
+
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor, config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let managed_detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    let interruption_gate = ProviderReadCompletionGate::new(1);
+    let _release_gate = ReleaseReadCompletionGateOnDrop(Arc::clone(&interruption_gate));
+    let cancelled_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .interrupt_session_once()
+        .with_session_interruption_gate(Arc::clone(&interruption_gate));
+    let cancelled_observations = cancelled_provider.observations();
+    let file_system = cancelled_provider.async_file_system();
+    let request_detector = Arc::clone(&managed_detector);
+    let mut operation = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            request_detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/interrupt-cancel.py"), 4096)
+                .await
+        })
+        .expect("managed provider operation should be admitted");
+    interruption_gate.wait_until_entered(Duration::from_secs(5));
+    assert_eq!(1, cancelled_observations.session_read_ranges.lock().unwrap().len());
+    assert_eq!(
+        qubit_operation::StopRequestStatus::Accepted,
+        operation.request_stop(StopReason::UserCancelled)
+    );
+    interruption_gate.release();
+    let outcome = run_until(operation.wait_outcome(), Duration::from_secs(5))
+        .expect("cancelled session interruption should reach a business outcome");
+    assert!(
+        matches!(outcome, Ok(qubit_operation::OperationOutcome::Stopped(_)))
+            || matches!(outcome, Ok(qubit_operation::OperationOutcome::Failed(_))),
+        "cancellation after Interrupted + Unchanged should fail the request: {outcome:?}"
+    );
+    assert_eq!(
+        1,
+        cancelled_observations.session_read_ranges.lock().unwrap().len(),
+        "cancellation must not issue a retry or later session read"
+    );
+    let settlement = run_until(operation.wait_settlement(), Duration::from_secs(5))
+        .expect("cancelled provider session settlement should be observable");
+    assert!(settlement.all_released(), "cancelled provider session should settle: {settlement:?}");
+    assert!(runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)).worker_stopped);
 }
 
 #[test]
