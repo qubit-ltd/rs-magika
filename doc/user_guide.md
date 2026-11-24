@@ -273,24 +273,35 @@ Media refinement is optional. For example, the built-in ffprobe classifier can
 distinguish audio-only, video-only, and audio-video content. `ffprobe` must be
 installed and available on `PATH`:
 
+Enable precise detection before starting the application by setting
+`QUBIT_MIME_ENABLE_PRECISE_DETECTION=true` (configuration key
+`mime.enable.precise.detection`). `MimeConfig::from_env()` reads this setting.
+The default ambiguous mappings cover `webm` (`video/webm` or `audio/webm`)
+and `ogg` (`video/ogg` or `audio/ogg`); refinement runs for an eligible input
+when its detected MIME type or filename matches one of these mappings.
+
 ```rust
 use std::sync::Arc;
 
 use qubit_magika::MagikaMimeDetector;
-use qubit_mime::FfprobeCommandMediaStreamClassifier;
+use qubit_mime::{FfprobeCommandMediaStreamClassifier, MimeConfig};
 
 fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
+    let config = MimeConfig::from_env()?;
     let classifier = Arc::new(FfprobeCommandMediaStreamClassifier::new());
     MagikaMimeDetector::builder()
+        .mime_config(config)
         .media_stream_classifier(Some(classifier))
         .build()
 }
 ```
 
-The same classifier can be passed to
-`MagikaMimeDetectorProvider::with_media_stream_classifier` when the application
-uses registry-based construction. Classifier failures are reported as
-`MimeError`; refinement is best-effort only when the classifier succeeds.
+For registry construction, pass the same classifier to
+`MagikaMimeDetectorProvider::with_media_stream_classifier` and pass the enabled
+configuration to `create_configured(&config)`. `MagikaMimeDetector::from_mime_config`
+accepts a configuration but does not attach a classifier; use the builder when
+both settings are needed. Classifier failures are reported as `MimeError`;
+refinement is best-effort only when the classifier succeeds.
 
 ### Sharing an application-managed inference runtime
 
@@ -388,7 +399,9 @@ use std::path::PathBuf;
 use qubit_magika::MagikaMimeDetector;
 
 fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
-    let runtime = PathBuf::from(std::env::var("ORT_LIBRARY_PATH")?);
+    let runtime = std::env::var_os("ORT_LIBRARY_PATH")
+        .map(PathBuf::from)
+        .ok_or("ORT_LIBRARY_PATH must name the ONNX Runtime shared library")?;
     if !ort::init_from(runtime)?.commit() {
         return Err("ONNX Runtime environment was already initialized".into());
     }
