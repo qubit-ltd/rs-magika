@@ -49,6 +49,18 @@ impl std::task::Wake for ThreadWake {
     }
 }
 
+struct SignalWake(mpsc::SyncSender<()>);
+
+impl std::task::Wake for SignalWake {
+    fn wake(self: Arc<Self>) {
+        let _ = self.0.try_send(());
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let _ = self.0.try_send(());
+    }
+}
+
 fn map_provider_test_error(_: magika::Error) -> MimeError {
     MimeError::detector_backend("magika", "test input failed")
 }
@@ -1081,6 +1093,115 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
         Some("application/x-published-range".to_owned()),
         result.unwrap()
     );
+}
+
+#[test]
+fn test_managed_public_handoffs_close_without_repolling_caller() {
+    use std::sync::atomic::Ordering;
+
+    for provider_entry in [false, true] {
+        for worker_fault in [false, true] {
+            let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+            let max_bytes = qubit_mime::MimeConfig::default().max_buffer_size();
+            let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+                supervisor.clone(),
+                max_bytes,
+                Box::new(|bytes| {
+                    if bytes == [0xff] {
+                        panic!("injected worker fault");
+                    }
+                    Ok(Some("application/x-managed-handoff".to_owned()))
+                }),
+                Box::new(|| {}),
+            ));
+            let detector = Arc::new(
+                crate::MagikaMimeDetector::builder()
+                    .managed_runtime(Arc::clone(&runtime))
+                    .build()
+                    .unwrap(),
+            );
+            let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+                b"provider contents".to_vec(),
+            )
+            .with_range();
+            let observations = provider.observations();
+            let file_system = provider.async_file_system();
+            let path = qubit_fs::Path::parse("/managed-handoff.py").unwrap();
+            let (started_tx, started_rx) = mpsc::sync_channel(1);
+            let (release_tx, release_rx) = mpsc::sync_channel(1);
+            let request_detector = Arc::clone(&detector);
+            let request_file_system = file_system.clone();
+            let request_path = path.clone();
+            let mut operation = supervisor
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
+                    let mut detection = if provider_entry {
+                        Box::pin(request_detector.detect_async_provider_path_managed(
+                            &scope,
+                            &request_file_system,
+                            &request_path,
+                            64,
+                        )) as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
+                    } else {
+                        Box::pin(request_detector.detect_bytes_managed(&scope, b"managed bytes".to_vec()))
+                    };
+                    let waker = Waker::from(Arc::new(SignalWake(started_tx)));
+                    let mut context = Context::from_waker(&waker);
+                    assert!(detection.as_mut().poll(&mut context).is_pending());
+                    // Keep the public caller future alive but do not poll it again.
+                    release_rx.recv_timeout(Duration::from_secs(8)).unwrap();
+                    drop(detection);
+                    Ok::<_, MimeError>(())
+                })
+                .unwrap();
+
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let waiting_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !runtime
+                .tasks
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|task| task.child_waiting_for_admission())
+            {
+                assert!(
+                    std::time::Instant::now() < waiting_deadline,
+                    "public managed child did not register its admission waiter"
+                );
+                std::thread::yield_now();
+            }
+            assert_eq!(1, runtime.snapshot().admitted_not_started);
+            if worker_fault {
+                let fault = runtime
+                    .submit(None, WorkerInput::Bytes(vec![0xff].into()))
+                    .unwrap();
+                assert!(block_on(fault).is_err());
+            } else {
+                let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+                assert!(report.worker_stopped);
+            }
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while runtime.snapshot().reserved_bytes != 0
+                || runtime.active_requests.load(Ordering::SeqCst) != 0
+                || !runtime.tasks.lock().unwrap().is_empty()
+            {
+                assert!(std::time::Instant::now() < deadline, "stopped handoff did not release admission");
+                std::thread::yield_now();
+            }
+            assert_eq!(0, runtime.snapshot().reserved_bytes);
+            assert_eq!(0, runtime.active_requests.load(Ordering::SeqCst));
+            assert!(runtime.tasks.lock().unwrap().is_empty(), "stopped child did not release its runtime task");
+            assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+            assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+            release_tx.send(()).unwrap();
+            let _ = block_on(operation.wait_outcome()).unwrap();
+            if worker_fault {
+                let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+                assert!(report.worker_stopped);
+            }
+        }
+    }
 }
 
 #[test]

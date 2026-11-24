@@ -229,6 +229,16 @@ impl TaskState {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn child_waiting_for_admission(&self) -> bool {
+        self.admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|handoff| handoff.child_waiting_for_admission())
+    }
+
     /// Clears this request's stop notification after the handoff closes or is
     /// delivered to its child.
     pub(super) fn detach_admission_handoff(
