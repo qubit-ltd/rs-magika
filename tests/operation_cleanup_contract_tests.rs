@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use qubit_operation::AsyncCleanup;
 use qubit_operation::CleanupContext;
@@ -27,6 +28,26 @@ use qubit_operation::ResourceId;
 use qubit_operation::ResourceScopeError;
 use qubit_operation::ResourceScopeOptions;
 use qubit_operation::ScopeLimits;
+use qubit_operation::ShutdownWait;
+
+#[path = "support/async_test_driver.rs"]
+#[allow(dead_code)]
+mod async_test_driver;
+
+const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn wait_until_stage<F: std::future::Future>(future: F, stage: &str) -> F::Output {
+    wait_until_stage_for(future, stage, WAIT_TIMEOUT)
+}
+
+fn wait_until_stage_for<F: std::future::Future>(
+    future: F,
+    stage: &str,
+    timeout: Duration,
+) -> F::Output {
+    async_test_driver::run_until(future, timeout)
+        .unwrap_or_else(|()| panic!("timed out waiting for cleanup test stage={stage}"))
+}
 
 struct FailingCleanup {
     resource_id: Arc<OnceLock<ResourceId>>,
@@ -81,7 +102,7 @@ fn test_locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release
     let resource_id_for_operation = Arc::clone(&resource_id);
     let attempts_for_operation = Arc::clone(&attempts);
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
-    let mut handle = manager
+    let handle = manager
         .try_submit(OperationOptions::default(), move |scope| {
             let cleanup = Arc::new(FailingCleanup {
                 resource_id: Arc::clone(&resource_id_for_operation),
@@ -101,11 +122,12 @@ fn test_locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release
         })
         .unwrap();
 
+    let mut handle = handle.into_async();
     assert!(matches!(
-        handle.wait_outcome().unwrap(),
+        wait_until_stage(handle.wait_outcome(), "first cleanup outcome").unwrap(),
         OperationOutcome::Succeeded(())
     ));
-    let settlement = handle.wait_settlement().unwrap();
+    let settlement = wait_until_stage(handle.wait_settlement(), "first cleanup settlement");
     assert!(!settlement.all_released());
     assert_eq!(settlement.recovery_count, 1);
     assert_eq!(settlement.recoveries.len(), 1);
@@ -115,20 +137,55 @@ fn test_locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release
     let recovery = settlement.recoveries[0].clone();
     assert_eq!(recovery.snapshot().phase, RecoveryPhase::Pending);
     assert_eq!(recovery.snapshot().failures_total, 0);
-    let repeated_failure = recovery.try_retry().unwrap().wait().unwrap();
+    let repeated_failure = wait_until_stage(
+        recovery.try_retry().unwrap().wait_async(),
+        "recovery retry that remains pending",
+    );
     assert_eq!(repeated_failure.recovery.phase, RecoveryPhase::Pending);
     assert_eq!(recovery.snapshot().failures_total, 1);
 
-    let confirmed_release = recovery.try_retry().unwrap().wait().unwrap();
+    let confirmed_release = wait_until_stage(
+        recovery.try_retry().unwrap().wait_async(),
+        "recovery release retry",
+    );
     assert_eq!(confirmed_release.recovery.phase, RecoveryPhase::Resolved);
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert!(!settlement.all_released());
 
-    drop(
-        manager
-            .request_shutdown(qubit_operation::ShutdownMode::Drain)
-            .wait()
-            .unwrap(),
+    assert!(
+        matches!(
+            manager
+                .request_shutdown(qubit_operation::ShutdownMode::Drain)
+                .wait_for(WAIT_TIMEOUT),
+            Ok(ShutdownWait::Completed(_))
+        ),
+        "manager shutdown did not complete before deadline"
+    );
+}
+
+#[test]
+fn test_cleanup_wait_deadline_reports_the_waiting_stage() {
+    let started = std::time::Instant::now();
+    let panic = std::panic::catch_unwind(|| {
+        wait_until_stage_for(
+            std::future::pending::<()>(),
+            "deliberately pending cleanup probe",
+            Duration::from_millis(50),
+        );
+    })
+    .expect_err("a never-completing future should hit the finite test deadline");
+    let diagnostic = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic");
+    assert!(
+        diagnostic.contains("stage=deliberately pending cleanup probe"),
+        "{diagnostic}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "deadline probe exceeded its finite bound"
     );
 }
 
@@ -143,7 +200,7 @@ fn test_exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
     let first_id_for_operation = Arc::clone(&first_resource_id);
     let second_id_for_operation = Arc::clone(&second_resource_id);
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
-    let mut handle = manager
+    let handle = manager
         .try_submit(OperationOptions::default(), move |scope| {
             register_failing_resource(&scope, first_id_for_operation);
             register_failing_resource(&scope, second_id_for_operation);
@@ -151,11 +208,12 @@ fn test_exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
         })
         .unwrap();
 
+    let mut handle = handle.into_async();
     assert!(matches!(
-        handle.wait_outcome().unwrap(),
+        wait_until_stage(handle.wait_outcome(), "store cleanup outcome").unwrap(),
         OperationOutcome::Succeeded(())
     ));
-    let settlement = handle.wait_settlement().unwrap();
+    let settlement = wait_until_stage(handle.wait_settlement(), "store cleanup settlement");
     assert!(!settlement.all_released());
     assert_eq!(settlement.recovery_count, 2);
     assert_eq!(settlement.recoveries.len(), 2);
@@ -188,24 +246,35 @@ fn test_exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
     assert_eq!(second_recovery.snapshot().phase, RecoveryPhase::Pending);
     assert!(!settlement.all_released());
 
-    let stored_release = store.try_retry(first_recovery.id()).unwrap().wait().unwrap();
+    let stored_release = wait_until_stage(
+        store.try_retry(first_recovery.id()).unwrap().wait_async(),
+        "stored recovery release retry",
+    );
     assert_eq!(stored_release.recovery.phase, RecoveryPhase::Resolved);
-    let retained_release = second_recovery.try_retry().unwrap().wait().unwrap();
+    let retained_release = wait_until_stage(
+        second_recovery.try_retry().unwrap().wait_async(),
+        "retained recovery release retry",
+    );
     assert_eq!(retained_release.recovery.phase, RecoveryPhase::Resolved);
     assert!(!settlement.all_released());
 
-    store.request_shutdown().wait().unwrap();
-    drop(
-        manager
-            .request_shutdown(qubit_operation::ShutdownMode::Drain)
-            .wait()
-            .unwrap(),
+    assert!(
+        store.request_shutdown().wait_for(WAIT_TIMEOUT).unwrap(),
+        "recovery store shutdown timed out"
+    );
+    assert!(
+        matches!(
+            manager
+                .request_shutdown(qubit_operation::ShutdownMode::Drain)
+                .wait_for(WAIT_TIMEOUT),
+            Ok(ShutdownWait::Completed(_))
+        ),
+        "manager shutdown did not complete before deadline"
     );
 }
 
 #[test]
 fn test_locked_operation_api_reuses_resource_and_attached_scope_capacity_after_cleanup() {
-    use std::time::Duration;
     use std::time::Instant;
 
     use qubit_operation::ResourceCapacityError;
@@ -213,7 +282,7 @@ fn test_locked_operation_api_reuses_resource_and_attached_scope_capacity_after_c
     let attempts = Arc::new(AtomicUsize::new(0));
     let attempts_for_operation = Arc::clone(&attempts);
     let manager = OperationManager::new(ManagerOptions::default()).unwrap();
-    let mut handle = manager
+    let handle = manager
         .try_submit(
             OperationOptions {
                 limits: ScopeLimits {
@@ -291,18 +360,22 @@ fn test_locked_operation_api_reuses_resource_and_attached_scope_capacity_after_c
         )
         .unwrap();
 
+    let mut handle = handle.into_async();
     assert!(matches!(
-        handle.wait_outcome().unwrap(),
+        wait_until_stage(handle.wait_outcome(), "capacity reuse outcome").unwrap(),
         OperationOutcome::Succeeded(())
     ));
-    let settlement = handle.wait_settlement().unwrap();
+    let settlement = wait_until_stage(handle.wait_settlement(), "capacity reuse settlement");
     assert!(settlement.all_released());
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 
-    drop(
-        manager
-            .request_shutdown(qubit_operation::ShutdownMode::Drain)
-            .wait()
-            .unwrap(),
+    assert!(
+        matches!(
+            manager
+                .request_shutdown(qubit_operation::ShutdownMode::Drain)
+                .wait_for(WAIT_TIMEOUT),
+            Ok(ShutdownWait::Completed(_))
+        ),
+        "manager shutdown did not complete before deadline"
     );
 }
