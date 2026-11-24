@@ -121,9 +121,17 @@ async fn read_async_at_retry(
     reader: &mut AsyncRandomAccessReader,
     offset: u64,
     output: &mut [u8],
+    should_stop: &impl Fn() -> bool,
 ) -> qubit_fs::FsResult<usize> {
     let mut retries = 0;
     loop {
+        if should_stop() {
+            return Err(FsError::new(
+                FsErrorKind::Interrupted,
+                qubit_fs::error::FsOperation::Read,
+                "provider read stopped",
+            ));
+        }
         match reader.read_at(offset, output).await {
             Err(error)
                 if error.kind() == FsErrorKind::Interrupted
@@ -161,6 +169,20 @@ pub(crate) async fn read_async_session(
     offset: u64,
     max_segment: Option<usize>,
 ) -> MagikaResult<()> {
+    read_async_session_with_stop(reader, length, budget, buffer, offset, max_segment, || false).await
+}
+
+/// Asynchronous session read that checks for cancellation between provider
+/// operations and retries.
+pub(crate) async fn read_async_session_with_stop(
+    reader: &mut AsyncRandomAccessReader,
+    length: u64,
+    budget: &mut ReadBudget,
+    buffer: &mut [u8],
+    offset: u64,
+    max_segment: Option<usize>,
+    should_stop: impl Fn() -> bool,
+) -> MagikaResult<()> {
     validate_request(length, budget, buffer.len(), offset)?;
     let segment_limit = max_segment.unwrap_or(usize::MAX);
     if !buffer.is_empty() && segment_limit == 0 {
@@ -168,11 +190,14 @@ pub(crate) async fn read_async_session(
     }
     let mut filled = 0;
     while filled < buffer.len() {
+        if should_stop() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into());
+        }
         let step = (buffer.len() - filled).min(segment_limit);
         let read_offset = offset
             .checked_add(filled as u64)
             .ok_or_else(|| invalid_input("provider input offset overflow"))?;
-        let count = read_async_at_retry(reader, read_offset, &mut buffer[filled..filled + step])
+        let count = read_async_at_retry(reader, read_offset, &mut buffer[filled..filled + step], &should_stop)
             .await
             .map_err(|error| error.into_io_error())?;
         if count == 0 {

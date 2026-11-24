@@ -368,6 +368,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 bytes,
                 position: 0,
                 fail_reads: self.fail_reads,
+                short_read: self.short_read,
                 observations: Arc::clone(&self.observations),
                 async_gate: self.async_gate.clone(),
             }),
@@ -433,6 +434,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     bytes,
                     position: 0,
                     fail_reads: self.fail_reads,
+                    short_read: self.short_read,
                     observations: Arc::clone(&self.observations),
                     async_gate: self.async_gate.clone(),
                 }),
@@ -544,6 +546,7 @@ struct ProviderReader {
     bytes: Vec<u8>,
     position: usize,
     fail_reads: bool,
+    short_read: bool,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
 }
@@ -553,7 +556,10 @@ impl ProviderReader {
         if self.fail_reads {
             return Err(io::Error::other("configured provider read failure"));
         }
-        let count = output.len().min(self.bytes.len().saturating_sub(self.position));
+        let count = output
+            .len()
+            .min(self.bytes.len().saturating_sub(self.position))
+            .min(if self.short_read { 1 } else { usize::MAX });
         output[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
         self.position += count;
         self.observations.read_bytes.fetch_add(count, Ordering::SeqCst);

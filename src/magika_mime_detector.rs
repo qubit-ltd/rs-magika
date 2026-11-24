@@ -294,7 +294,8 @@ impl MagikaMimeDetector {
                     .max_read_range_bytes()
                     .maximum()
                     .and_then(|value| usize::try_from(value).ok());
-                let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
+                let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment)
+                    .with_stop_state(admission.task_state());
                 return runtime
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
@@ -320,7 +321,8 @@ impl MagikaMimeDetector {
         match route {
             ProviderPathRoute::Range { length, version } => {
                 let input =
-                    AsyncProviderInput::new_owned(file_system.clone(), path.clone(), length, version, max_bytes);
+                    AsyncProviderInput::new_owned(file_system.clone(), path.clone(), length, version, max_bytes)
+                        .with_stop_state(admission.task_state());
                 return runtime
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;

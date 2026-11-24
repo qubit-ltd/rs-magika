@@ -402,6 +402,34 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
 }
 
 #[test]
+fn test_async_session_stops_between_ready_short_reads() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Maximum(1));
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let mut reader = block_on(filesystem.open_random_access_reader(
+        &Path::parse("/cancel-between-short-reads").unwrap(),
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(6);
+    let mut output = [0; 3];
+    let result = block_on(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        6,
+        &mut budget,
+        &mut output,
+        0,
+        Some(1),
+        || !fixture.reads.lock().unwrap().is_empty(),
+    ));
+
+    assert!(
+        result.is_err(),
+        "stop after the first completed read must prevent the next read"
+    );
+    assert_eq!(vec![(0, 1)], *fixture.reads.lock().unwrap());
+}
+
+#[test]
 fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(GroupOptions { capacity: 2 }).unwrap();

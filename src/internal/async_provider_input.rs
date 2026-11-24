@@ -8,6 +8,7 @@
 //! Asynchronous provider-backed input for Magika feature extraction.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use magika::AsyncInput;
 use magika::Result as MagikaResult;
@@ -20,6 +21,8 @@ use super::async_route::AsyncRoute;
 use super::provider_input::read_async;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
+use super::session_read::read_async_session_with_stop;
+use crate::managed_runtime::task_state::TaskState;
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput {
@@ -31,6 +34,8 @@ pub(crate) struct AsyncProviderInput {
     version: Option<ResourceVersion>,
     /// Cumulative limit shared by all reads in one detection.
     budget: ReadBudget,
+    /// Managed request state used to stop between confirmed session I/Os.
+    stop_state: Option<Arc<TaskState>>,
 }
 
 impl AsyncProviderInput {
@@ -56,6 +61,7 @@ impl AsyncProviderInput {
             length,
             version,
             budget: ReadBudget::new(limit),
+            stop_state: None,
         }
     }
 
@@ -78,7 +84,14 @@ impl AsyncProviderInput {
             length,
             version: None,
             budget: ReadBudget::new(limit),
+            stop_state: None,
         }
+    }
+
+    /// Observes request cancellation between confirmed provider session reads.
+    pub(crate) fn with_stop_state(mut self, state: Arc<TaskState>) -> Self {
+        self.stop_state = Some(state);
+        self
     }
 }
 
@@ -122,7 +135,20 @@ impl AsyncInput for AsyncProviderInput {
                 .await
             }
             AsyncRoute::Session { reader, max_segment } => {
-                read_async_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment).await
+                if let Some(state) = &self.stop_state {
+                    read_async_session_with_stop(
+                        reader,
+                        self.length,
+                        &mut self.budget,
+                        buffer,
+                        offset,
+                        *max_segment,
+                        || state.stop_requested(),
+                    )
+                    .await
+                } else {
+                    read_async_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment).await
+                }
             }
         }
     }

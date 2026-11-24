@@ -40,6 +40,11 @@ pub(crate) struct RequestAdmission {
 }
 
 impl RequestAdmission {
+    /// Returns the shared state used to observe stop between provider reads.
+    pub(crate) fn task_state(&self) -> Arc<TaskState> {
+        Arc::clone(&self.state)
+    }
+
     /// Creates an admission lease for a reserved request.
     ///
     /// # Parameters

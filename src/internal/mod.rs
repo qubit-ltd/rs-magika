@@ -30,4 +30,6 @@ pub(crate) use provider_path_route::is_unsupported_provider_error;
 pub(crate) use provider_path_route::select_provider_path_route;
 pub(crate) use read_seek_input::ReadSeekInput;
 pub(crate) use reader_scope::ReaderScope;
+#[cfg(test)]
+pub(crate) use session_read::read_async_session_with_stop;
 pub(crate) use sync_provider_input::SyncProviderInput;

@@ -25,7 +25,7 @@ use super::task_inner::TaskInner;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 
 /// State observed by both the worker and operation control adapter.
-pub(super) struct TaskState {
+pub(crate) struct TaskState {
     /// Stable identity attached to the managed child report.
     pub(super) operation_id: u64,
     /// Mutable result and lifecycle facts.
@@ -127,7 +127,7 @@ impl TaskState {
     }
 
     /// Reports whether the worker should skip or stop this job.
-    pub(super) fn stop_requested(&self) -> bool {
+    pub(crate) fn stop_requested(&self) -> bool {
         self.inner
             .lock()
             .unwrap_or_else(|error| error.into_inner())

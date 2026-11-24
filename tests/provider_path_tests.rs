@@ -2065,6 +2065,23 @@ fn test_provider_path_async_short_read_is_an_io_error() {
     assert!(matches!(error, MimeError::Io(_)));
 }
 
+#[test]
+fn test_public_async_read_prefix_yields_after_sixty_four_ready_short_reads() {
+    let provider = ProviderFileSystemSpi::new(vec![b'x'; 256]).with_range().short_reads();
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let prefix_path = path("/prefix-yield.py");
+    let mut read = Box::pin(file_system.read_prefix(&prefix_path, Default::default(), 128));
+    let waker = std::task::Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    assert!(
+        matches!(read.as_mut().poll(&mut context), Poll::Pending),
+        "read_prefix should cooperatively yield after its read budget"
+    );
+    assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+}
+
 /// A runtime-only Cancel must wake either async Provider entrance while the
 /// Provider future is Pending. Always release the fixture gate before joining
 /// the shutdown thread so a regression cannot strand the test process.
@@ -2192,6 +2209,73 @@ fn test_runtime_only_cancel_wakes_provider_pending_at_each_entry_boundary() {
         }
     }
     assert!(failures.is_empty(), "runtime-only Cancel failures: {failures:#?}");
+}
+
+#[test]
+fn test_legacy_async_hook_returns_cancel_result_while_provider_resources_remain_held() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor, config.max_buffer_size())
+            .expect("managed inference runtime should initialize"),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .expect("bundled ONNX Runtime should initialize"),
+    );
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_async_gate(Arc::clone(&gate));
+    let file_system = provider.async_file_system();
+    let hook_detector = Arc::clone(&detector);
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let hook = std::thread::spawn(move || {
+        let result = run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+            &*hook_detector,
+            &file_system,
+            &path("/legacy-runtime-cancel.py"),
+            4096,
+        ));
+        result_tx.send(result).unwrap();
+    });
+
+    gate.wait_until_entered(Duration::from_secs(10));
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown =
+        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)));
+    let result_before_provider_release = result_rx.recv_timeout(Duration::from_secs(2));
+    let retained = runtime.snapshot();
+
+    assert!(
+        matches!(result_before_provider_release, Ok(Err(_))),
+        "legacy hook should publish its cancellation error before the provider gate opens: {result_before_provider_release:?}"
+    );
+    assert!(
+        retained.reserved_bytes >= 4096,
+        "request bytes must remain owned while provider I/O is unconfirmed: {retained:?}"
+    );
+    assert!(
+        retained.unconfirmed_provider_io > 0,
+        "pending provider read must remain unconfirmed: {retained:?}"
+    );
+
+    gate.release();
+    let report = shutdown.join().unwrap();
+    hook.join().unwrap();
+    assert!(
+        report.worker_stopped,
+        "runtime worker should exit after cancellation: {report:?}"
+    );
+    let after_provider_gate_release = runtime.snapshot();
+    assert!(
+        after_provider_gate_release.reserved_bytes >= 4096,
+        "opening a local gate does not prove the dropped provider future completed: {after_provider_gate_release:?}"
+    );
 }
 
 #[test]
