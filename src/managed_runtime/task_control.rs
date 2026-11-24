@@ -20,9 +20,9 @@ pub(super) fn register_waker(wakers: &mut Vec<Waker>, candidate: &mut Option<Wak
     let Some(waker) = candidate.as_ref() else {
         return;
     };
-    if !wakers.iter().any(|registered| registered.will_wake(waker)) {
-        if let Some(waker) = candidate.take() {
-            wakers.push(waker);
-        }
+    if !wakers.iter().any(|registered| registered.will_wake(waker))
+        && let Some(waker) = candidate.take()
+    {
+        wakers.push(waker);
     }
 }

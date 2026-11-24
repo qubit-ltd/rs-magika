@@ -262,10 +262,15 @@ fn test_next_request_drops_replaced_waker_after_releasing_bridge_lock() {
     struct DropProbe {
         bridge: Weak<AsyncSampleBridge>,
         lock_available: Arc<AtomicBool>,
+        wake_count: Arc<AtomicUsize>,
     }
     impl Wake for DropProbe {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
+        fn wake(self: Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+        }
     }
     impl Drop for DropProbe {
         fn drop(&mut self) {
@@ -279,9 +284,11 @@ fn test_next_request_drops_replaced_waker_after_releasing_bridge_lock() {
 
     let bridge = AsyncSampleBridge::new(0);
     let lock_available = Arc::new(AtomicBool::new(false));
+    let wake_count = Arc::new(AtomicUsize::new(0));
     let probe = Arc::new(DropProbe {
         bridge: Arc::downgrade(&bridge),
         lock_available: Arc::clone(&lock_available),
+        wake_count: Arc::clone(&wake_count),
     });
     let old_waker = std::task::Waker::from(Arc::clone(&probe));
     let mut request = std::pin::pin!(bridge.next_request());
@@ -289,10 +296,6 @@ fn test_next_request_drops_replaced_waker_after_releasing_bridge_lock() {
         let mut context = Context::from_waker(&old_waker);
         assert!(Future::poll(request.as_mut(), &mut context).is_pending());
         assert!(Future::poll(request.as_mut(), &mut context).is_pending());
-        assert!(
-            bridge.test_driver_waker_matches(&old_waker),
-            "equivalent polls retain the registered driver waker"
-        );
     }
     drop(old_waker);
     drop(probe);
@@ -303,6 +306,43 @@ fn test_next_request_drops_replaced_waker_after_releasing_bridge_lock() {
     assert!(
         lock_available.load(Ordering::SeqCst),
         "replaced driver waker must drop after lock release"
+    );
+    assert_eq!(0, wake_count.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_next_request_deduplicates_stable_raw_waker() {
+    let bridge = AsyncSampleBridge::new(0);
+    static WAKE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe fn clone_waker(data: *const ()) -> std::task::RawWaker {
+        std::task::RawWaker::new(data, &VTABLE)
+    }
+    unsafe fn wake_waker(_: *const ()) {
+        WAKE_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    unsafe fn wake_by_ref_waker(_: *const ()) {
+        WAKE_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    unsafe fn drop_waker(_: *const ()) {}
+
+    static VTABLE: std::task::RawWakerVTable =
+        std::task::RawWakerVTable::new(clone_waker, wake_waker, wake_by_ref_waker, drop_waker);
+    let waker = unsafe {
+        std::task::Waker::from_raw(std::task::RawWaker::new(
+            &WAKE_COUNT as *const AtomicUsize as *const (),
+            &VTABLE,
+        ))
+    };
+    assert!(waker.will_wake(&waker.clone()));
+    let mut context = Context::from_waker(&waker);
+    let mut request = std::pin::pin!(bridge.next_request());
+
+    assert!(Future::poll(request.as_mut(), &mut context).is_pending());
+    assert!(Future::poll(request.as_mut(), &mut context).is_pending());
+    assert!(
+        bridge.test_driver_waker_matches(&waker),
+        "repeated polls with an equivalent waker keep one registration"
     );
 }
 

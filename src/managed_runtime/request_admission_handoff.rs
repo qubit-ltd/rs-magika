@@ -507,16 +507,14 @@ impl RequestAdmissionHandoff {
 /// # Parameters
 ///
 /// * `slot` - Stored waker slot updated for the current task.
-/// * `candidate` - Cloned task waker to store when it differs from the
-///   existing registration.
+/// * `candidate` - Cloned task waker to store when it differs from the existing
+///   registration.
 ///
 /// # Returns
 ///
 /// The replaced waker, which must be dropped after releasing the state lock.
 fn register_waker(slot: &mut Option<Waker>, candidate: &mut Option<Waker>) -> Option<Waker> {
-    let Some(waker) = candidate.as_ref() else {
-        return None;
-    };
+    let waker = candidate.as_ref()?;
     if slot.as_ref().is_none_or(|registered| !registered.will_wake(waker)) {
         candidate.take().and_then(|waker| slot.replace(waker))
     } else {
@@ -531,14 +529,14 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::task::Wake;
+    use std::task::Waker;
 
     use qubit_operation::ManagerOptions;
     use qubit_operation::OperationManager;
     use qubit_operation::OperationOptions;
     use qubit_operation::OperationOutcome;
     use qubit_operation::ScopeLimits;
-    use std::task::Wake;
-    use std::task::Waker;
 
     use super::super::byte_budget::ByteBudget;
     use super::super::request_admission::RequestAdmission;
@@ -555,10 +553,15 @@ mod tests {
         struct DropProbe {
             handoff: Weak<RequestAdmissionHandoff>,
             lock_available: Arc<AtomicBool>,
+            wake_count: Arc<AtomicUsize>,
         }
         impl Wake for DropProbe {
-            fn wake(self: Arc<Self>) {}
-            fn wake_by_ref(self: &Arc<Self>) {}
+            fn wake(self: Arc<Self>) {
+                self.wake_count.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wake_count.fetch_add(1, Ordering::SeqCst);
+            }
         }
         impl Drop for DropProbe {
             fn drop(&mut self) {
@@ -580,9 +583,11 @@ mod tests {
         let (handoff, _guard) = RequestAdmissionHandoff::new(admission);
 
         let caller_unlocked = Arc::new(AtomicBool::new(false));
+        let caller_wake_count = Arc::new(AtomicUsize::new(0));
         let caller_probe = Arc::new(DropProbe {
             handoff: Arc::downgrade(&handoff),
             lock_available: Arc::clone(&caller_unlocked),
+            wake_count: Arc::clone(&caller_wake_count),
         });
         let caller_waker = Waker::from(Arc::clone(&caller_probe));
         {
@@ -597,9 +602,12 @@ mod tests {
             caller_unlocked.load(Ordering::SeqCst),
             "caller waker destructor must run after handoff unlock"
         );
+        assert_eq!(0, caller_wake_count.load(Ordering::SeqCst));
 
         let child_unlocked = Arc::new(AtomicBool::new(false));
         let child_unlocked_for_task = Arc::clone(&child_unlocked);
+        let child_wake_count = Arc::new(AtomicUsize::new(0));
+        let child_wake_count_for_task = Arc::clone(&child_wake_count);
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
         let mut operation = manager
             .as_async()
@@ -615,6 +623,7 @@ mod tests {
                 let child_probe = Arc::new(DropProbe {
                     handoff: Arc::downgrade(&handoff),
                     lock_available: child_unlocked_for_task,
+                    wake_count: child_wake_count_for_task,
                 });
                 let child_waker = Waker::from(Arc::clone(&child_probe));
                 let mut child_wait = Box::pin(handoff.wait_for_child_admission(&scope));
@@ -637,6 +646,7 @@ mod tests {
                     child_unlocked.load(Ordering::SeqCst),
                     "child waker destructor must run after handoff unlock"
                 );
+                assert_eq!(0, child_wake_count.load(Ordering::SeqCst));
                 Ok::<_, ()>(())
             })
             .unwrap();

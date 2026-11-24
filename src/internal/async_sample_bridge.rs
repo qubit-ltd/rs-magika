@@ -178,10 +178,15 @@ impl AsyncSampleBridge {
                     (Poll::Ready(Some(request)), None)
                 } else if state.closed {
                     (Poll::Ready(None), None)
-                } else if state.driver_waker.as_ref().is_none_or(|waker| {
-                    !candidate.as_ref().is_some_and(|candidate| waker.will_wake(candidate))
-                }) {
-                    (Poll::Pending, candidate.take().and_then(|waker| state.driver_waker.replace(waker)))
+                } else if state
+                    .driver_waker
+                    .as_ref()
+                    .is_none_or(|waker| !candidate.as_ref().is_some_and(|candidate| waker.will_wake(candidate)))
+                {
+                    (
+                        Poll::Pending,
+                        candidate.take().and_then(|waker| state.driver_waker.replace(waker)),
+                    )
                 } else {
                     (Poll::Pending, None)
                 }
@@ -201,9 +206,11 @@ impl AsyncSampleBridge {
                 let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                 if state.closed {
                     Poll::Ready(())
-                } else if !state.close_wakers.iter().any(|waker| {
-                    candidate.as_ref().is_some_and(|candidate| waker.will_wake(candidate))
-                }) {
+                } else if !state
+                    .close_wakers
+                    .iter()
+                    .any(|waker| candidate.as_ref().is_some_and(|candidate| waker.will_wake(candidate)))
+                {
                     if let Some(waker) = candidate.take() {
                         state.close_wakers.push(waker);
                     }
