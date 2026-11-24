@@ -220,6 +220,20 @@ def inventory_dependency(markdown: str, guide_name: str) -> dict[str, object]:
     return dependency
 
 
+def inventory_manifest(
+    manifest: dict[str, object], markdown: str, guide_name: str
+) -> dict[str, object]:
+    merged = json.loads(json.dumps(manifest))
+    dependencies = merged["dependencies"]
+    original = dependencies["qubit-magika"]
+    if not isinstance(original, dict):
+        raise ValueError(f"{guide_name}: fixed-source Magika dependency must be a table")
+    dependency = dict(original)
+    dependency.update(inventory_dependency(markdown, guide_name))
+    dependencies["qubit-magika"] = dependency
+    return merged
+
+
 def dependency_version(entry: object) -> str | None:
     if isinstance(entry, str):
         return entry
@@ -366,10 +380,21 @@ qubit-operation = { path = "../rs-operation" }
     assert rebased["patch"]["crates-io"]["qubit-operation"]["path"] == "/layout/rs-operation"
     serialized = tomllib.loads(manifest_text(parsed_application, add_package=False))
     assert serialized["package"] == parsed_application["package"]
-    assert inventory_dependency(
-        '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`',
-        guide,
-    )["features"] == ["inventory"]
+    inventory_line = '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`'
+    inventory_source = inventory_manifest(parsed_application, inventory_line, guide)
+    inventory_rebased = validate_and_rebase_manifest(inventory_source, guide, Path("/layout/rs-magika"))
+    assert inventory_rebased["dependencies"]["qubit-magika"]["features"] == ["inventory"]
+    try:
+        invalid_inventory = inventory_manifest(
+            parsed_application,
+            inventory_line.replace('path = "../rs-magika"', 'path = "../wrong-magika"'),
+            guide,
+        )
+        validate_and_rebase_manifest(invalid_inventory, guide, Path("/layout/rs-magika"))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted an inventory dependency with an incorrect source path")
     dynamic_manifest = json.loads(json.dumps(parsed_application))
     dynamic_manifest["dependencies"]["qubit-magika"]["default-features"] = False
     dynamic_manifest["dependencies"]["ort"] = {"version": ">=2.0.0-rc.12,<2.1", "default-features": False, "features": ["std", "ndarray", "load-dynamic", "api-24"]}
@@ -518,22 +543,20 @@ def main() -> int:
             )
             if result.returncode:
                 return result.returncode
-            application = validate_and_rebase_manifest(
-                extract_manifest(markdown, guide, APPLICATION_START, APPLICATION_END),
-                guide, project_root,
-            )
+            application_manifest = extract_manifest(markdown, guide, APPLICATION_START, APPLICATION_END)
+            application = validate_and_rebase_manifest(application_manifest, guide, project_root)
             dynamic = validate_and_rebase_manifest(
                 extract_manifest(markdown, guide, DYNAMIC_START, DYNAMIC_END),
                 guide, project_root, dynamic=True,
             )
-            inventory = json.loads(json.dumps(application))
-            declared_inventory = inventory_dependency(markdown, guide)
-            declared_inventory["version"] = inventory["dependencies"]["qubit-magika"]["version"]
-            declared_inventory["path"] = inventory["dependencies"]["qubit-magika"]["path"]
-            inventory["dependencies"]["qubit-magika"] = declared_inventory
+            inventory = validate_and_rebase_manifest(
+                inventory_manifest(application_manifest, markdown, guide), guide, project_root
+            )
             for variant, selected in (("default", application), ("inventory", inventory), ("dynamic", dynamic)):
                 graph_dir = temp_dir / f"{Path(guide).stem}-{variant}"
                 graph_dir.mkdir()
+                (graph_dir / "src").mkdir()
+                (graph_dir / "src" / "lib.rs").write_text("// metadata-only guide consumer\n", encoding="utf-8")
                 graph_manifest = graph_dir / "Cargo.toml"
                 graph_manifest.write_text(manifest_text(selected, add_package="package" not in selected), encoding="utf-8")
                 metadata_result = subprocess.run(
