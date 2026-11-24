@@ -202,7 +202,10 @@ impl ManagedInferenceRuntime {
     /// # Parameters
     ///
     /// * `manager` - Application-owned manager retained by the runtime.
-    /// * `max_in_flight_bytes` - Aggregate payload bound across admitted jobs.
+    /// * `max_in_flight_bytes` - Aggregate payload bound across admitted jobs
+    ///   using this runtime, including jobs submitted by every detector that
+    ///   shares it. Each detector's `max_buffer_size` remains its separate
+    ///   per-request limit.
     ///
     /// # Returns
     ///
@@ -621,8 +624,16 @@ impl ManagedInferenceRuntime {
 
     /// Drives provider reads for an already admitted async input.
     ///
+    /// `scope` is observed during provider setup and while driving reads. If
+    /// it stops the request, this future returns a Magika stop error; owned
+    /// setup values are dropped before admission is released. A provider read
+    /// already polled to `Pending` remains unconfirmed even after its local
+    /// future, input, and driver are dropped.
+    ///
     /// # Parameters
     ///
+    /// * `scope` - Parent operation scope observed during provider setup and
+    ///   reads; stopping it rejects or stops the request.
     /// * `admission` - Previously reserved operation and byte capacity.
     /// * `input` - Provider source read on demand by Magika sampling.
     /// * `max_bytes` - Bound used for provider range requests.
@@ -758,7 +769,9 @@ impl ManagedInferenceRuntime {
         await_inference_or_runtime_stop(inference, state).await
     }
 
-    /// Maximum total byte payload retained by running and queued jobs.
+    /// Maximum aggregate byte payload retained by running and queued jobs
+    /// across every detector sharing this runtime. This is distinct from each
+    /// detector's per-request `max_buffer_size`.
     ///
     /// # Returns
     ///
@@ -959,14 +972,16 @@ impl ManagedInferenceRuntime {
     /// # Parameters
     ///
     /// * `mode` - Drain queued work or request cooperative cancellation.
-    /// * `timeout` - Maximum wait for child and worker release.
+    /// * `timeout` - Maximum total wait for the mode-specific request wait and
+    ///   worker exit attempt.
     ///
     /// # Returns
     ///
     /// Drain waits for accepted service operations to settle. Cancel waits for
-    /// local provider access to finish before closing the worker sender and
-    /// joining; an operation still queued on the executor may remain in the
-    /// returned group snapshot until that executor retires it. `worker_stopped`
+    /// local provider access to finish. Shutdown then closes the worker sender
+    /// and attempts to join it. An operation still queued on the executor may
+    /// remain in the returned group snapshot until that executor retires it.
+    /// `worker_stopped`
     /// reports the join only and can be true while an unconfirmed provider
     /// request still retains capacity. False means shutdown has not observed a
     /// completed join; the worker handle remains available for a later call to

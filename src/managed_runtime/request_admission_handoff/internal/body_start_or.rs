@@ -9,24 +9,31 @@
 
 use super::handoff_close_reason::HandoffCloseReason;
 
-/// Result observed while racing body start against operation completion.
-/// `BodyStarted` means the caller-specific handoff completed: parent callers
-/// delivered admission or its registration error, while root callers claimed
-/// the payload. `Closed` may occur before or after the child reports start.
+/// Result observed while polling body start against operation completion.
+/// An `Outcome` means the outcome future returned `Ready` before the start
+/// signal was observed in that poll; it does not establish which event
+/// physically completed first. The lower-level start wait reports only that
+/// signal. `register_on_parent` returns `BodyStarted` after admission or its
+/// registration error is delivered to the child, while `wait_for_root_or`
+/// returns it after the root child claims the payload. `Closed` may occur
+/// before or after the child reports start.
 ///
 /// # Type Parameters
 ///
-/// * `T` - Outcome returned when the operation finishes before body start.
+/// * `T` - Outcome returned when polling observes operation completion
+///   before body start.
 pub(crate) enum BodyStartOr<T> {
-    /// The child crossed its start boundary and the caller completed transfer
-    /// or root payload claim.
+    /// The child body's start signal was observed. Higher-level caller
+    /// methods may perform registration or payload transfer before returning
+    /// this variant.
     BodyStarted,
     /// The handoff closed before caller transfer completed.
     Closed(
         /// First reason recorded when the caller or request closed the handoff.
         HandoffCloseReason,
     ),
-    /// The child operation finished before its body-start handshake.
+    /// Polling observed the child outcome before the body-start handshake.
+    /// This does not prove the operation completed earlier in wall-clock time.
     Outcome(
         /// Outcome returned by the submitted child operation.
         T,

@@ -246,7 +246,8 @@ impl RequestAdmission {
     /// Marks provider work started without settling on rejection, so an
     /// owned provider input can be destroyed before admission is released.
     /// The caller remains responsible for dropping that input before settling
-    /// admission when this check fails.
+    /// admission when this check fails. On rejection, no provider operation
+    /// may begin; propagate the error after dropping the input and admission.
     pub(crate) fn try_begin_provider_operation(&mut self) -> MimeResult<()> {
         if !self.state.try_start_provider_operation() {
             self.state.request_stop();
@@ -288,7 +289,10 @@ impl RequestAdmission {
     ///
     /// # Returns
     ///
-    /// The task state whose business result can be observed.
+    /// The task state whose business result can be observed. Queue rejection
+    /// is returned as `RejectedJob`; the caller must pass it to
+    /// [`Self::settle_rejected_job`] so its input is dropped, its business
+    /// result is failed, and its worker ownership is settled.
     pub(super) fn dispatch(
         mut self,
         input: WorkerInput,
@@ -336,6 +340,8 @@ impl RequestAdmission {
     }
 
     /// Releases a rejected job's input and completes its request state.
+    /// This consumes the rejection and performs the required business and
+    /// worker settlement; callers must not simply discard `RejectedJob`.
     ///
     /// # Parameters
     ///

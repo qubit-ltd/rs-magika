@@ -119,11 +119,15 @@ each managed request, and drain the runtime during application shutdown.
 The returned detection result is the business outcome. The scope observer
 reports settlement separately: a bounded wait may return `Pending(snapshot)`;
 it may also return terminal `Ready(report)` while `all_released()` is false.
-Capacity remains reserved in that case. Built-in cleanup has no way to receive
-completion evidence for discarded provider I/O, and retrying its current policy
-cannot release that capacity. A `RecoveryHandle` can inspect the state, retry
-the policy, or transfer responsibility. `worker_stopped` reports worker join
-independently of settlement and release.
+That negative report can describe resources owned elsewhere in the scope. Magika
+retains its own capacity when this request's Provider I/O completion is
+unconfirmed. The local future, reader, and driver still drop when the request is
+stopped; this does not confirm that native or remote I/O completed. Built-in
+cleanup has no way to receive completion evidence for discarded provider I/O,
+and retrying its current policy cannot release that capacity. A
+`RecoveryHandle` can inspect the state, retry the policy, or transfer
+responsibility. `worker_stopped` reports worker join independently of
+settlement and release.
 
 The inventory submits a synchronous `MimeDetectorSpec` factory only. It does
 not add a provider to `qubit-mime`'s separate async provider registry or attach

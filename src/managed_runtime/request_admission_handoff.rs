@@ -32,10 +32,13 @@ use internal::RequestAdmissionPayload;
 
 /// Coordinates request admission between a caller and a submitted child body.
 ///
-/// For a managed child, the caller registers the request against its parent
-/// scope after the child body starts, then transfers the admission or
-/// registration error to the waiting child. A root child claims its pending
-/// payload under the same lock used to observe closure. If either side stops
+/// For a managed child, the caller waits for the child start signal, registers
+/// the request against its parent scope, and then transfers admission or the
+/// registration error to the waiting child. `BodyStarted` from
+/// [`Self::register_on_parent`] therefore means delivery is complete, not that
+/// registration succeeded. A root child claims its pending payload under the
+/// same lock used to observe closure; `BodyStarted` from
+/// [`Self::wait_for_root_or`] means that claim completed. If either side stops
 /// waiting, the handoff closes and releases any payload it still owns.
 pub(crate) struct RequestAdmissionHandoff {
     /// Admission transfer and body-start notifications.
@@ -147,8 +150,9 @@ impl RequestAdmissionHandoff {
     ///
     /// # Returns
     ///
-    /// `Outcome(T)` if the operation finishes first, `BodyStarted` after the
-    /// admission or registration error is handed to the child, or
+    /// `Outcome(T)` if polling observes the outcome before body start,
+    /// `BodyStarted` after admission or the registration error is handed to
+    /// the child, or
     /// `Closed(reason)` if closure wins. `BodyStarted` does not imply that
     /// parent registration succeeded.
     pub(crate) async fn register_on_parent<F, T>(
@@ -193,11 +197,13 @@ impl RequestAdmissionHandoff {
         }
     }
 
-    /// Waits for an unmanaged child to claim its payload or finish first.
+    /// Waits for an unmanaged child to claim its payload or for polling to
+    /// observe its outcome first.
     ///
-    /// An outcome that wins closes the handoff and releases any unclaimed
-    /// payload. A body claim disarms the caller guard; a prior close is
-    /// returned with its recorded reason.
+    /// An observed outcome closes the handoff and releases any unclaimed
+    /// payload. A body claim disarms the caller guard; `BodyStarted` means the
+    /// root child claimed its payload. A prior close is returned with its
+    /// recorded reason. Poll order does not establish physical completion order.
     ///
     /// # Type Parameters
     ///
@@ -208,6 +214,17 @@ impl RequestAdmissionHandoff {
     ///
     /// * `guard` - Caller guard that is disarmed when this wait completes.
     /// * `outcome` - Unmanaged child outcome polled alongside body start.
+    ///
+    /// # Returns
+    ///
+    /// * `Outcome(T)` when polling observes the child outcome before body
+    ///   start.
+    /// * `BodyStarted` when the root child has claimed its payload.
+    /// * `Closed(reason)` when the handoff closes before the payload claim.
+    ///
+    /// If outcome and body start are both ready in one poll, outcome is checked
+    /// first. This order describes observation priority within that poll only;
+    /// it does not describe which event physically completed first.
     pub(crate) async fn wait_for_root_or<F, T>(
         self: &Arc<Self>,
         guard: &mut RequestAdmissionHandoffGuard,
@@ -265,11 +282,12 @@ impl RequestAdmissionHandoff {
     ///
     /// # Returns
     ///
-    /// `Outcome(T)` when the outcome is ready, `BodyStarted` when the child
-    /// crossed the start/claim boundary, or `Closed(reason)` when the handoff
-    /// closed first. The outcome is polled first, so a ready outcome wins over
-    /// a simultaneous start or close. The underlying poll uses `Some(true)`,
-    /// `Some(false)`, and `None` for started, closed, and pending respectively.
+    /// `Outcome(T)` when polling finds the outcome ready, `BodyStarted` when
+    /// the child start signal is observed, or `Closed(reason)` when the
+    /// handoff is closed. The outcome is polled first, so it wins when both
+    /// outcome and start are ready in one poll; this says nothing about which
+    /// event physically completed first. The underlying poll uses
+    /// `Some(true)`, `Some(false)`, and `None` for started, closed, and pending.
     pub(crate) async fn wait_for_body_start_or<F, T>(&self, outcome: &mut F) -> BodyStartOr<T>
     where
         F: Future<Output = T> + Unpin,

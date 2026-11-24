@@ -419,8 +419,11 @@ impl MagikaMimeDetector {
 
     /// Stops managed inference admission and observes accepted worker jobs.
     ///
-    /// The timeout is one deadline shared by service admission/settlement and
-    /// worker exit. If it expires before the worker exits,
+    /// The timeout is one deadline for the mode-specific wait and worker exit
+    /// attempt. `Drain` waits for accepted service operations to settle;
+    /// `Cancel` waits for local provider access to finish before shutdown
+    /// closes the worker sender. If the deadline expires before the worker
+    /// exits,
     /// [`ManagedInferenceShutdownReport::worker_stopped`] is false and the
     /// runtime retains the worker handle; a later call can continue observing
     /// and reap it. Shutdown does not forcibly interrupt native inference or
@@ -429,14 +432,16 @@ impl MagikaMimeDetector {
     /// # Parameters
     ///
     /// * `mode` - Drain accepted requests or request cooperative cancellation.
-    /// * `timeout` - Maximum wait for child settlement and worker exit.
+    /// * `timeout` - Maximum total wait for the mode-specific request wait and
+    ///   worker exit attempt.
     ///
     /// # Returns
     ///
-    /// `Drain` waits for accepted service operations to settle. `Cancel` waits
-    /// for local provider access to finish, then closes the worker sender and
-    /// attempts join; queued operations can remain in the service-group
-    /// snapshot until their executor retires them. `worker_stopped` confirms
+    /// After its mode-specific wait, shutdown closes the worker sender and
+    /// attempts to join it. `Drain` waits for accepted service operations to
+    /// settle. `Cancel` waits for local provider access to finish first. Queued
+    /// operations can remain in the service-group snapshot until their
+    /// executor retires them. `worker_stopped` confirms
     /// join only, and can be true while an unconfirmed provider request still
     /// retains capacity. `false` means join is unconfirmed; a later call can
     /// continue observing the retained worker handle. Inspect the admission
