@@ -173,8 +173,8 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
 #[cfg(feature = "inventory")]
 #[test]
 fn test_magika_provider_is_discovered_with_repository_default() {
-    use qubit_operation_registry::GroupOptions;
-    use qubit_operation_registry::OperationManager;
+    use qubit_operation::GroupOptions;
+    use qubit_operation::OperationManager;
 
     let registry = MimeDetectorRegistry::builtin();
     assert!(registry.provider_ids().iter().any(|id| id.as_str() == "magika"));
