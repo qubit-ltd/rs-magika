@@ -25,8 +25,11 @@ use crate::managed_runtime::ManagedInferenceRuntime;
 ///
 /// The configured media-stream classifier refines eligible high-level
 /// complete-content and reader detections. Local-file refinement is limited
-/// to ordinary files; directories and symbolic links retain their filename
-/// candidate. It is not invoked by
+/// to ordinary files. Directories and symbolic links skip refinement; a
+/// filename candidate is returned only when the selected detection policy
+/// permits fallback and such a candidate exists. FIFO and socket paths are
+/// rejected during content detection's metadata check with
+/// `ErrorKind::Unsupported`. It is not invoked by
 /// `detect_path` or `detect_async_path`, including their full-read fallback;
 /// those provider routes return Magika candidates to `qubit-mime` without
 /// media refinement.
@@ -97,7 +100,10 @@ impl MagikaMimeDetectorBuilder {
     ///
     /// This setting applies to eligible high-level complete-content and reader
     /// detections. Local-file refinement is limited to ordinary files;
-    /// directories and symbolic links retain their filename candidate.
+    /// directories and symbolic links skip refinement. A filename candidate
+    /// is returned only when the selected detection policy permits fallback
+    /// and such a candidate exists. FIFO and socket paths are rejected during
+    /// content detection's metadata check with `ErrorKind::Unsupported`.
     /// Provider-path detection does not invoke the classifier, even when its
     /// filesystem fallback reads the whole file.
     ///

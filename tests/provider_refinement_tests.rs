@@ -216,7 +216,6 @@ fn test_local_file_refinement_applies_only_to_regular_files() {
         Some("text/x-shellscript")
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-
     let directory_candidate = detector
         .detect_by_filename(same_name_directory.to_str().expect("path should be UTF-8"))
         .expect("filename candidate should be available");
@@ -226,6 +225,13 @@ fn test_local_file_refinement_applies_only_to_regular_files() {
             .expect("directory detection should fall back to its filename")
             .as_deref(),
         directory_candidate.as_deref()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        detector
+            .detect_file(&same_name_directory, MimeDetectionPolicy::VerifyContent)
+            .expect("directory content verification should succeed without content"),
+        None
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -244,6 +250,13 @@ fn test_local_file_refinement_applies_only_to_regular_files() {
                 .expect("symlink detection should fall back to its filename")
                 .as_deref(),
             link_candidate.as_deref()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            detector
+                .detect_file(&link, MimeDetectionPolicy::VerifyContent)
+                .expect("symlink content verification should succeed without content"),
+            None
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }

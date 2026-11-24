@@ -17,9 +17,11 @@ use qubit_mime::MediaStreamType;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 
-/// Classifier adapter that excludes directories and symbolic links from local
-/// media refinement while preserving the wrapped classifier's byte and reader
-/// behavior.
+/// Classifier adapter that excludes non-regular local paths from media
+/// refinement while preserving the wrapped classifier's byte and reader
+/// behavior. Its path check uses `symlink_metadata`, so it does not follow a
+/// final symbolic link. Non-regular paths return `MediaStreamType::None`;
+/// metadata errors and errors from the wrapped classifier are propagated.
 pub(crate) struct RegularFileMediaStreamClassifier {
     /// The classifier used after a path passes the regular-file check.
     inner: Arc<dyn MediaStreamClassifier>,

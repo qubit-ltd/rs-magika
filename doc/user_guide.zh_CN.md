@@ -364,9 +364,9 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
 `Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
 
-本地文件媒体细化仅适用于普通文件。目录和符号链接保留文件名候选，不会交给配置的媒体分类器。
-FIFO、Unix socket 等其他本地类型在内容检测尝试打开时返回 `MimeError::Io`，其
-`ErrorKind` 为 `Unsupported`。高层 `detect_file` 使用 `PreferFilename` 且文件名只有一个候选时，可能直接返回文件名结果，不检查路径或类型。
+本地文件媒体细化仅适用于普通文件。目录和符号链接会跳过细化；使用 `Freedesktop` 时，若存在文件名候选则可以选中，使用
+`VerifyContent` 时则在没有内容的情况下返回 `None`。FIFO、Unix socket 等其他本地类型在内容检测的元数据检查阶段返回
+`MimeError::Io`，其 `ErrorKind` 为 `Unsupported`。高层 `detect_file` 使用 `PreferFilename` 且文件名只有一个候选时，可能直接返回文件名结果，不检查路径或类型。
 元数据检查与后续分类器打开是两个独立操作，因此无法防止路径在两者之间被替换。
 一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。异步 Provider path 采样时，worker
 可能等待 Provider 读取；这会延迟共享同一 runtime 的其他请求，形成共同的等待和故障域。若应用需要隔离
