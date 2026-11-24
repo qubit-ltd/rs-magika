@@ -952,9 +952,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::MagikaMimeDetector;
+    use super::PROVIDER_OUTCOME;
     use super::content_type_to_mime;
     use super::map_operation_outcome;
-    use super::PROVIDER_OUTCOME;
 
     #[test]
     fn test_provider_operation_outcomes_preserve_success_and_classify_failures() {
@@ -982,7 +982,8 @@ mod tests {
                 summary: DiagnosticSummary::new("child failed"),
             },
         };
-        let child_failed = map_operation_outcome::<&str>(OperationOutcome::ChildFailed(child_failure), PROVIDER_OUTCOME);
+        let child_failed =
+            map_operation_outcome::<&str>(OperationOutcome::ChildFailed(child_failure), PROVIDER_OUTCOME);
         assert!(child_failed.unwrap_err().to_string().contains("provider child failed"));
 
         let stopped = map_operation_outcome::<&str>(
