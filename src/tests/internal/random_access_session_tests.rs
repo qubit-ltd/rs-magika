@@ -455,20 +455,21 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 /// Opens a real async random-access session for managed setup lifetime tests.
-pub(crate) fn opened_async_session_for_managed_setup_test(
-    on_drop: impl Fn() + Send + Sync + 'static,
-) -> (
+pub(crate) type ManagedSetupSession = (
     qubit_fs::read::AsyncRandomAccessReader,
     Arc<AtomicUsize>,
     Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
-) {
+);
+
+pub(crate) fn opened_async_session_for_managed_setup_test(
+    on_drop: impl Fn() + Send + Sync + 'static,
+) -> ManagedSetupSession {
     let mut fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(4));
     fixture.session_drop_observer = Some(Arc::new(on_drop));
     let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
-    let reader = block_on(filesystem.open_random_access_reader(
-        &Path::parse("/managed-setup.py").unwrap(),
-        ReadOptions::default(),
-    ))
+    let reader = block_on(
+        filesystem.open_random_access_reader(&Path::parse("/managed-setup.py").unwrap(), ReadOptions::default()),
+    )
     .unwrap();
     (reader, Arc::clone(&fixture.drops), Arc::clone(&fixture.reads))
 }

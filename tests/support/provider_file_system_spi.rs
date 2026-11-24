@@ -284,11 +284,13 @@ pub(crate) struct ProviderObservations {
     pub(crate) session_drops: AtomicUsize,
     pub(crate) session_drop_reserved_bytes: AtomicUsize,
     pub(crate) session_drop_runtime_requests: AtomicUsize,
-    pub(crate) session_drop_observer: Mutex<Option<Arc<dyn Fn() -> (usize, usize) + Send + Sync>>>,
+    pub(crate) session_drop_observer: Mutex<Option<SessionDropObserver>>,
     pub(crate) read_bytes: AtomicUsize,
     pub(crate) range_reads: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
 }
+
+pub(crate) type SessionDropObserver = Arc<dyn Fn() -> (usize, usize) + Send + Sync>;
 
 impl ProviderFileSystemSpi {
     pub(crate) fn new(content: Vec<u8>) -> Self {
@@ -650,8 +652,12 @@ impl Drop for ProviderSession {
     fn drop(&mut self) {
         if let Some(observe) = self.observations.session_drop_observer.lock().unwrap().as_ref() {
             let (reserved_bytes, runtime_requests) = observe();
-            self.observations.session_drop_reserved_bytes.store(reserved_bytes, Ordering::SeqCst);
-            self.observations.session_drop_runtime_requests.store(runtime_requests, Ordering::SeqCst);
+            self.observations
+                .session_drop_reserved_bytes
+                .store(reserved_bytes, Ordering::SeqCst);
+            self.observations
+                .session_drop_runtime_requests
+                .store(runtime_requests, Ordering::SeqCst);
         }
         self.observations.session_drops.fetch_add(1, Ordering::SeqCst);
     }

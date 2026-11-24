@@ -769,9 +769,7 @@ mod tests {
         state.request_stop();
 
         assert_eq!(
-            Some(HandoffCloseReason::RequestStopped(
-                "provider operation stopped before start"
-            )),
+            Some(HandoffCloseReason::RequestStopped("request admission stopped")),
             handoff.state.lock().unwrap().close_reason
         );
 

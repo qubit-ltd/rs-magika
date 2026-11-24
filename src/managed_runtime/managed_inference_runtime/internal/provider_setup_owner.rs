@@ -8,7 +8,6 @@
 //! Ordered ownership of input and admission during provider setup.
 
 use super::super::request_admission::RequestAdmission;
-
 use crate::internal::AsyncProviderInput;
 
 /// Keeps setup input ahead of its admission lease during destruction.

@@ -597,7 +597,10 @@ fn assert_opened_provider_session_drops_before_stop_releases_admission(runtime_s
             let provider = provider.with_session_open_hook(Arc::new(move || {
                 if runtime_stop {
                     let _ = runtime_for_hook.shutdown_blocking(ShutdownMode::Cancel, Duration::ZERO);
-                    assert!(runtime_for_hook.snapshot().cancelling, "runtime cancellation must be scanned before open returns");
+                    assert!(
+                        runtime_for_hook.snapshot().cancelling,
+                        "runtime cancellation must be scanned before open returns"
+                    );
                 } else {
                     let _ = scope_for_open.request_stop(StopReason::UserCancelled);
                 }
@@ -626,10 +629,22 @@ fn assert_opened_provider_session_drops_before_stop_releases_admission(runtime_s
         observations.session_drop_runtime_requests.load(Ordering::SeqCst) > 0,
         "opened session must drop while its runtime request slot remains held"
     );
-    assert!(settlement.all_released(), "setup stop should eventually release resources: {settlement:?}");
-    assert!(shutdown_report.worker_stopped, "runtime worker should be joined: {shutdown_report:?}");
-    assert_eq!(0, final_snapshot.reserved_bytes, "runtime bytes should be reclaimed after shutdown");
-    assert_eq!(0, final_snapshot.admitted_not_started + final_snapshot.worker_running + final_snapshot.awaiting_release);
+    assert!(
+        settlement.all_released(),
+        "setup stop should eventually release resources: {settlement:?}"
+    );
+    assert!(
+        shutdown_report.worker_stopped,
+        "runtime worker should be joined: {shutdown_report:?}"
+    );
+    assert_eq!(
+        0, final_snapshot.reserved_bytes,
+        "runtime bytes should be reclaimed after shutdown"
+    );
+    assert_eq!(
+        0,
+        final_snapshot.admitted_not_started + final_snapshot.worker_running + final_snapshot.awaiting_release
+    );
     assert_eq!(0, service_report.snapshot.active_operations);
     assert_eq!(0, supervisor_report.snapshot.active_operations);
 }
@@ -3077,10 +3092,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     // Stat/open and random-access read expose a provider future whose Drop is
     // observed by AsyncProviderGate. Range and ordinary reads use AsyncInput
     // polling instead, so their reader is intentionally retained in recovery.
-    if gate_was_entered
-        && (point != AsyncProviderGatePoint::Read || session)
-        && !provider_wait_dropped_after_release
-    {
+    if gate_was_entered && (point != AsyncProviderGatePoint::Read || session) && !provider_wait_dropped_after_release {
         failures.push(format!(
             "runtime Cancel must drop the pending Provider future; managed={managed}, point={point:?}, session={session}, range={range}"
         ));

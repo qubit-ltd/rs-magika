@@ -83,7 +83,8 @@ const SERVICE_CAPACITY: usize = 2;
 /// Shareable managed execution runtime. One worker owns its Magika session.
 /// Scope-less service-group capacity, runtime request slots, and the shared
 /// aggregate owned-payload byte budget are separate admission limits; none of
-/// them proves that provider I/O completed or that operation resources released.
+/// them proves that provider I/O completed or that operation resources
+/// released.
 ///
 /// # Examples
 ///
@@ -115,13 +116,16 @@ pub struct ManagedInferenceRuntime {
     /// Bounded worker-job queue with the same slot count as the scope-less
     /// service group; runtime request and byte limits are separate.
     sender: Mutex<Option<SyncSender<Job>>>,
-    /// Session-owning worker; join completion is independent of resource release.
+    /// Session-owning worker; join completion is independent of resource
+    /// release.
     worker: Mutex<WorkerState>,
     /// Finite operation-group capacity used by scope-less service admission.
     service_group: OperationGroup,
-    /// Runtime request slots remain occupied until worker and provider access release.
+    /// Runtime request slots remain occupied until worker and provider access
+    /// release.
     active_requests: Arc<AtomicUsize>,
-    /// Per-detector upper bound used when reserving shared aggregate byte capacity.
+    /// Per-detector upper bound used when reserving shared aggregate byte
+    /// capacity.
     max_in_flight_bytes: usize,
     /// Shared aggregate owned-payload bytes reserved by active and queued jobs.
     byte_budget: Arc<ByteBudget>,
@@ -532,7 +536,10 @@ impl ManagedInferenceRuntime {
                 if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
                     body_cancellation_won.store(true, std::sync::atomic::Ordering::Release);
                     state.request_stop();
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", "request stopped during inference")));
+                    return Poll::Ready(Err(MimeError::detector_backend(
+                        "magika",
+                        "request stopped during inference",
+                    )));
                 }
                 Poll::Pending
             })
@@ -554,9 +561,11 @@ impl ManagedInferenceRuntime {
         let outcome_result = {
             let mut outcome = Box::pin(operation.wait_outcome());
             let start_or = match parent {
-                Some(parent) => request_handoff
-                    .register_on_parent(parent, &mut handoff_guard, &mut outcome)
-                    .await,
+                Some(parent) => {
+                    request_handoff
+                        .register_on_parent(parent, &mut handoff_guard, &mut outcome)
+                        .await
+                }
                 None => request_handoff.wait_for_root_or(&mut handoff_guard, &mut outcome).await,
             };
             match start_or {
@@ -657,10 +666,9 @@ impl ManagedInferenceRuntime {
                     Err(error) => {
                         let business_error = map_error(error);
                         drop(owner.input);
-                        owner.admission.settle_error(MimeError::detector_backend(
-                            "magika",
-                            "provider length lookup failed",
-                        ));
+                        owner
+                            .admission
+                            .settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
                         return Err(business_error);
                     }
                 };
@@ -668,16 +676,10 @@ impl ManagedInferenceRuntime {
                 let driver = bridge.driver();
                 let io_in_flight = owner.input.io_in_flight();
                 owner.admission.require_provider_driver();
-                let guard = ProviderDriverGuard::new_with_io_status(
-                    owner.input,
-                    driver,
-                    Arc::clone(&state),
-                    io_in_flight,
-                );
-                let inference = setup_runtime.dispatch(
-                    owner.admission,
-                    WorkerInput::Bridge(bridge, max_bytes, map_error),
-                )?;
+                let guard =
+                    ProviderDriverGuard::new_with_io_status(owner.input, driver, Arc::clone(&state), io_in_flight);
+                let inference =
+                    setup_runtime.dispatch(owner.admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
                 Ok::<_, MimeError>((guard, inference))
             };
             let mut setup = Box::pin(setup);

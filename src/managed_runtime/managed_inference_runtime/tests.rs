@@ -936,7 +936,10 @@ fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
         "worker must still be executing before the gate opens"
     );
     let error = cancelled_result.unwrap_err();
-    assert!(format!("{error:?}").contains("provider operation stopped after cancellation"));
+    assert!(
+        format!("{error:?}").contains("request stopped during inference"),
+        "unexpected bytes cancellation error: {error:?}"
+    );
     assert!(report.worker_stopped);
 }
 
@@ -2213,21 +2216,18 @@ fn test_provider_input_drops_before_first_setup_poll_releases_admission() {
             let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let runtime_for_drop = Arc::clone(&operation_runtime);
             let observed_bytes_for_drop = Arc::clone(&observed_bytes);
-            let (reader, session_drops, session_reads) = crate::tests::internal::random_access_session_tests::
-                opened_async_session_for_managed_setup_test(move || {
-                    observed_bytes_for_drop.store(
-                        runtime_for_drop.snapshot().reserved_bytes,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                });
+            let (reader, session_drops, session_reads) =
+                crate::tests::internal::random_access_session_tests::opened_async_session_for_managed_setup_test(
+                    move || {
+                        observed_bytes_for_drop.store(
+                            runtime_for_drop.snapshot().reserved_bytes,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                    },
+                );
             let input = crate::internal::AsyncProviderInput::from_session(reader, 4, Some(4));
-            let detection = operation_runtime.detect_async_input_admitted(
-                &scope,
-                admission,
-                input,
-                4,
-                map_provider_test_error,
-            );
+            let detection =
+                operation_runtime.detect_async_input_admitted(&scope, admission, input, 4, map_provider_test_error);
             let _ = operation_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::ZERO);
             drop(detection);
             assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::SeqCst));

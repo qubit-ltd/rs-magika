@@ -84,10 +84,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-qubit-magika = { path = "../rs-magika" }
-qubit-mime = { path = "../rs-mime" }
-qubit-fs = { path = "../rs-fs", default-features = false, features = ["async"] }
-qubit-operation = { path = "../rs-operation" }
+qubit-magika = { version = "0.18", path = "../rs-magika" }
+qubit-mime = { version = "0.22", path = "../rs-mime" }
+qubit-fs = { version = "0.4", path = "../rs-fs", default-features = false, features = ["async"] }
+qubit-operation = { version = "0.3.2", path = "../rs-operation" }
 qubit-spi = "0.14"
 
 [patch.crates-io]
@@ -362,10 +362,10 @@ managed and custom ONNX dependency blocks use the same procedure.
 
 ```toml
 [dependencies]
-qubit-magika = { path = "../rs-magika", default-features = false }
-qubit-mime = { path = "../rs-mime" }
-qubit-operation = { path = "../rs-operation" }
-qubit-fs = { path = "../rs-fs", default-features = false, features = ["async"] }
+qubit-magika = { version = "0.18", path = "../rs-magika", default-features = false }
+qubit-mime = { version = "0.22", path = "../rs-mime" }
+qubit-operation = { version = "0.3.2", path = "../rs-operation" }
+qubit-fs = { version = "0.4", path = "../rs-fs", default-features = false, features = ["async"] }
 qubit-spi = "0.14"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 
