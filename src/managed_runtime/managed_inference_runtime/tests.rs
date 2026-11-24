@@ -2287,3 +2287,58 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
     assert!(report.worker_stopped);
     assert!(report.worker_panicked);
 }
+
+#[test]
+fn test_shutdown_timeout_observes_joinable_worker_while_admission_is_held() {
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(|_| Ok(None)),
+        Box::new(|| panic!("injected worker exit before first receive")),
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime.worker.lock().unwrap().handle.as_ref().unwrap().is_finished() {
+        assert!(std::time::Instant::now() < deadline, "worker did not exit");
+        std::thread::yield_now();
+    }
+
+    let admission = runtime.reserve_request(None, 4).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let first_runtime = Arc::clone(&runtime);
+    let first_barrier = Arc::clone(&barrier);
+    let first_shutdown = std::thread::spawn(move || {
+        first_barrier.wait();
+        first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(50))
+    });
+    let second_runtime = Arc::clone(&runtime);
+    let second_barrier = Arc::clone(&barrier);
+    let second_shutdown = std::thread::spawn(move || {
+        second_barrier.wait();
+        second_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50))
+    });
+    barrier.wait();
+    let first = first_shutdown.join().unwrap();
+    let second = second_shutdown.join().unwrap();
+
+    assert_eq!(1, first.admission.snapshot.service_resources);
+    assert_eq!(1, second.admission.snapshot.service_resources);
+    assert_eq!(4, runtime.snapshot().reserved_bytes);
+    assert!(runtime.byte_budget.try_acquire(8).is_none());
+    assert!(
+        first.worker_stopped,
+        "first timed-out shutdown must reap the exited worker"
+    );
+    assert!(first.worker_panicked, "join must preserve the escaped panic fact");
+    assert!(
+        second.worker_stopped,
+        "concurrent shutdown must observe the completed join"
+    );
+    assert!(second.worker_panicked, "concurrent shutdown must retain the panic fact");
+
+    drop(admission);
+    let resumed = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+    assert!(resumed.worker_stopped);
+    assert!(resumed.worker_panicked);
+    assert_eq!(0, resumed.admission.snapshot.service_resources);
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+}

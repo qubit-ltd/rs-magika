@@ -936,10 +936,11 @@ impl ManagedInferenceRuntime {
                 break;
             }
             if remaining_timeout(deadline).is_zero() {
+                let (worker_stopped, worker_panicked) = self.observe_finished_worker();
                 return ManagedInferenceShutdownReport {
                     admission,
-                    worker_stopped: false,
-                    worker_panicked: false,
+                    worker_stopped,
+                    worker_panicked,
                 };
             }
             std::thread::sleep(remaining_timeout(deadline).min(std::time::Duration::from_millis(1)));
@@ -948,40 +949,36 @@ impl ManagedInferenceRuntime {
         self.service_group.close_admission();
         self.sender.lock().unwrap_or_else(|error| error.into_inner()).take();
         loop {
-            let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
-            match worker.handle.as_ref() {
-                Some(handle) if handle.is_finished() => {
-                    let handle = worker.handle.take().expect("finished worker handle is present");
-                    worker.panicked = handle.join().is_err();
-                    worker.stopped = true;
-                    return ManagedInferenceShutdownReport {
-                        admission,
-                        worker_stopped: worker.stopped,
-                        worker_panicked: worker.panicked,
-                    };
-                }
-                Some(_) => {
-                    let panicked = worker.panicked;
-                    drop(worker);
-                    let remaining = remaining_timeout(deadline);
-                    if remaining.is_zero() {
-                        return ManagedInferenceShutdownReport {
-                            admission,
-                            worker_stopped: false,
-                            worker_panicked: panicked,
-                        };
-                    }
-                    std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
-                }
-                None => {
-                    return ManagedInferenceShutdownReport {
-                        admission,
-                        worker_stopped: worker.stopped,
-                        worker_panicked: worker.panicked,
-                    };
-                }
+            let (worker_stopped, worker_panicked) = self.observe_finished_worker();
+            if worker_stopped {
+                return ManagedInferenceShutdownReport {
+                    admission,
+                    worker_stopped,
+                    worker_panicked,
+                };
             }
+            let remaining = remaining_timeout(deadline);
+            if remaining.is_zero() {
+                return ManagedInferenceShutdownReport {
+                    admission,
+                    worker_stopped: false,
+                    worker_panicked,
+                };
+            }
+            std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
         }
+    }
+
+    /// Joins the worker when its thread has already finished and returns the
+    /// facts retained across concurrent and subsequent shutdown calls.
+    fn observe_finished_worker(&self) -> (bool, bool) {
+        let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
+        if worker.handle.as_ref().is_some_and(|handle| handle.is_finished()) {
+            let handle = worker.handle.take().expect("finished worker handle is present");
+            worker.panicked = handle.join().is_err();
+            worker.stopped = true;
+        }
+        (worker.stopped, worker.panicked)
     }
 
     /// Captures the runtime group and local request counts.
