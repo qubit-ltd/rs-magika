@@ -14,8 +14,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
-use tempfile::tempdir;
-
 use qubit_config::Config;
 use qubit_fs::Path as FsPath;
 use qubit_mime::CONFIG_MIME_AMBIGUOUS_MIME_MAPPING;
@@ -29,6 +27,7 @@ use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeResult;
+use tempfile::tempdir;
 
 use crate::support::ProviderFileSystemSpi;
 use crate::support::run_ready;
@@ -122,12 +121,7 @@ fn assert_provider_path_without_refinement(
             MimeDetectionPolicy::VerifyContent,
         ))
     } else {
-        detector.detect_path(
-            &provider.file_system(),
-            &path,
-            8192,
-            MimeDetectionPolicy::VerifyContent,
-        )
+        detector.detect_path(&provider.file_system(), &path, 8192, MimeDetectionPolicy::VerifyContent)
     };
     assert_eq!(
         result.expect("provider path should detect content"),
@@ -151,11 +145,7 @@ fn test_provider_path_routes_do_not_refine_after_full_content_positive_control()
             .expect("complete-content detection should succeed"),
         Some("text/x-shellscript".to_owned())
     );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        1,
-        "positive control must call classifier"
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "positive control must call classifier");
 
     // Random-access session route.
     assert_provider_path_without_refinement(
@@ -216,6 +206,7 @@ fn test_local_file_refinement_applies_only_to_regular_files() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let detector = configured_detector(Arc::clone(&calls));
+    assert!(format!("{detector:?}").contains("RegularFileMediaStreamClassifier"));
 
     assert_eq!(
         detector
@@ -299,11 +290,7 @@ fn test_local_file_adapter_preserves_content_and_reader_overrides() {
     let mut reader = std::io::Cursor::new(SHELL_SCRIPT);
     assert_eq!(
         detector
-            .detect_reader(
-                &mut reader,
-                Some("script.sh"),
-                MimeDetectionPolicy::Freedesktop
-            )
+            .detect_reader(&mut reader, Some("script.sh"), MimeDetectionPolicy::Freedesktop)
             .expect("reader detection should succeed"),
         Some("text/x-shellscript".to_owned())
     );

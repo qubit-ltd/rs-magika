@@ -1113,15 +1113,18 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         state.wait_stopped(),
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while reads.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-        assert!(driver.as_mut().poll(&mut context).is_pending());
-        assert!(
-            std::time::Instant::now() < deadline,
-            "worker did not reach the active read"
-        );
+    let reached_active_read = loop {
+        if reads.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        if driver.as_mut().poll(&mut context).is_ready() {
+            break false;
+        }
         std::thread::park_timeout(Duration::from_millis(1));
-    }
-    assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
+    };
     state.request_stop();
     let cancel_deadline = std::time::Instant::now() + Duration::from_secs(2);
     let stopped = loop {
@@ -1136,13 +1139,23 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         );
     };
     drop(driver);
-    assert!(worker.join().unwrap().is_err());
+    let worker_result = worker.join().unwrap();
+    assert!(
+        reached_active_read,
+        "timed out waiting for worker to reach the active read; reads={}",
+        reads.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(worker_result.is_err());
     assert!(
         stopped.is_some(),
         "timed out waiting for cancellation during active read; reads={}",
         reads.load(std::sync::atomic::Ordering::SeqCst)
     );
-    assert!(stopped.unwrap().is_err(), "runtime Cancel must end an active range read");
+    assert!(
+        stopped.unwrap().is_err(),
+        "runtime Cancel must end an active range read"
+    );
     assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
 
     // Linearize cancellation at the provider-start gate after the worker has

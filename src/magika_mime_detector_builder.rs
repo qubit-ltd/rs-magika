@@ -194,8 +194,7 @@ impl MagikaMimeDetectorBuilder {
         };
         let mut core = MimeDetectorCore::from_mime_config(self.mime_config.clone());
         core.set_media_stream_classifier(self.media_stream_classifier.map(|classifier| {
-            Arc::new(RegularFileMediaStreamClassifier::new(classifier))
-                as Arc<dyn MediaStreamClassifier>
+            Arc::new(RegularFileMediaStreamClassifier::new(classifier)) as Arc<dyn MediaStreamClassifier>
         }));
         Ok(MagikaMimeDetector {
             core,
