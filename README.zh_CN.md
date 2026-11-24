@@ -30,7 +30,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1，`--registry-only` 仍无法解析 `qubit-magika = "^0.18"`。发布完成前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并从仓库根运行 `python3 .infra/check-readme-examples.py`。`--registry-only` 使用 registry 依赖；版本可解析后仍会编译提取出的消费者程序，运行时还需满足原生环境条件。两种模式都会提取并检查中英文示例，分别覆盖默认 feature 和 `inventory`。增加 `--run-example` 可运行提取出的程序。独立的 [dynamic-loader CI job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml) 继续负责隔离动态加载 ONNX Runtime 的验收。
+此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1，`--registry-only` 仍无法解析 `qubit-magika = "^0.18"`。固定源码与 `--registry-only` 是依赖来源模式。发布完成前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并从仓库根运行 `python3 .infra/check-readme-examples.py`。普通模式和 `--registry-only` 都会编译提取出的中英文消费者程序，分别覆盖默认 feature 和 `inventory`；只有增加 `--run-example` 才会运行程序。dynamic-loader CI job 会用锁定的 `readme_consumer` fixture 运行这两种配置，再检查独立 `dynamic_loader` fixture 的 feature 图并执行隔离动态加载 ONNX Runtime 验收。
 
 ## 快速开始
 

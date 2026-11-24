@@ -58,6 +58,7 @@ Provider 读取，但不接收 parent operation scope。应用若要把 Provider
 `rs-*` 的同级目录中，应用目录命名为 `app`。将以下清单保存为
 `app/Cargo.toml`：
 
+<!-- fixed-source-application-start -->
 ```toml
 [workspace]
 
@@ -76,6 +77,7 @@ qubit-spi = "0.14"
 [patch.crates-io]
 qubit-operation = { path = "../rs-operation" }
 ```
+<!-- fixed-source-application-end -->
 
 成员依赖路径相对 package 目录解析；workspace patch 路径相对 workspace 根目录解析。
 使用源码仓库的准备脚本准备固定 checkout，再运行
@@ -84,10 +86,9 @@ lock 文件。本仓库源码 checker 使用相同的根清单结构。仅使用
 path 或 patch，并使用自己的 lock 文件。
 
 此根清单默认启用 `bundled-onnxruntime`。若要启用同步 Provider inventory，
-将 Magika 项改为 `qubit-magika = { path = "../rs-magika", features = ["inventory"] }`。
-README checker 会编译默认和 inventory 两种变体；只有添加 `--run-example` 才会运行程序。
-仓库的[独立 README 消费者 fixture](../tests/fixtures/readme_consumer/Cargo.toml)
-展示了锁定后的默认应用依赖图。
+将 Magika 项改为 `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`。
+固定源码与 `--registry-only` 是依赖来源模式。普通 README checker 会编译默认和 inventory 两种应用配置；只有添加 `--run-example` 才运行示例。
+仓库的[独立 README 消费者 fixture](../tests/fixtures/readme_consumer/Cargo.toml)展示锁定后的 bundled 默认图。动态加载 CI job 用该 fixture 运行默认和 inventory 两种配置，并用独立的 [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)检查动态加载 feature 图。
 
 ## 贯穿场景
 
@@ -300,6 +301,7 @@ provider-path 检测调用它。path backend 将候选 MIME type 返回给高层
 若 registry 前置版本尚未发布，请按[概念模型](#概念模型)中的固定源码 checkout 步骤操作；
 受管依赖块和自定义 ONNX 依赖块共用该步骤。
 
+<!-- dynamic-loader-application-start -->
 ```toml
 [dependencies]
 qubit-magika = { version = "0.18", path = "../rs-magika", default-features = false }
@@ -312,6 +314,7 @@ ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["s
 [patch.crates-io]
 qubit-operation = { path = "../rs-operation" }
 ```
+<!-- dynamic-loader-application-end -->
 
 创建 detector 前先初始化 runtime。Windows 使用 `onnxruntime.dll`，macOS 使用
 `libonnxruntime.dylib`，Linux 使用 `libonnxruntime.so`：

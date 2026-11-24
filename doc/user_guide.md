@@ -75,6 +75,7 @@ For an application that needs these unpublished releases, place its workspace
 root beside the pinned checkouts listed in the source repository, with the
 application directory named `app`. Keep this manifest at `app/Cargo.toml`:
 
+<!-- fixed-source-application-start -->
 ```toml
 [workspace]
 
@@ -93,6 +94,7 @@ qubit-spi = "0.14"
 [patch.crates-io]
 qubit-operation = { path = "../rs-operation" }
 ```
+<!-- fixed-source-application-end -->
 
 Dependency paths are relative to the package directory; workspace patches are
 relative to the workspace root. Prepare the fixed sibling checkouts with the
@@ -104,11 +106,8 @@ their own lock file.
 
 The published default feature, `bundled-onnxruntime`, is enabled by this root
 manifest. To use the synchronous provider inventory, change the Magika entry
-to `qubit-magika = { path = "../rs-magika", features = ["inventory"] }`.
-The README checker compiles both the default and inventory variants; it runs
-them only when invoked with `--run-example`. The repository's
-[`readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml) shows
-the locked default application dependency graph.
+to `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`.
+Fixed source and `--registry-only` are dependency source modes. The normal README checker compiles both default and inventory application configurations; it runs them only with `--run-example`. The repository's [`readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml) shows the locked bundled default graph. Dynamic-loading CI runs that fixture with both default and inventory configurations, while the separate [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml) checks the dynamic-loader feature graph.
 
 The registry versions required by the examples were not all available on
 2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
@@ -360,6 +359,7 @@ If the registry prerequisites are not yet available, use the fixed
 source-checkout procedure in [Conceptual Model](#conceptual-model); the
 managed and custom ONNX dependency blocks use the same procedure.
 
+<!-- dynamic-loader-application-start -->
 ```toml
 [dependencies]
 qubit-magika = { version = "0.18", path = "../rs-magika", default-features = false }
@@ -372,6 +372,7 @@ ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["s
 [patch.crates-io]
 qubit-operation = { path = "../rs-operation" }
 ```
+<!-- dynamic-loader-application-end -->
 
 Initialize the runtime before constructing the detector. Use `onnxruntime.dll`
 on Windows, `libonnxruntime.dylib` on macOS, or `libonnxruntime.so` on Linux:
