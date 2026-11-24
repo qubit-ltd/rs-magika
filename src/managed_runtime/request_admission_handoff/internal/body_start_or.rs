@@ -7,7 +7,7 @@
 // =============================================================================
 //! Outcome of waiting for a request body to start.
 
-use super::handoff_state::HandoffCloseReason;
+use super::handoff_close_reason::HandoffCloseReason;
 
 /// Result of racing body start against the submitted operation outcome.
 ///
@@ -18,7 +18,10 @@ pub(crate) enum BodyStartOr<T> {
     /// The child body entered and is waiting for its admission.
     BodyStarted,
     /// The handoff closed before the child body started.
-    Closed(HandoffCloseReason),
+    Closed(
+        /// First reason recorded when the caller or request closed the handoff.
+        HandoffCloseReason,
+    ),
     /// The child operation finished before its body-start handshake.
     Outcome(
         /// Outcome returned by the submitted child operation.

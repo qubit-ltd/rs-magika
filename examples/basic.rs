@@ -10,25 +10,28 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
-use qubit_mime::{MimeConfig, MimeDetectionPolicy, MimeDetector, MimeDetectorRegistry};
-use qubit_operation::{ManagerOptions, OperationManager, ShutdownMode};
+use qubit_magika::MagikaMimeDetectorProvider;
+use qubit_magika::ManagedInferenceRuntime;
+use qubit_mime::MimeConfig;
+use qubit_mime::MimeDetectionPolicy;
+use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorRegistry;
+use qubit_operation::ManagerOptions;
+use qubit_operation::OperationManager;
+use qubit_operation::ShutdownMode;
 use qubit_spi::ProviderSelection;
 
-fn create_detector() -> Result<
-    (
-        MimeDetectorRegistry,
-        Arc<ManagedInferenceRuntime>,
-        Arc<dyn MimeDetector>,
-    ),
-    Box<dyn Error>,
-> {
+/// Owns the registry and runtime for one configured example detector.
+type DetectorSetup = (
+    MimeDetectorRegistry,
+    Arc<ManagedInferenceRuntime>,
+    Arc<dyn MimeDetector>,
+);
+
+fn create_detector() -> Result<DetectorSetup, Box<dyn Error>> {
     let config = MimeConfig::default();
     let manager = OperationManager::new(ManagerOptions::default())?;
-    let runtime = Arc::new(ManagedInferenceRuntime::new(
-        manager,
-        config.max_buffer_size(),
-    )?);
+    let runtime = Arc::new(ManagedInferenceRuntime::new(manager, config.max_buffer_size())?);
     let registry = MimeDetectorRegistry::default();
     registry.register(MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)))?;
     let selection = ProviderSelection::named("magika")?;

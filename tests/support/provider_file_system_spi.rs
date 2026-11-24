@@ -108,7 +108,10 @@ impl ProviderReadCompletionGate {
         state.entered = true;
         self.changed.notify_all();
         while !state.released {
-            state = self.changed.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
 
@@ -134,12 +137,18 @@ impl ProviderReadCompletionGate {
     }
 
     pub(crate) fn release(&self) {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).released = true;
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .released = true;
         self.changed.notify_all();
     }
 
     pub(crate) fn is_entered(&self) -> bool {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entered
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entered
     }
 }
 
@@ -235,7 +244,10 @@ impl AsyncProviderGate {
     }
 
     pub(crate) fn is_entered(&self) -> bool {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entered
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entered
     }
 }
 
@@ -243,7 +255,11 @@ struct AsyncProviderGateDropObserver(Arc<AsyncProviderGate>);
 
 impl Drop for AsyncProviderGateDropObserver {
     fn drop(&mut self) {
-        self.0.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).wait_dropped = true;
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .wait_dropped = true;
         self.0.changed.notify_all();
     }
 }

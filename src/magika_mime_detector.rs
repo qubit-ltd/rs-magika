@@ -157,11 +157,7 @@ impl MagikaMimeDetector {
     /// detector's per-request owned-payload maximum, or an admission, shared
     /// runtime aggregate byte budget, Magika, or worker error. These logical
     /// payload budgets do not guarantee a total process-memory limit.
-    pub async fn detect_bytes_managed(
-        &self,
-        scope: &OperationScope,
-        content: Vec<u8>,
-    ) -> MimeResult<Option<String>> {
+    pub async fn detect_bytes_managed(&self, scope: &OperationScope, content: Vec<u8>) -> MimeResult<Option<String>> {
         let limit = self.max_test_bytes();
         if content.len() > limit {
             return Err(MimeError::BufferLimitExceeded {
@@ -263,7 +259,10 @@ impl MagikaMimeDetector {
                     Some(Ok((admission, None))) => admission,
                     Some(Ok((admission, Some(_input)))) => {
                         drop(admission);
-                        return Err(MimeError::detector_backend("magika", "provider handoff unexpectedly contained worker input"));
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            "provider handoff unexpectedly contained worker input",
+                        ));
                     }
                     Some(Err(error)) => return Err(error),
                     None => {
@@ -287,12 +286,8 @@ impl MagikaMimeDetector {
             .register_on_parent(scope, &mut handoff_guard, &mut outcome)
             .await
         {
-            crate::managed_runtime::request_admission_handoff::BodyStartOr::Outcome(outcome) => {
-                outcome
-            }
-            crate::managed_runtime::request_admission_handoff::BodyStartOr::BodyStarted => {
-                outcome.await
-            }
+            crate::managed_runtime::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
+            crate::managed_runtime::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
             crate::managed_runtime::request_admission_handoff::BodyStartOr::Closed(reason) => {
                 drop(outcome);
                 let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
@@ -300,10 +295,7 @@ impl MagikaMimeDetector {
             }
         };
         let outcome = outcome.map_err(|error| {
-            MimeError::detector_backend(
-                "magika",
-                format!("provider operation outcome unavailable: {error:?}"),
-            )
+            MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
         })?;
         map_operation_outcome(outcome, PROVIDER_OUTCOME)
     }
@@ -360,22 +352,14 @@ impl MagikaMimeDetector {
                     .with_stop_state(admission.task_state())
                     .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
-                    .detect_async_input_admitted(
-                        scope,
-                        admission,
-                        input,
-                        max_bytes,
-                        map_provider_magika_error,
-                    )
+                    .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
             Err(error) if is_unsupported_provider_error(&error) => {}
             Err(error) => return Err(error.into()),
         }
 
-        let stat_result = admission
-            .run_provider_operation(scope, file_system.stat(path))
-            .await?;
+        let stat_result = admission.run_provider_operation(scope, file_system.stat(path)).await?;
         let metadata = match stat_result {
             Ok(metadata) => Some(metadata),
             Err(error) if is_unsupported_provider_error(&error) => None,
@@ -384,32 +368,19 @@ impl MagikaMimeDetector {
         let capabilities = file_system.properties().capabilities();
         let route = select_provider_path_route(
             metadata.as_ref().and_then(|metadata| metadata.len()),
-            metadata
-                .as_ref()
-                .and_then(|metadata| metadata.etag().cloned()),
+            metadata.as_ref().and_then(|metadata| metadata.etag().cloned()),
             capabilities.supports(FileSystemCapability::RangeRead),
             capabilities.supports(FileSystemCapability::ConditionalRead),
             max_bytes,
         );
         match route {
             ProviderPathRoute::Range { length, version } => {
-                let input = AsyncProviderInput::new_owned(
-                    file_system.clone(),
-                    path.clone(),
-                    length,
-                    version,
-                    max_bytes,
-                )
-                .with_stop_state(admission.task_state())
-                .with_stop_watcher(StopWatcher::new(scope.context()));
+                let input =
+                    AsyncProviderInput::new_owned(file_system.clone(), path.clone(), length, version, max_bytes)
+                        .with_stop_state(admission.task_state())
+                        .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
-                    .detect_async_input_admitted(
-                        scope,
-                        admission,
-                        input,
-                        max_bytes,
-                        map_provider_magika_error,
-                    )
+                    .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
             }
             ProviderPathRoute::TooLarge { requested } => {
@@ -429,22 +400,14 @@ impl MagikaMimeDetector {
         let read_result = admission
             .run_provider_operation_with_status(
                 scope,
-                file_system.read_all_observed(
-                    path,
-                    ReadOptions::default(),
-                    max_bytes,
-                    &mut observer,
-                ),
+                file_system.read_all_observed(path, ReadOptions::default(), max_bytes, &mut observer),
                 io_in_flight,
             )
             .await?;
         let bytes = match read_result {
             Ok(bytes) => bytes,
             Err(qubit_fs::read::ObservedReadError::Stopped) => {
-                return Err(MimeError::detector_backend(
-                    "magika",
-                    "provider read stopped",
-                ));
+                return Err(MimeError::detector_backend("magika", "provider read stopped"));
             }
             Err(qubit_fs::read::ObservedReadError::Provider(error)) => return Err(error.into()),
         };
@@ -561,9 +524,7 @@ impl MagikaMimeDetector {
         map_error: fn(Error) -> MimeError,
     ) -> MimeResult<Vec<String>> {
         match extracted {
-            FeaturesOrRuled::Ruled(content_type) => {
-                Ok(content_type_to_mime(content_type).into_iter().collect())
-            }
+            FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type).into_iter().collect()),
             FeaturesOrRuled::Features(features) => Ok(self
                 .runtime
                 .identify_features_blocking(features, map_error)?
@@ -630,11 +591,7 @@ impl MagikaMimeDetector {
     /// Returns [`MimeError::Io`] when seeking or reading fails, or
     /// [`MimeError::DetectorBackend`] when Magika inference fails or the
     /// worker inference fails.
-    fn guess_from_reader_with_scope(
-        &self,
-        reader: &mut dyn ReadSeek,
-        scope: ReaderScope,
-    ) -> MimeResult<Vec<String>> {
+    fn guess_from_reader_with_scope(&self, reader: &mut dyn ReadSeek, scope: ReaderScope) -> MimeResult<Vec<String>> {
         let original_position = reader.stream_position()?;
         let result = (|| {
             let end = reader.seek(SeekFrom::End(0))?;
@@ -643,10 +600,7 @@ impl MagikaMimeDetector {
                 ReaderScope::Remaining => original_position,
             };
             let length = end.checked_sub(base_offset).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "reader end precedes window start",
-                )
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "reader end precedes window start")
             })?;
             let mut input = ReadSeekInput::new(reader, base_offset, length);
             self.guess_from_magika_input(&mut input)
@@ -862,8 +816,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     .maximum()
                     .and_then(|value| usize::try_from(value).ok());
                 let input = SyncProviderInput::from_session(reader, max_bytes, max_segment);
-                let extracted =
-                    FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
+                let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
                 let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
@@ -878,9 +831,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         let capabilities = file_system.properties().capabilities();
         let route = select_provider_path_route(
             metadata.as_ref().and_then(|metadata| metadata.len()),
-            metadata
-                .as_ref()
-                .and_then(|metadata| metadata.etag().cloned()),
+            metadata.as_ref().and_then(|metadata| metadata.etag().cloned()),
             capabilities.supports(FileSystemCapability::RangeRead),
             capabilities.supports(FileSystemCapability::ConditionalRead),
             max_bytes,
@@ -888,8 +839,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         match route {
             ProviderPathRoute::Range { length, version } => {
                 let input = SyncProviderInput::new(file_system, path, length, version, max_bytes);
-                let extracted =
-                    FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
+                let extracted = FeaturesOrRuled::extract_sync(input).map_err(map_provider_magika_error)?;
                 let candidates = self.guess_from_extracted(extracted, map_provider_magika_error)?;
                 return Ok((candidates, None));
             }
@@ -961,16 +911,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                     .await
                 })
                 .map_err(|error| {
-                    MimeError::detector_backend(
-                        "magika",
-                        format!("provider operation submission failed: {error:?}"),
-                    )
+                    MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
                 })?;
             let outcome = operation.wait_outcome().await.map_err(|error| {
-                MimeError::detector_backend(
-                    "magika",
-                    format!("provider operation outcome unavailable: {error:?}"),
-                )
+                MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
             })?;
             let result = map_operation_outcome(outcome, PROVIDER_OUTCOME)?;
             Ok((result.into_iter().collect(), None))
@@ -1023,9 +967,7 @@ fn content_type_mime_name(content_type: ContentType) -> Option<&'static str> {
 ///
 /// An owned, nonempty MIME name, or `None` when the name is absent or empty.
 fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
-    mime_type
-        .filter(|mime_type| !mime_type.is_empty())
-        .map(str::to_owned)
+    mime_type.filter(|mime_type| !mime_type.is_empty()).map(str::to_owned)
 }
 
 /// Converts a Magika error to a MIME error.
@@ -1129,29 +1071,17 @@ mod tests {
 
     #[test]
     fn test_provider_operation_outcomes_preserve_success_and_classify_failures() {
-        let success =
-            map_operation_outcome(OperationOutcome::Succeeded("text/plain"), PROVIDER_OUTCOME);
+        let success = map_operation_outcome(OperationOutcome::Succeeded("text/plain"), PROVIDER_OUTCOME);
         assert_eq!("text/plain", success.unwrap());
 
         let application_error = MimeError::detector_backend("magika", "provider read failed");
-        let failed = map_operation_outcome::<&str>(
-            OperationOutcome::Failed(application_error),
-            PROVIDER_OUTCOME,
-        );
-        assert!(
-            failed
-                .unwrap_err()
-                .to_string()
-                .contains("provider read failed")
-        );
+        let failed = map_operation_outcome::<&str>(OperationOutcome::Failed(application_error), PROVIDER_OUTCOME);
+        assert!(failed.unwrap_err().to_string().contains("provider read failed"));
 
-        let manager =
-            OperationManager::new(ManagerOptions::default()).expect("manager should initialize");
+        let manager = OperationManager::new(ManagerOptions::default()).expect("manager should initialize");
         let mut handle = manager
             .as_sync()
-            .try_submit(OperationOptions::default(), |scope| {
-                Ok::<_, MimeError>(scope.id())
-            })
+            .try_submit(OperationOptions::default(), |scope| Ok::<_, MimeError>(scope.id()))
             .expect("operation should be admitted");
         let operation_id = match handle.wait_outcome().expect("operation should finish") {
             OperationOutcome::Succeeded(operation_id) => operation_id,
@@ -1165,16 +1095,9 @@ mod tests {
                 summary: DiagnosticSummary::new("child failed"),
             },
         };
-        let child_failed = map_operation_outcome::<&str>(
-            OperationOutcome::ChildFailed(child_failure),
-            PROVIDER_OUTCOME,
-        );
-        assert!(
-            child_failed
-                .unwrap_err()
-                .to_string()
-                .contains("provider child failed")
-        );
+        let child_failed =
+            map_operation_outcome::<&str>(OperationOutcome::ChildFailed(child_failure), PROVIDER_OUTCOME);
+        assert!(child_failed.unwrap_err().to_string().contains("provider child failed"));
 
         let stopped = map_operation_outcome::<&str>(
             OperationOutcome::Stopped(StopReport {
@@ -1183,12 +1106,7 @@ mod tests {
             }),
             PROVIDER_OUTCOME,
         );
-        assert!(
-            stopped
-                .unwrap_err()
-                .to_string()
-                .contains("provider inference stopped")
-        );
+        assert!(stopped.unwrap_err().to_string().contains("provider inference stopped"));
 
         let panicked = map_operation_outcome::<&str>(
             OperationOutcome::Panicked(PanicSummary {
@@ -1283,16 +1201,10 @@ mod tests {
         assert_eq!(0, snapshot.reserved_bytes);
         assert_eq!(
             Some("application/pdf".to_owned()),
-            detector
-                .guess_from_filename("document.pdf")
-                .first()
-                .cloned()
+            detector.guess_from_filename("document.pdf").first().cloned()
         );
         let content_backend: &dyn MimeContentBackend = &detector;
-        assert_eq!(
-            ContentRequirement::Complete,
-            content_backend.content_requirement()
-        );
+        assert_eq!(ContentRequirement::Complete, content_backend.content_requirement());
         assert_eq!(
             vec!["text/x-python"],
             content_backend
@@ -1300,14 +1212,8 @@ mod tests {
                 .expect("bytes should classify")
         );
         let detector_backend: &dyn MimeDetectorBackend = &detector;
-        assert_eq!(
-            ContentRequirement::Complete,
-            detector_backend.content_requirement()
-        );
-        assert_eq!(
-            detector.max_buffer_size(),
-            detector_backend.max_test_bytes()
-        );
+        assert_eq!(ContentRequirement::Complete, detector_backend.content_requirement());
+        assert_eq!(detector.max_buffer_size(), detector_backend.max_test_bytes());
         assert_eq!(
             vec!["application/pdf"],
             detector_backend.guess_from_filename("document.pdf")
@@ -1334,14 +1240,12 @@ mod tests {
         let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
         assert_eq!(
             vec!["text/x-python"],
-            MimeContentBackend::detect_reader(&detector, &mut reader)
-                .expect("content reader should classify")
+            MimeContentBackend::detect_reader(&detector, &mut reader).expect("content reader should classify")
         );
         let mut reader = Cursor::new(b"#!/usr/bin/env python3\nprint('ok')\n".to_vec());
         assert_eq!(
             (vec!["text/x-python".to_owned()], Vec::new()),
-            MimeDetectorBackend::guess_from_reader(&detector, &mut reader)
-                .expect("detector reader should classify")
+            MimeDetectorBackend::guess_from_reader(&detector, &mut reader).expect("detector reader should classify")
         );
         assert_eq!(
             (vec!["text/x-python".to_owned()], Vec::new()),
@@ -1369,18 +1273,15 @@ mod tests {
         );
         assert_eq!(
             vec!["text/x-python"],
-            MimeDetectorBackend::guess_from_content(
-                &detector,
-                b"#!/usr/bin/env python3\nprint('ok')\n",
-            )
-            .expect("fully qualified content should classify")
+            MimeDetectorBackend::guess_from_content(&detector, b"#!/usr/bin/env python3\nprint('ok')\n",)
+                .expect("fully qualified content should classify")
         );
         let _ = MagikaMimeDetector::builder()
             .mime_config(MimeConfig::default())
             .build()
             .expect("builder should initialize");
-        let _ = MagikaMimeDetector::from_mime_config(MimeConfig::default())
-            .expect("configured detector should initialize");
+        let _ =
+            MagikaMimeDetector::from_mime_config(MimeConfig::default()).expect("configured detector should initialize");
     }
 
     #[test]
@@ -1422,9 +1323,8 @@ mod tests {
             "provider interrupted",
         )));
         assert!(matches!(interrupted, MimeError::Io(_)));
-        let closed_bridge = super::map_magika_error(Error::IOError(
-            crate::internal::async_sample_bridge::closed_error(),
-        ));
+        let closed_bridge =
+            super::map_magika_error(Error::IOError(crate::internal::async_sample_bridge::closed_error()));
         assert!(matches!(closed_bridge, MimeError::DetectorBackend { .. }));
         let observed_stop = crate::internal::map_provider_magika_error(Error::IOError(
             crate::internal::provider_input::observed_read_stopped_error(),
@@ -1434,9 +1334,10 @@ mod tests {
             crate::internal::session_read_stopped_io_error(),
         ));
         assert!(matches!(session_stop, MimeError::DetectorBackend { .. }));
-        let provider_interrupted = crate::internal::map_provider_magika_error(Error::IOError(
-            std::io::Error::new(std::io::ErrorKind::Interrupted, "provider interrupted"),
-        ));
+        let provider_interrupted = crate::internal::map_provider_magika_error(Error::IOError(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "provider interrupted",
+        )));
         assert!(matches!(provider_interrupted, MimeError::Io(_)));
     }
 
@@ -1447,22 +1348,14 @@ mod tests {
             caller_thread: std::thread::current().id(),
             bytes: b"#!/usr/bin/env python3\nprint('ok')\n",
         };
-        assert_eq!(
-            vec!["text/x-python"],
-            detector.guess_from_magika_input(input).unwrap()
-        );
+        assert_eq!(vec!["text/x-python"], detector.guess_from_magika_input(input).unwrap());
     }
 
     #[test]
     fn test_local_directory_returns_no_mime_candidate() {
         let detector = MagikaMimeDetector::new().expect("detector should initialize");
         let directory = tempfile::tempdir().expect("temporary directory should be created");
-        assert!(
-            detector
-                .guess_from_magika_file(directory.path())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(detector.guess_from_magika_file(directory.path()).unwrap().is_empty());
     }
 
     #[cfg(unix)]

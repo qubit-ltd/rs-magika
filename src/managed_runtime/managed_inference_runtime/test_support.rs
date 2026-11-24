@@ -30,8 +30,7 @@ use super::worker_loop::run_worker_with_before_first_recv;
 use super::worker_state::WorkerState;
 
 /// Owned byte classifier used by the worker thread.
-pub(crate) type ManagedInferenceEngine =
-    Box<dyn Fn(Vec<u8>) -> MimeResult<Option<String>> + Send + 'static>;
+pub(crate) type ManagedInferenceEngine = Box<dyn Fn(Vec<u8>) -> MimeResult<Option<String>> + Send + 'static>;
 
 impl ManagedInferenceRuntime {
     /// Creates a deterministic worker for lifecycle tests.
@@ -55,13 +54,7 @@ impl ManagedInferenceRuntime {
         engine: ManagedInferenceEngine,
         after_business: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
-        Self::with_engine_and_worker_exit_hook(
-            supervisor,
-            max_in_flight_bytes,
-            engine,
-            after_business,
-            Box::new(|| {}),
-        )
+        Self::with_engine_and_worker_exit_hook(supervisor, max_in_flight_bytes, engine, after_business, Box::new(|| {}))
     }
 
     /// Creates a deterministic worker with a hook after all jobs are released.
@@ -88,8 +81,7 @@ impl ManagedInferenceRuntime {
         after_business: Box<dyn Fn() + Send + 'static>,
         before_worker_exit: Box<dyn Fn() + Send + 'static>,
     ) -> Self {
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
-            mpsc::sync_channel(super::SERVICE_CAPACITY);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(super::SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let tasks = Arc::new(Mutex::new(Vec::new()));
@@ -111,12 +103,10 @@ impl ManagedInferenceRuntime {
                                 Err(error) => Err(map_magika_error(error)),
                             }
                         }
-                        WorkerInput::Features(_, _) => {
-                            Err(qubit_mime::MimeError::detector_backend(
-                                "magika",
-                                "test engine only accepts owned bytes",
-                            ))
-                        }
+                        WorkerInput::Features(_, _) => Err(qubit_mime::MimeError::detector_backend(
+                            "magika",
+                            "test engine only accepts owned bytes",
+                        )),
                     },
                     move |faulted| super::notify_unqueued_provider_tasks(&worker_tasks, faulted),
                     after_business,
@@ -149,8 +139,7 @@ impl ManagedInferenceRuntime {
         engine: ManagedInferenceEngine,
         before_first_recv: Box<dyn FnOnce() + Send + 'static>,
     ) -> Self {
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
-            mpsc::sync_channel(super::SERVICE_CAPACITY);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(super::SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let tasks = Arc::new(Mutex::new(Vec::new()));

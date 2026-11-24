@@ -19,6 +19,9 @@ use qubit_fs::read::ReadIoObserver;
 use qubit_fs::read::ReadOptions;
 use qubit_mime::MimeError;
 
+mod internal;
+
+use self::internal::ObservedReadStopped;
 use super::read_budget::ReadBudget;
 
 /// Reads exactly one Magika range through a synchronous provider.
@@ -59,9 +62,7 @@ pub(crate) fn read_sync(
         .limits()
         .max_read_range_bytes()
         .maximum()
-        .map_or(usize::MAX, |maximum| {
-            usize::try_from(maximum).unwrap_or(usize::MAX)
-        });
+        .map_or(usize::MAX, |maximum| usize::try_from(maximum).unwrap_or(usize::MAX));
     read_sync_segments(file_system, path, version, buffer, offset, max_segment)
 }
 
@@ -161,9 +162,7 @@ pub(crate) async fn read_async_observed<O: ReadIoObserver>(
         .limits()
         .max_read_range_bytes()
         .maximum()
-        .map_or(usize::MAX, |maximum| {
-            usize::try_from(maximum).unwrap_or(usize::MAX)
-        });
+        .map_or(usize::MAX, |maximum| usize::try_from(maximum).unwrap_or(usize::MAX));
     read_async_segments_observed(
         file_system,
         path,
@@ -275,11 +274,7 @@ pub(crate) fn validate_request(
         .checked_add(requested as u64)
         .ok_or_else(|| invalid_input("provider input offset overflow"))?;
     if end > length {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "provider input read exceeds its length",
-        )
-        .into());
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider input read exceeds its length").into());
     }
     budget
         .consume(requested)
@@ -301,11 +296,7 @@ pub(crate) fn validate_request(
 ///
 /// Read options carrying the requested offset, length, and version condition.
 #[inline]
-pub(crate) fn read_options(
-    offset: u64,
-    length: usize,
-    version: Option<&ResourceVersion>,
-) -> ReadOptions {
+pub(crate) fn read_options(offset: u64, length: usize, version: Option<&ResourceVersion>) -> ReadOptions {
     ReadOptions::default()
         .with_offset(Some(offset))
         .with_length(Some(length as u64))
@@ -328,11 +319,7 @@ pub(crate) fn read_options(
 /// length.
 pub(crate) fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> {
     if bytes.len() != buffer.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "provider returned a short range",
-        )
-        .into());
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
     }
     buffer.copy_from_slice(&bytes);
     Ok(())
@@ -368,18 +355,14 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
             if crate::internal::async_sample_bridge::is_closed_error(&error) {
                 return MimeError::detector_backend("magika", "provider inference stopped");
             }
-            if error
-                .get_ref()
-                .is_some_and(|source| source.is::<ObservedReadStopped>())
-            {
+            if error.get_ref().is_some_and(|source| source.is::<ObservedReadStopped>()) {
                 return MimeError::detector_backend("magika", "provider read stopped");
             }
             if crate::internal::is_session_stop_error(&error) {
                 return MimeError::detector_backend("magika", "provider session read stopped");
             }
-            if let Some(MimeError::BufferLimitExceeded { requested, limit }) = error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<MimeError>())
+            if let Some(MimeError::BufferLimitExceeded { requested, limit }) =
+                error.get_ref().and_then(|source| source.downcast_ref::<MimeError>())
             {
                 return MimeError::BufferLimitExceeded {
                     requested: *requested,
@@ -392,17 +375,11 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
     }
 }
 
-#[derive(Debug)]
-struct ObservedReadStopped;
-
-impl std::fmt::Display for ObservedReadStopped {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("provider read stopped")
-    }
-}
-
-impl std::error::Error for ObservedReadStopped {}
-
+/// Creates an interruption marker for an observer-reported provider stop.
+///
+/// # Returns
+///
+/// An I/O error carrying the private observer-stop marker as its source.
 pub(crate) fn observed_read_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, ObservedReadStopped)
 }

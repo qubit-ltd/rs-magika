@@ -60,6 +60,16 @@ impl RequestAdmissionHandoff {
     }
 
     /// Creates a handoff that also owns worker input until registration.
+    ///
+    /// # Parameters
+    ///
+    /// * `admission` - Request capacity retained until registration succeeds.
+    /// * `input` - Optional worker input released with the admission if the
+    ///   handoff closes before transfer.
+    ///
+    /// # Returns
+    ///
+    /// The shared handoff and its caller guard.
     pub(crate) fn new_with_input(
         admission: RequestAdmission,
         input: Option<WorkerInput>,
@@ -92,9 +102,7 @@ impl RequestAdmissionHandoff {
         let reason = self
             .task_state
             .upgrade()
-            .map_or("request admission stopped", |state| {
-                state.provider_stop_reason()
-            });
+            .map_or("request admission stopped", |state| state.provider_stop_reason());
         self.close_with_reason(HandoffCloseReason::RequestStopped(reason));
     }
 
@@ -299,6 +307,11 @@ impl RequestAdmissionHandoff {
             .take()
     }
 
+    /// Returns the first recorded reason for closing this handoff.
+    ///
+    /// # Returns
+    ///
+    /// The first close reason, or `Abandoned` when no reason has been set.
     fn closed_reason(&self) -> HandoffCloseReason {
         self.state
             .lock()
@@ -324,10 +337,7 @@ impl RequestAdmissionHandoff {
     ///
     /// `true` if the child received the value, or `false` if the handoff was
     /// already closed.
-    fn provide_to_child(
-        &self,
-        admission: Result<(RequestAdmission, Option<WorkerInput>), MimeError>,
-    ) -> bool {
+    fn provide_to_child(&self, admission: Result<(RequestAdmission, Option<WorkerInput>), MimeError>) -> bool {
         let (accepted, child_waker, rejected) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.closed || state.child_admission.is_some() {
@@ -354,6 +364,11 @@ impl RequestAdmissionHandoff {
         self.close_with_reason(HandoffCloseReason::Abandoned);
     }
 
+    /// Closes once, releases untransferred state, and wakes both participants.
+    ///
+    /// # Parameters
+    ///
+    /// * `reason` - Reason recorded if no earlier close has already won.
     fn close_with_reason(self: &Arc<Self>, reason: HandoffCloseReason) {
         let (caller_payload, child_admission, caller_waker, child_waker) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -402,10 +417,7 @@ impl RequestAdmissionHandoff {
 /// * `waker` - Current task waker to store when it differs from the existing
 ///   registration.
 fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
-    if slot
-        .as_ref()
-        .is_none_or(|registered| !registered.will_wake(waker))
-    {
+    if slot.as_ref().is_none_or(|registered| !registered.will_wake(waker)) {
         *slot = Some(waker.clone());
     }
 }
@@ -447,9 +459,7 @@ mod tests {
                 let (handoff, mut guard) = RequestAdmissionHandoff::new(admission);
                 let mut outcome = std::future::ready(());
                 assert!(matches!(
-                    handoff
-                        .register_on_parent(&scope, &mut guard, &mut outcome)
-                        .await,
+                    handoff.register_on_parent(&scope, &mut guard, &mut outcome).await,
                     BodyStartOr::Outcome(())
                 ));
                 assert_eq!(active_requests_for_parent.load(Ordering::SeqCst), 0);
@@ -510,12 +520,7 @@ mod tests {
                     .as_async()
                     .try_submit(OperationOptions::default(), move |child_scope| async move {
                         body_handoff.body_started();
-                        assert!(
-                            body_handoff
-                                .wait_for_child_admission(&child_scope)
-                                .await
-                                .is_none()
-                        );
+                        assert!(body_handoff.wait_for_child_admission(&child_scope).await.is_none());
                         Ok::<_, ()>(())
                     })
                     .unwrap();
@@ -526,10 +531,7 @@ mod tests {
                 ));
 
                 drop(guard);
-                assert!(matches!(
-                    outcome.await.unwrap(),
-                    OperationOutcome::Succeeded(())
-                ));
+                assert!(matches!(outcome.await.unwrap(), OperationOutcome::Succeeded(())));
                 assert_eq!(active_requests_for_body.load(Ordering::SeqCst), 0);
                 assert!(byte_budget_for_body.try_acquire(8).is_some());
                 Ok::<_, ()>(())
@@ -565,17 +567,13 @@ mod tests {
 
         impl std::task::Wake for WakeAfterRelease {
             fn wake(self: Arc<Self>) {
-                self.observed_active.store(
-                    self.active_requests.load(Ordering::SeqCst),
-                    Ordering::SeqCst,
-                );
+                self.observed_active
+                    .store(self.active_requests.load(Ordering::SeqCst), Ordering::SeqCst);
             }
 
             fn wake_by_ref(self: &Arc<Self>) {
-                self.observed_active.store(
-                    self.active_requests.load(Ordering::SeqCst),
-                    Ordering::SeqCst,
-                );
+                self.observed_active
+                    .store(self.active_requests.load(Ordering::SeqCst), Ordering::SeqCst);
             }
         }
 
@@ -589,15 +587,14 @@ mod tests {
         );
         let state = admission.task_state();
         let released_before_input_drop = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let input = super::super::worker_input::WorkerInput::Bytes(
-            super::super::worker_input::WorkerBytes::with_drop_probe(
+        let input =
+            super::super::worker_input::WorkerInput::Bytes(super::super::worker_input::WorkerBytes::with_drop_probe(
                 Box::new([]),
                 Box::new(ReleaseObserver {
                     state: Arc::clone(&task_state),
                     released: Arc::clone(&released_before_input_drop),
                 }),
-            ),
-        );
+            ));
         let (handoff, _guard) = RequestAdmissionHandoff::new_with_input(admission, Some(input));
         let observed_active = Arc::new(AtomicUsize::new(usize::MAX));
         let waker = std::task::Waker::from(Arc::new(WakeAfterRelease {
@@ -676,15 +673,14 @@ mod tests {
             byte_budget.try_acquire(8).unwrap(),
         );
         let released_before_input_drop = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let input = super::super::worker_input::WorkerInput::Bytes(
-            super::super::worker_input::WorkerBytes::with_drop_probe(
+        let input =
+            super::super::worker_input::WorkerInput::Bytes(super::super::worker_input::WorkerBytes::with_drop_probe(
                 Box::new([]),
                 Box::new(ReleaseObserver {
                     state: Arc::clone(&state),
                     released: Arc::clone(&released_before_input_drop),
                 }),
-            ),
-        );
+            ));
         let (handoff, _guard) = RequestAdmissionHandoff::new_with_input(admission, Some(input));
 
         let payload = handoff.take_caller_payload().unwrap();
@@ -722,12 +718,7 @@ mod tests {
                     .try_submit(OperationOptions::default(), move |child_scope| async move {
                         body_handoff.body_started();
                         started_tx.send(()).unwrap();
-                        assert!(
-                            body_handoff
-                                .wait_for_child_admission(&child_scope)
-                                .await
-                                .is_none()
-                        );
+                        assert!(body_handoff.wait_for_child_admission(&child_scope).await.is_none());
                         Ok::<_, ()>(())
                     })
                     .unwrap();
@@ -741,12 +732,8 @@ mod tests {
             })
             .unwrap();
 
-        let state = state_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
+        let state = state_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        started_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         assert_eq!(1, active_requests.load(Ordering::SeqCst));
 
         state.request_stop();
@@ -795,15 +782,10 @@ mod tests {
                     .unwrap();
                 let mut outcome = Box::pin(child.wait_outcome());
                 assert!(matches!(
-                    handoff
-                        .register_on_parent(&scope, &mut guard, &mut outcome)
-                        .await,
+                    handoff.register_on_parent(&scope, &mut guard, &mut outcome).await,
                     BodyStartOr::BodyStarted
                 ));
-                assert!(matches!(
-                    outcome.await.unwrap(),
-                    OperationOutcome::Succeeded(())
-                ));
+                assert!(matches!(outcome.await.unwrap(), OperationOutcome::Succeeded(())));
                 Ok::<_, ()>(())
             })
             .unwrap();

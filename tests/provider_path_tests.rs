@@ -942,11 +942,14 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     let first_observer = first.observer();
     let _ = first.request_stop(StopReason::UserCancelled);
     let first_result = run_ready(first.wait_outcome());
-    assert!(matches!(
-        first_result,
-        Ok(qubit_operation::OperationOutcome::Stopped(ref report))
-            if report.reason == StopReason::UserCancelled
-    ), "managed cancellation should preserve its business stop outcome: {first_result:?}");
+    assert!(
+        matches!(
+            first_result,
+            Ok(qubit_operation::OperationOutcome::Stopped(ref report))
+                if report.reason == StopReason::UserCancelled
+        ),
+        "managed cancellation should preserve its business stop outcome: {first_result:?}"
+    );
 
     // Cancellation may settle the local scope immediately, but the gated
     // Provider read still lacks completion evidence. Accept only a real
@@ -1623,7 +1626,10 @@ fn test_provider_gate_watchdog_failure_releases_lock_and_allows_cleanup() {
     let completion_timeout = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         completion_gate.wait_until_entered(Duration::ZERO);
     }));
-    assert!(completion_timeout.is_err(), "an unentered completion gate must trip its watchdog");
+    assert!(
+        completion_timeout.is_err(),
+        "an unentered completion gate must trip its watchdog"
+    );
     completion_gate.release();
 }
 
@@ -1644,7 +1650,10 @@ fn test_provider_completion_gate_observes_notification_before_wait_registration(
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while !completion_gate.is_entered() {
-        assert!(Instant::now() < deadline, "provider read did not notify the completion gate");
+        assert!(
+            Instant::now() < deadline,
+            "provider read did not notify the completion gate"
+        );
         std::thread::yield_now();
     }
     let wait_started = Instant::now();
@@ -1654,7 +1663,13 @@ fn test_provider_completion_gate_observes_notification_before_wait_registration(
         "wait registration after notification should observe the predicate immediately"
     );
     completion_gate.release();
-    assert_eq!(1, worker.join().unwrap().expect("provider read should resume after gate release"));
+    assert_eq!(
+        1,
+        worker
+            .join()
+            .unwrap()
+            .expect("provider read should resume after gate release")
+    );
 }
 
 #[test]
@@ -1664,9 +1679,12 @@ fn test_async_provider_gate_release_before_wait_registration_is_observed() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_async_gate(Arc::clone(&gate));
     let file_system = provider.async_file_system();
     let wait_started = Instant::now();
-    run_until(file_system.stat(&path("/released-before-poll.py")), Duration::from_secs(2))
-        .expect("release before waiter registration should remain observable")
-        .expect("provider stat should complete after the gate was released");
+    run_until(
+        file_system.stat(&path("/released-before-poll.py")),
+        Duration::from_secs(2),
+    )
+    .expect("release before waiter registration should remain observable")
+    .expect("provider stat should complete after the gate was released");
     assert!(
         wait_started.elapsed() < Duration::from_secs(1),
         "pre-registration release should not wait for the watchdog deadline"
@@ -1898,10 +1916,19 @@ fn test_provider_path_retries_unchanged_session_interruption_and_stops_before_re
         &path("/interrupt-retry.py"),
         4096,
     ));
-    assert!(retry_result.is_ok(), "unchanged interruption should be retried: {retry_result:?}");
+    assert!(
+        retry_result.is_ok(),
+        "unchanged interruption should be retried: {retry_result:?}"
+    );
     let retry_ranges = retry_observations.session_read_ranges.lock().unwrap().clone();
-    assert!(retry_ranges.len() >= 2, "fixture should observe interruption and retry: {retry_ranges:?}");
-    assert_eq!(retry_ranges[0], retry_ranges[1], "safe retry must repeat the exact range");
+    assert!(
+        retry_ranges.len() >= 2,
+        "fixture should observe interruption and retry: {retry_ranges:?}"
+    );
+    assert_eq!(
+        retry_ranges[0], retry_ranges[1],
+        "safe retry must repeat the exact range"
+    );
 
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
@@ -1955,8 +1982,15 @@ fn test_provider_path_retries_unchanged_session_interruption_and_stops_before_re
     );
     let settlement = run_until(operation.wait_settlement(), Duration::from_secs(5))
         .expect("cancelled provider session settlement should be observable");
-    assert!(settlement.all_released(), "cancelled provider session should settle: {settlement:?}");
-    assert!(runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)).worker_stopped);
+    assert!(
+        settlement.all_released(),
+        "cancelled provider session should settle: {settlement:?}"
+    );
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+            .worker_stopped
+    );
 }
 
 #[test]
@@ -3316,11 +3350,11 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         ));
     }
     match operation_outcome {
-        Ok(Ok(qubit_operation::OperationOutcome::Failed(MimeError::DetectorBackend {
-            backend,
-            reason,
-        }))) if backend == "magika" && reason == "provider inference stopped" => {}
-        outcome => failures.push(format!("last-runtime drop should return the provider stop error: {outcome:?}")),
+        Ok(Ok(qubit_operation::OperationOutcome::Failed(MimeError::DetectorBackend { backend, reason })))
+            if backend == "magika" && reason == "provider inference stopped" => {}
+        outcome => failures.push(format!(
+            "last-runtime drop should return the provider stop error: {outcome:?}"
+        )),
     }
     match settlement_after_last_runtime_drop {
         Ok(report) if report.all_released() => {

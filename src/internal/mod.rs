@@ -35,8 +35,8 @@ pub(crate) use read_seek_input::ReadSeekInput;
 pub(crate) use reader_scope::ReaderScope;
 pub(crate) use session_read::is_session_stop_error;
 #[cfg(test)]
-pub(crate) use session_read::session_read_stopped_io_error;
-#[cfg(test)]
 pub(crate) use session_read::read_async_session_with_stop;
+#[cfg(test)]
+pub(crate) use session_read::session_read_stopped_io_error;
 pub(crate) use stop_watcher::StopWatcher;
 pub(crate) use sync_provider_input::SyncProviderInput;

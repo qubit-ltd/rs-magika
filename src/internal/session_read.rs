@@ -17,6 +17,9 @@ use qubit_fs::error::FsErrorKind;
 use qubit_fs::read::AsyncRandomAccessReader;
 use qubit_fs::read::RandomAccessReader;
 
+mod internal;
+
+use self::internal::SessionReadStopped;
 use super::provider_input::invalid_input;
 use super::provider_input::validate_request;
 use super::read_budget::ReadBudget;
@@ -117,24 +120,19 @@ fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut
 ///
 /// # Errors
 ///
-/// Returns the first error that is not a safe, unchanged interruption. When
-/// `should_stop` is true, returns a new interrupted read error describing the
-/// stopped session; this cancellation error is distinct from an error returned
-/// by the provider and carries no provider effect-state claim.
+/// Returns an I/O error for the first provider result that is not a safe,
+/// unchanged interruption. When `should_stop` is true, returns a private
+/// interrupted-read marker instead of a Provider error.
 async fn read_async_at_retry(
     reader: &mut AsyncRandomAccessReader,
     offset: u64,
     output: &mut [u8],
     should_stop: &impl Fn() -> bool,
-) -> qubit_fs::FsResult<usize> {
+) -> io::Result<usize> {
     let mut retries = 0;
     loop {
         if should_stop() {
-            return Err(FsError::new(
-                FsErrorKind::Cancelled,
-                qubit_fs::error::FsOperation::Read,
-                "provider session read stopped",
-            ));
+            return Err(session_read_stopped_io_error());
         }
         match reader.read_at(offset, output).await {
             Err(error)
@@ -145,7 +143,8 @@ async fn read_async_at_retry(
                 retries += 1;
                 continue;
             }
-            result => return result,
+            Err(error) => return Err(error.into_io_error()),
+            Ok(count) => return Ok(count),
         }
     }
 }
@@ -225,9 +224,7 @@ pub(crate) async fn read_async_session_with_stop(
         let read_offset = offset
             .checked_add(filled as u64)
             .ok_or_else(|| invalid_input("provider input offset overflow"))?;
-        let count = read_async_at_retry(reader, read_offset, &mut buffer[filled..filled + step], &should_stop)
-            .await
-            .map_err(|error| error.into_io_error())?;
+        let count = read_async_at_retry(reader, read_offset, &mut buffer[filled..filled + step], &should_stop).await?;
         if count == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
         }
@@ -236,23 +233,29 @@ pub(crate) async fn read_async_session_with_stop(
     Ok(())
 }
 
-#[derive(Debug)]
-struct SessionReadStopped;
-
-impl std::fmt::Display for SessionReadStopped {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("provider session read stopped")
-    }
-}
-
-impl std::error::Error for SessionReadStopped {}
-
+/// Returns whether an I/O error represents an actively stopped session read.
+///
+/// # Parameters
+///
+/// * `error` - I/O error produced by the attempted session read.
+///
+/// # Returns
+///
+/// `true` when the error carries the session-stop marker or a cancelled
+/// filesystem error.
 pub(crate) fn is_session_stop_error(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|source| source.is::<SessionReadStopped>())
-        || error.get_ref().and_then(|source| source.downcast_ref::<FsError>())
+        || error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<FsError>())
             .is_some_and(|source| source.kind() == FsErrorKind::Cancelled)
 }
 
+/// Creates an interruption marker for an actively stopped session read.
+///
+/// # Returns
+///
+/// An I/O error carrying the private session-stop marker as its source.
 pub(crate) fn session_read_stopped_io_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, SessionReadStopped)
 }

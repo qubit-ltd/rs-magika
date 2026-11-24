@@ -38,12 +38,7 @@ impl ReadRequest {
     /// * `length` - Number of requested bytes.
     /// * `response` - Shared result slot awaited by the worker.
     /// * `bridge` - Bridge notified after response or abandonment.
-    pub(super) fn new(
-        offset: u64,
-        length: usize,
-        response: Arc<Response>,
-        bridge: Weak<AsyncSampleBridge>,
-    ) -> Self {
+    pub(super) fn new(offset: u64, length: usize, response: Arc<Response>, bridge: Weak<AsyncSampleBridge>) -> Self {
         Self {
             offset,
             length,
@@ -75,10 +70,7 @@ impl ReadRequest {
         set_response(&self.response, result);
         self.answered = true;
         if let Some(bridge) = self.bridge.upgrade() {
-            let mut state = bridge
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut state = bridge.state.lock().unwrap_or_else(|error| error.into_inner());
             state.active = None;
             bridge.changed.notify_all();
         }
@@ -94,10 +86,7 @@ impl ReadRequest {
             )),
         );
         if let Some(bridge) = self.bridge.upgrade() {
-            let mut state = bridge
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut state = bridge.state.lock().unwrap_or_else(|error| error.into_inner());
             if state
                 .active
                 .as_ref()
@@ -178,14 +167,8 @@ mod tests {
             std::io::ErrorKind::Interrupted,
             worker.join().unwrap().unwrap_err().kind()
         );
-        let state = bridge
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        assert!(
-            state.active.is_none(),
-            "abandoned request must release its active slot"
-        );
+        let state = bridge.state.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(state.active.is_none(), "abandoned request must release its active slot");
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -234,17 +217,9 @@ mod tests {
             .is_err()
         );
 
-        drop(ReadRequest::new(
-            0,
-            1,
-            Arc::clone(&response),
-            Arc::downgrade(&bridge),
-        ));
+        drop(ReadRequest::new(0, 1, Arc::clone(&response), Arc::downgrade(&bridge)));
 
-        let state = bridge
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let state = bridge.state.lock().unwrap_or_else(|error| error.into_inner());
         assert!(
             state.pending.is_none(),
             "abandonment should remove the matching pending request"

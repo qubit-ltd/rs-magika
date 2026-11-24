@@ -8,11 +8,13 @@
 //! Private state and ownership types for request admission handoffs.
 
 mod body_start_or;
+mod handoff_close_reason;
 mod handoff_state;
 mod request_admission_handoff_guard;
+mod request_admission_payload;
 
 pub(crate) use body_start_or::BodyStartOr;
-pub(crate) use handoff_state::HandoffCloseReason;
+pub(crate) use handoff_close_reason::HandoffCloseReason;
 pub(super) use handoff_state::HandoffState;
-pub(super) use handoff_state::RequestAdmissionPayload;
 pub(crate) use request_admission_handoff_guard::RequestAdmissionHandoffGuard;
+pub(super) use request_admission_payload::RequestAdmissionPayload;

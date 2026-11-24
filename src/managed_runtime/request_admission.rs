@@ -96,8 +96,7 @@ impl RequestAdmission {
     where
         F: Future,
     {
-        self.run_provider_operation_inner(scope, operation, None)
-            .await
+        self.run_provider_operation_inner(scope, operation, None).await
     }
 
     /// Polls an aggregate provider operation while observing actual-I/O state.
@@ -222,10 +221,7 @@ impl RequestAdmission {
                 } else if !self.provider_polled || io_in_flight.is_some() {
                     self.provider_operation_completed();
                 }
-                Err(MimeError::detector_backend(
-                    "magika",
-                    state.provider_stop_reason(),
-                ))
+                Err(MimeError::detector_backend("magika", state.provider_stop_reason()))
             }
         }
     }
@@ -239,10 +235,7 @@ impl RequestAdmission {
         if !self.state.try_start_provider_operation() {
             self.state.request_stop();
             let error = MimeError::detector_backend("magika", self.state.provider_stop_reason());
-            self.settle_error(MimeError::detector_backend(
-                "magika",
-                self.state.provider_stop_reason(),
-            ));
+            self.settle_error(MimeError::detector_backend("magika", self.state.provider_stop_reason()));
             return Err(error);
         }
         self.provider_pending = true;
@@ -304,12 +297,8 @@ impl RequestAdmission {
             }
             Err(error) => {
                 let (rejected, reason) = match error {
-                    std::sync::mpsc::TrySendError::Full(job) => {
-                        (job, "inference worker queue is full")
-                    }
-                    std::sync::mpsc::TrySendError::Disconnected(job) => {
-                        (job, "inference worker is disconnected")
-                    }
+                    std::sync::mpsc::TrySendError::Full(job) => (job, "inference worker queue is full"),
+                    std::sync::mpsc::TrySendError::Disconnected(job) => (job, "inference worker is disconnected"),
                 };
                 let super::job::Job {
                     input,
@@ -345,8 +334,7 @@ impl RequestAdmission {
     /// * `error` - Error reported to the task result.
     pub(crate) fn settle_error(&mut self, error: MimeError) {
         if !self.dispatched {
-            self.state
-                .finish_business(Err(error), ChildOutcomeKind::Failed);
+            self.state.finish_business(Err(error), ChildOutcomeKind::Failed);
             if let Some(owner) = self.state.request_resource_owner() {
                 owner.worker_done();
             } else {
@@ -385,40 +373,31 @@ impl RequestAdmission {
         let resource_scope = scope
             .resource_scope(ResourceScopeOptions { capacity: 1 })
             .map_err(|error| {
-                MimeError::detector_backend(
-                    "magika",
-                    format!("operation scope rejected inference: {error:?}"),
-                )
+                MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
             })?;
         let request_scope = RequestResourceScopeGuard::new(resource_scope);
         let reservation = request_scope.scope().reserve_resource().map_err(|error| {
-            MimeError::detector_backend(
-                "magika",
-                format!("operation scope rejected inference: {error:?}"),
-            )
+            MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
         })?;
         let owner = Arc::new(RequestResourceOwner::new(
             Arc::downgrade(&self.state),
             self.service
                 .take()
                 .expect("unregistered admission retains service capacity"),
-            self.bytes
-                .take()
-                .expect("unregistered admission retains byte capacity"),
+            self.bytes.take().expect("unregistered admission retains byte capacity"),
             false,
         ));
-        let resource =
-            match reservation.commit_with(Arc::clone(&owner), Arc::new(RequestResourceCleanup)) {
-                Ok(resource) => resource,
-                Err(error) => {
-                    drop(error);
-                    owner.release_resources();
-                    return Err(MimeError::detector_backend(
-                        "magika",
-                        "operation scope rejected inference resource commit",
-                    ));
-                }
-            };
+        let resource = match reservation.commit_with(Arc::clone(&owner), Arc::new(RequestResourceCleanup)) {
+            Ok(resource) => resource,
+            Err(error) => {
+                drop(error);
+                owner.release_resources();
+                return Err(MimeError::detector_backend(
+                    "magika",
+                    "operation scope rejected inference resource commit",
+                ));
+            }
+        };
         owner.set_resource_id(resource.id());
         self.state.attach_request_scope(request_scope);
         self.state.attach_owner(owner, Some(resource));
@@ -457,10 +436,7 @@ impl Drop for RequestAdmission {
                 self.dispatched = true;
                 return;
             }
-            self.settle_error(MimeError::detector_backend(
-                "magika",
-                "request admission was abandoned",
-            ));
+            self.settle_error(MimeError::detector_backend("magika", "request admission was abandoned"));
         }
     }
 }
@@ -612,19 +588,12 @@ mod tests {
                     provider_started_tx.send(()).unwrap();
                     std::future::pending::<Result<(), ()>>().await
                 };
-                assert!(
-                    admission
-                        .run_provider_operation(&scope, pending_io)
-                        .await
-                        .is_err()
-                );
+                assert!(admission.run_provider_operation(&scope, pending_io).await.is_err());
                 Ok::<_, ()>(())
             })
             .unwrap();
 
-        let state = state_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
+        let state = state_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         provider_started_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap();
@@ -673,11 +642,7 @@ mod tests {
                     Poll::<()>::Pending
                 });
                 let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    block_on(admission.run_provider_operation_with_status(
-                        &scope,
-                        panic_during_io_poll,
-                        io_in_flight,
-                    ))
+                    block_on(admission.run_provider_operation_with_status(&scope, panic_during_io_poll, io_in_flight))
                 }));
                 assert!(unwind.is_err());
                 drop(admission);
@@ -801,12 +766,7 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(700, None));
-        let owner = Arc::new(RequestResourceOwner::new(
-            Arc::downgrade(&state),
-            service,
-            permit,
-            true,
-        ));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
         state.attach_owner(Arc::clone(&owner), None);
 
         owner.worker_done();
@@ -824,12 +784,7 @@ mod tests {
         let budget = Arc::new(ByteBudget::new(8));
         let permit = budget.try_acquire(8).unwrap();
         let state = Arc::new(TaskState::new(702, None));
-        let owner = Arc::new(RequestResourceOwner::new(
-            Arc::downgrade(&state),
-            service,
-            permit,
-            true,
-        ));
+        let owner = Arc::new(RequestResourceOwner::new(Arc::downgrade(&state), service, permit, true));
         state.attach_owner(Arc::clone(&owner), None);
 
         owner.driver_done();
@@ -885,11 +840,8 @@ mod tests {
             .try_submit(qubit_operation::OperationOptions::default(), |scope| {
                 let budget = Arc::new(ByteBudget::new(8));
                 let permit = budget.try_acquire(8).unwrap();
-                let mut admission = RequestAdmission::new(
-                    Arc::new(TaskState::new(704, None)),
-                    service_resource(),
-                    permit,
-                );
+                let mut admission =
+                    RequestAdmission::new(Arc::new(TaskState::new(704, None)), service_resource(), permit);
                 admission.retain_in_scope(&scope).unwrap();
                 assert!(admission.state.request_resource_owner().is_some());
                 Ok::<_, ()>(())
