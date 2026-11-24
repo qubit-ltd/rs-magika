@@ -129,7 +129,7 @@ async fn read_async_at_retry(
             return Err(FsError::new(
                 FsErrorKind::Interrupted,
                 qubit_fs::error::FsOperation::Read,
-                "provider read stopped",
+                "provider session read stopped",
             ));
         }
         match reader.read_at(offset, output).await {
@@ -197,6 +197,7 @@ pub(crate) async fn read_async_session(
 ///
 /// Returns an I/O error when validation or budget reservation fails, a
 /// provider read fails or returns zero bytes, or `should_stop` returns true.
+/// A stopped request is reported as an interrupted session read.
 pub(crate) async fn read_async_session_with_stop(
     reader: &mut AsyncRandomAccessReader,
     length: u64,
@@ -214,7 +215,7 @@ pub(crate) async fn read_async_session_with_stop(
     let mut filled = 0;
     while filled < buffer.len() {
         if should_stop() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into());
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "provider session read stopped").into());
         }
         let step = (buffer.len() - filled).min(segment_limit);
         let read_offset = offset

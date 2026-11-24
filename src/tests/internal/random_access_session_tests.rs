@@ -950,6 +950,7 @@ fn test_async_session_cancelled_interruption_does_not_retry() {
         panic!("expected I/O cancellation error")
     };
     assert_eq!(std::io::ErrorKind::Interrupted, error.kind());
+    assert_eq!("Read failed with Interrupted: provider session read stopped", error.to_string());
     assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
     assert_eq!(vec![(3, 1)], *fixture.reads.lock().unwrap());
 }

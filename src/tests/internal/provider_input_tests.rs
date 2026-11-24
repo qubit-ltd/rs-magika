@@ -33,7 +33,7 @@ use crate::internal::SyncProviderInput;
 use crate::internal::provider_input::copy_exact;
 use crate::internal::provider_input::invalid_input;
 use crate::internal::provider_input::map_provider_magika_error;
-use crate::internal::provider_input::read_async_segments;
+use crate::internal::provider_input::read_async_segments_observed;
 use crate::internal::provider_input::read_options;
 use crate::internal::provider_input::read_sync_segments;
 use crate::internal::provider_input::validate_request;
@@ -62,6 +62,10 @@ fn run_ready<F: Future>(future: F) -> F::Output {
         }
     }
 }
+
+struct NoopReadObserver;
+
+impl ReadIoObserver for NoopReadObserver {}
 
 struct ThreadWake {
     thread: std::thread::Thread,
@@ -270,7 +274,21 @@ fn test_legacy_provider_empty_unknown_zero_short_and_conditional_ranges() {
     let zero_fs = zero_provider.file_system();
     assert!(read_sync_segments(&zero_fs, &path, None, &mut [0; 1], 0, 0).is_err());
     let zero_async_fs = zero_provider.async_file_system();
-    assert!(run_ready(read_async_segments(&zero_async_fs, &path, None, &mut [0; 1], 0, 0)).is_err());
+    let mut observer = NoopReadObserver;
+    let async_error = run_ready(read_async_segments_observed(
+        &zero_async_fs,
+        &path,
+        None,
+        &mut [0; 1],
+        0,
+        0,
+        &mut observer,
+    ))
+    .expect_err("zero range limit should be rejected before provider I/O");
+    assert!(matches!(
+        map_provider_magika_error(async_error),
+        MimeError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidInput
+    ));
     assert_eq!(0, zero_observations.opens.load(std::sync::atomic::Ordering::SeqCst));
 
     let short_provider = ProviderFileSystemSpi::new(vec![0, 1, 2])
