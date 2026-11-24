@@ -172,8 +172,9 @@ builder；通过 registry 构造时，配置 `MagikaMimeDetectorProvider::with_m
 
 已配置的 media-stream classifier 只用于符合条件的高层输入，并且必须启用 precise
 detection。输入带文件扩展名时，该扩展必须已启用，且初始检测出的 MIME type 必须属于该扩展
-对应的 MIME 类型。没有扩展名时，直接按初始 MIME type 匹配。扩展名与 MIME 候选冲突时会跳过
-refinement。
+对应的 MIME type。没有扩展名时，按初始 MIME type 查找配置的歧义映射。如果它对应多个不同的
+音视频配对，则保留原始 MIME 选择；多个映射复用同一配对不算冲突。扩展名未启用或初始 MIME type
+不属于该扩展的映射时，不执行 refinement。
 
 ## Provider Path 示例
 
@@ -212,15 +213,16 @@ fn detect_uploaded_path(
 
 ## Media Classifier 示例
 
-Media refinement 是可选的。例如，内置的 ffprobe classifier 可以区分仅音频、仅视频和
-音视频内容。需要先安装 `ffprobe`，并确保它位于 `PATH` 中：
+Media refinement 是可选的，遵循下方“Media refinement 支持范围”中的规则。例如，内置的
+ffprobe classifier 可以区分仅音频、仅视频和音视频内容。需要先安装 `ffprobe`，并确保它位于 `PATH` 中：
 
 应用启动前设置 `QUBIT_MIME_ENABLE_PRECISE_DETECTION=true`（配置键为
 `mime.enable.precise.detection`）以启用 precise detection；`MimeConfig::from_env()`
 会读取该设置。默认的歧义映射覆盖 `webm`（`video/webm` 或 `audio/webm`）和
 `ogg`（`video/ogg` 或 `audio/ogg`）。带文件扩展名时，扩展必须已启用，且初始 MIME type
-必须属于该扩展的映射。没有扩展名时直接按初始 MIME type 匹配；扩展名和 MIME 候选冲突时会跳过
-refinement。
+必须属于该扩展的映射。没有扩展名时，按初始 MIME type 查找配置的歧义映射；不同音视频配对
+会保留原始 MIME 选择，而多个映射复用同一配对不算冲突。扩展名与初始 MIME type 不构成已配置配对时，
+不会执行 refinement。
 
 ```rust
 use std::sync::Arc;
