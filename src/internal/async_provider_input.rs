@@ -23,7 +23,6 @@ use super::managed_read_observer::ManagedReadObserver;
 use super::provider_input::read_async_observed;
 use super::provider_input::read_options;
 use super::read_budget::ReadBudget;
-use super::session_read::read_async_session;
 use super::session_read::read_async_session_with_stop;
 use super::stop_watcher::StopWatcher;
 use crate::managed_runtime::task_state::TaskState;
@@ -96,7 +95,7 @@ impl AsyncProviderInput {
             budget: ReadBudget::new(limit),
             stop_state: None,
             stop_watcher: None,
-            io_in_flight: None,
+            io_in_flight: Some(Arc::new(AtomicBool::new(false))),
         }
     }
 
@@ -167,6 +166,7 @@ impl AsyncInput for AsyncProviderInput {
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         let stop_state = self.stop_state.as_ref().map(Arc::clone);
         let stop_watcher = self.stop_watcher.as_ref().map(Arc::clone);
+        let io_in_flight = self.io_in_flight.as_ref().map(Arc::clone);
         match &mut self.route {
             AsyncRoute::OwnedLegacy { file_system, path } => {
                 if let Some(io_in_flight) = &self.io_in_flight {
@@ -200,10 +200,21 @@ impl AsyncInput for AsyncProviderInput {
                                 .is_some_and(|state| !state.try_start_provider_operation())
                                 || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
                         },
+                        io_in_flight.as_deref(),
                     )
                     .await
                 } else {
-                    read_async_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment).await
+                    read_async_session_with_stop(
+                        reader,
+                        self.length,
+                        &mut self.budget,
+                        buffer,
+                        offset,
+                        *max_segment,
+                        || false,
+                        io_in_flight.as_deref(),
+                    )
+                    .await
                 }
             }
         }

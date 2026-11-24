@@ -439,7 +439,10 @@ fn block_on<F: Future>(future: F) -> F::Output {
     let mut context = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut polls = 0usize;
     loop {
+        polls += 1;
+        assert!(polls <= 100_000, "future exceeded the bounded poll count");
         match future.as_mut().poll(&mut context) {
             Poll::Ready(value) => return value,
             Poll::Pending => loop {
@@ -538,6 +541,127 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
 }
 
 #[test]
+fn test_async_session_yields_after_sixty_four_ready_short_reads() {
+    let fixture = Fixture::new(b"", FileSystemLimit::Unknown);
+    let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+    *fixture.bytes.write().unwrap() = Arc::from(content.clone());
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let mut reader = block_on(filesystem.open_random_access_reader(
+        &Path::parse("/cooperative-session").unwrap(),
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(content.len());
+    let mut output = vec![0; content.len()];
+    let mut future = Box::pin(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        content.len() as u64,
+        &mut budget,
+        &mut output,
+        0,
+        None,
+        || false,
+        None,
+    ));
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(wake);
+    let mut context = Context::from_waker(&waker);
+
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert_eq!(64, fixture.attempts.load(Ordering::SeqCst));
+    block_on(future).expect("cooperative reads should eventually fill the request");
+    assert_eq!(content, output);
+}
+
+#[test]
+fn test_async_session_stop_after_cooperative_yield_does_not_start_next_read() {
+    let fixture = Fixture::new(b"", FileSystemLimit::Unknown);
+    let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+    *fixture.bytes.write().unwrap() = Arc::from(content.clone());
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let mut reader = block_on(filesystem.open_random_access_reader(
+        &Path::parse("/cooperative-stop").unwrap(),
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(content.len());
+    let mut output = vec![0; content.len()];
+    let stop = Arc::new(AtomicBool::new(false));
+    let should_stop = Arc::clone(&stop);
+    let io_in_flight = Arc::new(AtomicBool::new(false));
+    let mut future = Box::pin(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        content.len() as u64,
+        &mut budget,
+        &mut output,
+        0,
+        None,
+        move || should_stop.load(Ordering::Acquire),
+        Some(&io_in_flight),
+    ));
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(wake);
+    let mut context = Context::from_waker(&waker);
+
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert_eq!(64, fixture.attempts.load(Ordering::SeqCst));
+    assert!(!io_in_flight.load(Ordering::Acquire), "cooperative yield must not claim actual I/O");
+    stop.store(true, Ordering::Release);
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Ready(Err(_))));
+    assert_eq!(64, fixture.attempts.load(Ordering::SeqCst), "stop after yielding must block read 65");
+}
+
+#[test]
+fn test_async_session_yields_before_retry_after_sixty_fourth_ready_interruption() {
+    let mut pattern = Vec::with_capacity(65);
+    for _ in 0..7 {
+        pattern.extend([true; 7]);
+        pattern.push(false);
+    }
+    pattern.extend([true; 8]);
+    pattern.push(false);
+    let fixture = Fixture::new(b"", FileSystemLimit::Unknown)
+        .interrupt_pattern(pattern, Some(FsEffectState::Unchanged));
+    let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+    *fixture.bytes.write().unwrap() = Arc::from(content.clone());
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let mut reader = block_on(filesystem.open_random_access_reader(
+        &Path::parse("/cooperative-interrupted-session").unwrap(),
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(content.len());
+    let mut output = vec![0; content.len()];
+    let mut future = Box::pin(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        content.len() as u64,
+        &mut budget,
+        &mut output,
+        0,
+        None,
+        || false,
+        None,
+    ));
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(wake);
+    let mut context = Context::from_waker(&waker);
+
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert_eq!(64, fixture.attempts.load(Ordering::SeqCst));
+    block_on(future).expect("safe interruptions should remain retryable after yielding");
+    assert_eq!(content, output);
+}
+
+#[test]
 fn test_async_session_stops_between_ready_short_reads() {
     let fixture = Fixture::new(b"abcdef", FileSystemLimit::Maximum(1));
     let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
@@ -556,6 +680,7 @@ fn test_async_session_stops_between_ready_short_reads() {
         0,
         Some(1),
         || !fixture.reads.lock().unwrap().is_empty(),
+        None,
     ));
 
     assert!(
@@ -970,6 +1095,7 @@ fn test_async_session_cancelled_interruption_does_not_retry() {
         3,
         None,
         || watcher.is_stopped(),
+        None,
     ))
     .expect_err("stop after interruption must prevent a retry");
 

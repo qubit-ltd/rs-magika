@@ -10,6 +10,7 @@
 mod async_provider_input;
 mod async_route;
 pub(crate) mod async_sample_bridge;
+mod cooperative_read;
 mod managed_read_observer;
 mod operation_outcome_context;
 pub(crate) mod provider_input;
