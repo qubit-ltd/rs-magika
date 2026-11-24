@@ -136,6 +136,11 @@ impl RequestResourceOwner {
         drop(resources);
     }
 
+    /// Returns resources after a scope commit that never published this owner.
+    pub(super) fn take_resources(&self) -> Option<(ServicePermit, BytePermit)> {
+        self.resources.lock().unwrap_or_else(|error| error.into_inner()).take()
+    }
+
     /// Returns release evidence or retains the owner when provider completion
     /// cannot be confirmed.
     pub(super) fn cleanup_outcome(self: std::sync::Arc<Self>) -> CleanupOutcome<std::sync::Arc<Self>> {

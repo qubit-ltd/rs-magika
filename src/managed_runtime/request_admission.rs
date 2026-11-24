@@ -27,6 +27,11 @@ use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 
+pub(super) struct RejectedJob {
+    job: Job,
+    reason: &'static str,
+}
+
 /// Runtime, byte, task, and optional parent-scope admission for one request.
 pub(crate) struct RequestAdmission {
     /// Shared lifecycle state for this request.
@@ -232,11 +237,20 @@ impl RequestAdmission {
     ///
     /// `Ok(())` when provider I/O may begin; otherwise returns a backend error.
     pub(crate) fn begin_provider_operation(&mut self) -> MimeResult<()> {
-        if !self.state.try_start_provider_operation() {
-            self.state.request_stop();
-            let error = MimeError::detector_backend("magika", self.state.provider_stop_reason());
+        let result = self.try_begin_provider_operation();
+        if let Err(error) = result {
             self.settle_error(MimeError::detector_backend("magika", self.state.provider_stop_reason()));
             return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Marks provider work started without settling on rejection, so an
+    /// owned provider input can be destroyed before admission is released.
+    pub(crate) fn try_begin_provider_operation(&mut self) -> MimeResult<()> {
+        if !self.state.try_start_provider_operation() {
+            self.state.request_stop();
+            return Err(MimeError::detector_backend("magika", self.state.provider_stop_reason()));
         }
         self.provider_pending = true;
         self.provider_polled = true;
@@ -248,6 +262,25 @@ impl RequestAdmission {
         self.provider_pending = false;
         self.provider_polled = false;
         self.provider_io_status = None;
+    }
+
+    /// Requires provider driver completion before this request can release.
+    pub(crate) fn require_provider_driver(&mut self) {
+        if let Some(owner) = self.state.request_resource_owner() {
+            owner.require_driver();
+            return;
+        }
+        let owner = Arc::new(RequestResourceOwner::new(
+            Arc::downgrade(&self.state),
+            self.service
+                .take()
+                .expect("unowned admission retains service capacity"),
+            self.bytes
+                .take()
+                .expect("unowned admission retains byte capacity"),
+            true,
+        ));
+        self.state.attach_owner(Arc::clone(&owner), None);
     }
 
     /// Transfers the request and its reservations to the worker.
@@ -264,7 +297,7 @@ impl RequestAdmission {
         mut self,
         input: WorkerInput,
         sender: &std::sync::mpsc::SyncSender<Job>,
-    ) -> MimeResult<Arc<TaskState>> {
+    ) -> Result<Arc<TaskState>, RejectedJob> {
         let driver_required = matches!(&input, WorkerInput::Bridge(..));
         if let WorkerInput::Bridge(bridge, _, _) = &input {
             self.state.attach_bridge(Arc::downgrade(bridge));
@@ -300,31 +333,25 @@ impl RequestAdmission {
                     std::sync::mpsc::TrySendError::Full(job) => (job, "inference worker queue is full"),
                     std::sync::mpsc::TrySendError::Disconnected(job) => (job, "inference worker is disconnected"),
                 };
-                let super::job::Job {
-                    input,
-                    state: rejected_state,
-                    owner,
-                } = rejected;
-                if let WorkerInput::Bridge(bridge, _, _) = &input {
-                    // No worker owns this bridge, so wake any provider driver
-                    // instead of waiting for a read that cannot be requested.
-                    bridge.close();
-                }
-                // Release the payload before publishing permit settlement.
-                drop(input);
-                rejected_state.finish_business(
-                    Err(MimeError::detector_backend("magika", reason)),
-                    ChildOutcomeKind::Failed,
-                );
-                let state = Arc::clone(&rejected_state);
-                owner.worker_done();
-                if driver_required {
-                    owner.driver_done();
-                }
                 self.dispatched = true;
-                Ok(state)
+                Err(RejectedJob { job: rejected, reason })
             }
         }
+    }
+
+    pub(super) fn settle_rejected_job(rejected: RejectedJob) -> Arc<TaskState> {
+        let Job { input, state, owner } = rejected.job;
+        if let WorkerInput::Bridge(bridge, _, _) = &input {
+            bridge.close();
+        }
+        drop(input);
+        state.finish_business(
+            Err(MimeError::detector_backend("magika", rejected.reason)),
+            ChildOutcomeKind::Failed,
+        );
+        let result = Arc::clone(&state);
+        owner.worker_done();
+        result
     }
 
     /// Settles an undispatched admission with a terminal error.
@@ -391,7 +418,11 @@ impl RequestAdmission {
             Ok(resource) => resource,
             Err(error) => {
                 drop(error);
-                owner.release_resources();
+                let (service, bytes) = owner
+                    .take_resources()
+                    .expect("unpublished request owner still holds admission resources");
+                self.service = Some(service);
+                self.bytes = Some(bytes);
                 return Err(MimeError::detector_backend(
                     "magika",
                     "operation scope rejected inference resource commit",
