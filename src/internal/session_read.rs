@@ -173,7 +173,30 @@ pub(crate) async fn read_async_session(
 }
 
 /// Asynchronous session read that checks for cancellation between provider
-/// operations and retries.
+/// operations, segments, and safe interruption retries.
+///
+/// The stop predicate is checked before the first session read, before each
+/// retry, and before each later segment. A read already polled is allowed to
+/// return before the predicate is checked again.
+///
+/// # Parameters
+///
+/// * `reader` - Asynchronous session retaining the opened resource.
+/// * `length` - Logical resource length captured when the session was opened.
+/// * `budget` - Per-detection cumulative read budget.
+/// * `buffer` - Destination for the requested resource bytes.
+/// * `offset` - Start offset of the requested range.
+/// * `max_segment` - Optional maximum byte count for one session read.
+/// * `should_stop` - Predicate reporting whether the owning request stopped.
+///
+/// # Returns
+///
+/// Success after all requested bytes have been filled exactly.
+///
+/// # Errors
+///
+/// Returns an I/O error when validation or budget reservation fails, a
+/// provider read fails or returns zero bytes, or `should_stop` returns true.
 pub(crate) async fn read_async_session_with_stop(
     reader: &mut AsyncRandomAccessReader,
     length: u64,

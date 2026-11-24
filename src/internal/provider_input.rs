@@ -109,7 +109,15 @@ pub(crate) fn read_sync_segments(
     Ok(())
 }
 
-/// Reads a complete validated request through bounded asynchronous ranges.
+/// Reads one validated request through rs-fs's observed prefix loop.
+///
+/// The observer sees each actual open/read operation. Cancellation reported by
+/// the observer becomes an interrupted I/O error; provider failures retain
+/// their filesystem context.
+///
+/// # Type Parameters
+///
+/// * `O` - Observer that controls and records provider I/O boundaries.
 ///
 /// # Parameters
 ///
@@ -121,12 +129,17 @@ pub(crate) fn read_sync_segments(
 /// * `budget` - Per-detection cumulative read budget.
 /// * `buffer` - Destination for the requested bytes.
 /// * `offset` - Start offset of the requested range in the resource.
+/// * `observer` - Receives provider I/O lifecycle events and may stop before
+///   the next operation.
+///
+/// # Returns
+///
+/// Success after the requested range has been filled exactly.
 ///
 /// # Errors
 ///
 /// Returns an I/O error when validation, budget reservation, or any provider
-/// range fails.
-/// Reads an asynchronous provider range through rs-fs's observed prefix loop.
+/// range fails or the observer stops the operation.
 pub(crate) async fn read_async_observed<O: ReadIoObserver>(
     file_system: &qubit_fs::AsyncFileSystem,
     path: &Path,
@@ -150,7 +163,35 @@ pub(crate) async fn read_async_observed<O: ReadIoObserver>(
     read_async_segments_observed(file_system, path, version, buffer, offset, max_segment, observer).await
 }
 
-/// Reads bounded asynchronous ranges while observing actual provider I/O.
+/// Reads a buffer as bounded asynchronous ranges while observing provider I/O.
+///
+/// Each segment uses rs-fs's prefix reader, preserving version conditions and
+/// exact-length validation. The observer is consulted before every segment and
+/// receives events for each open and read.
+///
+/// # Type Parameters
+///
+/// * `O` - Observer that controls and records provider I/O boundaries.
+///
+/// # Parameters
+///
+/// * `file_system` - Asynchronous filesystem that supplies the segments.
+/// * `path` - Path of the resource within the filesystem.
+/// * `version` - Optional version condition applied to each segment.
+/// * `buffer` - Destination filled by the segments.
+/// * `offset` - Start offset of the complete request.
+/// * `max_segment` - Maximum byte length of one provider request.
+/// * `observer` - Receives provider I/O events and may stop before the next
+///   segment.
+///
+/// # Returns
+///
+/// Success after every segment has filled its corresponding part of `buffer`.
+///
+/// # Errors
+///
+/// Returns an I/O error when the segment limit is zero, an offset overflows,
+/// a provider segment fails or is short, or the observer stops the operation.
 pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
     file_system: &qubit_fs::AsyncFileSystem,
     path: &Path,

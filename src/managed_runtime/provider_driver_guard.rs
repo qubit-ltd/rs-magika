@@ -43,12 +43,33 @@ impl<I> ProviderDriverGuard<I> {
     /// * `input` - Provider input used to fulfill worker read requests.
     /// * `driver` - Bridge driver returned by the successful dispatch.
     /// * `state` - Request state whose driver completion is reported on drop.
+    ///
+    /// # Returns
+    ///
+    /// A guard that releases the input and driver when sampling completes.
     #[cfg(test)]
     pub(super) fn new(input: I, driver: AsyncSampleDriver, state: Arc<TaskState>) -> Self {
         Self::new_with_io_status(input, driver, state, None)
     }
 
     /// Creates a guard that distinguishes real provider Pending from yields.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `I` - Provider input held while the bridge driver is active.
+    ///
+    /// # Parameters
+    ///
+    /// * `input` - Provider input used to fulfill worker read requests.
+    /// * `driver` - Bridge driver returned by the successful dispatch.
+    /// * `state` - Request state notified when the bridge driver completes.
+    /// * `io_in_flight` - Optional marker for actual I/O status reported by an
+    ///   aggregate reader.
+    ///
+    /// # Returns
+    ///
+    /// A guard that retains input resources while provider I/O is unconfirmed
+    /// and releases them after confirmed completion.
     pub(super) fn new_with_io_status(
         input: I,
         driver: AsyncSampleDriver,

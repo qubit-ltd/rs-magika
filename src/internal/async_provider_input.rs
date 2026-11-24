@@ -8,7 +8,6 @@
 //! Asynchronous provider-backed input for Magika feature extraction.
 
 use std::future::Future;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -21,71 +20,13 @@ use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::AsyncRandomAccessReader;
 
 use super::async_route::AsyncRoute;
+use super::managed_read_observer::ManagedReadObserver;
 use super::provider_input::read_async_observed;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
 use super::session_read::read_async_session_with_stop;
+use super::stop_watcher::StopWatcher;
 use crate::managed_runtime::task_state::TaskState;
-use qubit_fs::read::ReadIoEvent;
-use qubit_fs::read::ReadIoObserver;
-use qubit_fs::read::ReadIoPhase;
-use qubit_operation::OperationContext;
-
-/// Tracks real provider reads while allowing stop between aggregate-read I/Os.
-pub(crate) struct ManagedReadObserver {
-    state: Option<Arc<TaskState>>,
-    in_flight: Arc<AtomicBool>,
-    stop_watcher: Option<Arc<StopWatcher>>,
-}
-
-impl ManagedReadObserver {
-    pub(crate) fn new(
-        state: Option<Arc<TaskState>>,
-        in_flight: Arc<AtomicBool>,
-        stop_watcher: Option<Arc<StopWatcher>>,
-    ) -> Self {
-        Self {
-            state,
-            in_flight,
-            stop_watcher,
-        }
-    }
-}
-
-/// Checks scope cancellation synchronously at every provider I/O boundary.
-pub(crate) struct StopWatcher {
-    context: OperationContext,
-}
-
-impl StopWatcher {
-    pub(crate) fn new(context: OperationContext) -> Arc<Self> {
-        Arc::new(Self { context })
-    }
-
-    pub(crate) fn is_stopped(&self) -> bool {
-        self.context.stop_reason().is_some()
-    }
-}
-
-impl ReadIoObserver for ManagedReadObserver {
-    fn before_io(&mut self, _phase: ReadIoPhase) -> ControlFlow<()> {
-        let stopped = self.state.as_ref().is_some_and(|state| state.stop_requested())
-            || self.stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped());
-        if stopped {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    }
-
-    fn on_io_event(&mut self, event: ReadIoEvent) {
-        match event {
-            ReadIoEvent::Started { .. } => self.in_flight.store(true, Ordering::Release),
-            ReadIoEvent::Pending { .. } => self.in_flight.store(true, Ordering::Release),
-            ReadIoEvent::Ready { .. } => self.in_flight.store(false, Ordering::Release),
-        }
-    }
-}
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput {
@@ -160,16 +101,39 @@ impl AsyncProviderInput {
     }
 
     /// Observes request cancellation between confirmed provider session reads.
+    ///
+    /// # Parameters
+    ///
+    /// * `state` - Runtime state that is set when this request is cancelled.
+    ///
+    /// # Returns
+    ///
+    /// This input configured to stop before later session reads.
     pub(crate) fn with_stop_state(mut self, state: Arc<TaskState>) -> Self {
         self.stop_state = Some(state);
         self
     }
 
+    /// Observes operation-scope cancellation between provider operations.
+    ///
+    /// # Parameters
+    ///
+    /// * `watcher` - Scope cancellation state checked at each I/O boundary.
+    ///
+    /// # Returns
+    ///
+    /// This input configured to stop before later provider I/O after the
+    /// operation scope accepts cancellation.
     pub(crate) fn with_stop_watcher(mut self, watcher: Arc<StopWatcher>) -> Self {
         self.stop_watcher = Some(watcher);
         self
     }
 
+    /// Clones the actual-I/O marker for an owned legacy route.
+    ///
+    /// # Returns
+    ///
+    /// `Some` for an owned legacy route and `None` for a session route.
     pub(crate) fn io_in_flight(&self) -> Option<Arc<AtomicBool>> {
         self.io_in_flight.as_ref().map(Arc::clone)
     }
