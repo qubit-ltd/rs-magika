@@ -179,11 +179,11 @@ impl MagikaMimeDetector {
     /// Closed, full, or already-cancelled requests are rejected before
     /// provider I/O. Admission capacity is a permission/accounting reservation;
     /// it does not prove provider completion or resource release. The byte
-    /// reservation bounds logical sampling and owned
-    /// payload accounting; it is not a bound on total process memory or
-    /// provider/network work. The `read_all` fallback transfers its
-    /// returned buffer to the worker without an explicit clone. Converting
-    /// owned storage for worker use may still reallocate, so this is not a
+    /// reservation bounds logical sampling and owned payload accounting; it
+    /// is not a bound on total process memory or provider/network work. The
+    /// `read_all` fallback moves its returned `Vec` into worker ownership
+    /// without cloning its contents. Converting it with `into_boxed_slice`
+    /// may reallocate when the vector has spare capacity, so this is not a
     /// guarantee of zero-copy operation.
     ///
     /// Dropping a pending provider future cancels local polling only. A
@@ -192,11 +192,12 @@ impl MagikaMimeDetector {
     /// child settlement remain pending, potentially indefinitely; future
     /// cancellation does not prove that underlying I/O was interrupted.
     ///
-    /// A Rust panic caught during session inference is surfaced to this call
-    /// as `Failed(MimeError::DetectorBackend)` while its child operation
-    /// records `Panicked` and the runtime becomes faulted. This is distinct
-    /// from [`ManagedInferenceShutdownReport::worker_panicked`], which
-    /// reports an uncaught panic observed while joining the worker.
+    /// A Rust panic caught during session inference makes this future return
+    /// `MimeError::DetectorBackend`; the public child `OperationOutcome` is
+    /// `Failed(MimeError)`. The runtime also records its internal panic fact
+    /// and becomes faulted. This is distinct from
+    /// [`ManagedInferenceShutdownReport::worker_panicked`], which reports an
+    /// uncaught panic observed while joining the worker.
     ///
     /// # Parameters
     ///

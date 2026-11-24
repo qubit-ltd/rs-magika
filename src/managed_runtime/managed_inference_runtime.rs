@@ -885,11 +885,16 @@ impl ManagedInferenceRuntime {
     ///
     /// # Returns
     ///
-    /// Admission and worker termination facts. A false `worker_stopped` means
-    /// the worker has not exited; its handle remains available for a later
-    /// shutdown call to observe and reap. One deadline covers service
-    /// admission/settlement and worker exit. Shutdown does not forcibly
-    /// interrupt native inference or provider I/O.
+    /// Admission and worker termination facts. `worker_stopped` reports the
+    /// join only and can be false while an unconfirmed provider request still
+    /// retains capacity. False means shutdown has not observed a completed
+    /// join; the worker handle remains available for a later call to continue
+    /// observing and reap. One deadline covers service admission/settlement
+    /// and worker exit. Shutdown does not forcibly interrupt native inference
+    /// or provider I/O. A caught inference panic marks
+    /// [`ManagedInferenceSnapshot::faulted`]; only an uncaught panic
+    /// observed while joining sets
+    /// [`ManagedInferenceShutdownReport::worker_panicked`].
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,
