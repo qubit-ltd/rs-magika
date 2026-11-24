@@ -47,7 +47,9 @@ Provider 读取，但不接收 parent operation scope。应用若要把 Provider
 并对照固定提交清单
 [`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)。
 核对会报告缺失、脏状态或提交不符，但不会修复或替换现有目录；请先检查漂移，再决定如何处理。
-Linux 准备流程发布新 checkout 时使用 GNU `mv -Tn`。
+常规和动态 fixture bootstrap 模式共用同一个准备 helper。发布新建的缺失 checkout 需要 GNU
+`mv -Tn`（某些系统上 GNU coreutils 命令名为 `gmv`）；准备已存在的合法 worktree 和运行严格的
+`--check-locked` 校验都不需要 GNU `mv`。
 
 ## 贯穿场景
 
