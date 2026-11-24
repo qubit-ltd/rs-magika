@@ -132,9 +132,10 @@ runtime `Cancel` 可能先返回停止错误，worker 仍会保留输入和许�
 [准备脚本](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/prepare-local-path-dependencies.sh)。
 `--check-locked` 只检查现有兄弟仓库是否处于固定提交且工作区干净；发现缺失、提交不符或工作区有改动时会报错，
 但不会修复。准备操作不会改动现有 Git checkout，因此需先手动将漂移的 checkout 恢复到固定提交再检查。
-常规和动态 fixture bootstrap 模式共用同一个准备 helper。发布新建的缺失 checkout 需要 GNU
-`mv -Tn`（某些系统上命令名为 `gmv`）；复用已存在的合法 worktree 和严格的
-`--check-locked` 校验不需要 GNU `mv`。它会拒绝覆盖已占用的非 Git 路径。Cargo 包不
+常规和动态 fixture bootstrap 模式共用同一个准备 helper。发布新建的缺失 checkout 需要独占目标路径的重命名：
+工具优先使用 GNU `mv -Tn`（某些系统上命令名为 `gmv`）；在 Darwin 上找不到支持 `-T` 的 `mv` 或 `gmv` 时，
+默认调用系统 `python3` 的 `renamex_np`。可通过 `RS_INFRA_PYTHON` 指定 Python 解释器；其他平台仍需 GNU `mv -Tn` 或 `gmv`。
+复用已存在的合法 worktree 和严格的 `--check-locked` 校验不需要发布工具。它会拒绝覆盖已占用的非 Git 路径。Cargo 包不
 包含 `.infra`，因此脚本和[固定提交列表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 链接到源码仓库。准备好兄弟目录后，可用以下命令检查各 manifest 的锁定依赖：
 

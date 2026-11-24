@@ -60,10 +60,13 @@ and compare against the fixed revisions in
 The check reports a missing, dirty, or wrong-revision checkout; it does not
 repair or replace it. Review and resolve drift deliberately. The normal and
 dynamic-fixture bootstrap modes share the same preparation helper. Publishing
-a newly prepared missing checkout requires GNU `mv -Tn` (or `gmv` on systems
-where GNU coreutils are installed under that name). Preparing an existing
-valid worktree and running strict `--check-locked` validation do not require
-GNU `mv`.
+a newly prepared missing checkout requires an exclusive rename into the target
+path. The helper uses GNU `mv -Tn` (or `gmv` where GNU coreutils use that name)
+when available. On Darwin, if neither GNU publisher is available, it uses
+Python 3's `renamex_np` (default executable `python3`; override it with
+`RS_INFRA_PYTHON`). Other platforms require GNU `mv -Tn` or `gmv` to publish a
+missing checkout. Preparing an existing valid worktree and running strict
+`--check-locked` validation do not require a publisher.
 
 ## Scenario
 

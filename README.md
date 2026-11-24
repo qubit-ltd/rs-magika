@@ -151,10 +151,14 @@ dirty checkouts but does not repair them. Preparation leaves existing Git
 checkouts untouched, so restore a drifted checkout to its pinned revision
 manually before checking again. It refuses to overwrite occupied non-checkout
 paths. Normal and dynamic-fixture bootstrap modes share the same preparation
-helper. Publishing a newly prepared missing checkout requires GNU `mv -Tn`
-(or `gmv` where GNU coreutils use that command name); reusing an existing valid
-worktree and strict `--check-locked` validation do not require GNU `mv`. The package
-does not ship `.infra`, so its script and [pinned revision list](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
+helper. Publishing a newly prepared missing checkout requires an exclusive
+rename into the target path. The helper uses GNU `mv -Tn` (or `gmv` where GNU
+coreutils use that command name) when available. On Darwin, if neither command
+is available, it uses Python 3's `renamex_np` (default executable `python3`;
+override it with `RS_INFRA_PYTHON`). Other platforms require GNU `mv -Tn` or
+`gmv` to publish a missing checkout. Reusing an existing valid worktree and strict
+`--check-locked` validation do not require a publisher. The package does not
+ship `.infra`, so its script and [pinned revision list](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 are linked from the source repository. After preparing the sibling layout, the
 following commands verify the locked manifests:
 
