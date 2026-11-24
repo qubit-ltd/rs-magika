@@ -1072,14 +1072,24 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
     let mut context = Context::from_waker(&waker);
     assert!(driver.as_mut().poll(&mut context).is_pending());
     state.request_stop();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let stopped = loop {
         if let Poll::Ready(result) = driver.as_mut().poll(&mut context) {
-            break result;
+            break Some(result);
         }
-        std::thread::park_timeout(Duration::from_millis(1));
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::park_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
     };
+    drop(driver);
     assert!(
-        stopped.is_err(),
+        stopped.is_some(),
+        "timed out waiting for cancellation while driver waited for first range; reads={}",
+        reads.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(
+        stopped.unwrap().is_err(),
         "runtime Cancel must be reported before native inference completes"
     );
     assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
@@ -1113,14 +1123,26 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
     }
     assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
     state.request_stop();
+    let cancel_deadline = std::time::Instant::now() + Duration::from_secs(2);
     let stopped = loop {
         if let Poll::Ready(result) = driver.as_mut().poll(&mut context) {
-            break result;
+            break Some(result);
         }
-        std::thread::park_timeout(Duration::from_millis(1));
+        if std::time::Instant::now() >= cancel_deadline {
+            break None;
+        }
+        std::thread::park_timeout(
+            cancel_deadline.saturating_duration_since(std::time::Instant::now()),
+        );
     };
-    assert!(stopped.is_err(), "runtime Cancel must end an active range read");
+    drop(driver);
     assert!(worker.join().unwrap().is_err());
+    assert!(
+        stopped.is_some(),
+        "timed out waiting for cancellation during active read; reads={}",
+        reads.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(stopped.unwrap().is_err(), "runtime Cancel must end an active range read");
     assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
 
     // Linearize cancellation at the provider-start gate after the worker has
