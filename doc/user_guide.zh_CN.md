@@ -334,10 +334,6 @@ runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由
 payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
 分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
 
-两个旧 hook 都可能在资源结算确认前返回业务结果。managed API 会单独提供资源报告：有界观察可能返回
-`Pending`；`Ready` 报告也可能指出资源释放尚未确认。Provider I/O 或 worker 访问尚未确认结束时，容量会继续保留，
-即使本地已经请求停止也是如此。若需独立观察资源释放，应使用显式 managed API。
-
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
 选择或媒体细化。输入受理后会按 owned payload 计入共享 runtime 聚合字节预算；即使仓库规则原本
 可以直接决定结果，也会统一经过受理。因此 runtime 关闭、容量或预算不足、内容超限都可能产生异步
