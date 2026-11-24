@@ -131,7 +131,7 @@ impl RequestResourceOwner {
     }
 
     /// Drops runtime and byte permits after confirmed local access completion.
-    fn release_resources(&self) {
+    pub(super) fn release_resources(&self) {
         let resources = self.resources.lock().unwrap_or_else(|error| error.into_inner()).take();
         drop(resources);
     }
