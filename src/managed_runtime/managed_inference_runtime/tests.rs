@@ -200,7 +200,11 @@ fn test_snapshot_classifies_admitted_running_and_awaiting_release() {
         inner.started = true;
         inner.worker_done = true;
     }
-    runtime.tasks.lock().unwrap().extend([admitted, running, awaiting]);
+    runtime
+        .tasks
+        .lock()
+        .unwrap()
+        .extend([admitted, running, awaiting]);
     let snapshot = runtime.snapshot();
     assert_eq!(1, snapshot.admitted_not_started);
     assert_eq!(1, snapshot.worker_running);
@@ -257,7 +261,9 @@ fn test_snapshot_concurrent_with_shutdown_finishes_within_deadline() {
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
-    observer.join().expect("concurrent snapshot observer should finish");
+    observer
+        .join()
+        .expect("concurrent snapshot observer should finish");
 }
 
 struct ReleaseGate(Option<mpsc::SyncSender<()>>);
@@ -312,7 +318,9 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         Box::new(|| {}),
     ));
     let mut release_on_failure = ReleaseGate(Some(release_tx));
-    let inference = runtime.submit(None, WorkerInput::Bytes(vec![1, 2, 3].into())).unwrap();
+    let inference = runtime
+        .submit(None, WorkerInput::Bytes(vec![1, 2, 3].into()))
+        .unwrap();
     entered_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("engine must enter before the active-request snapshot");
@@ -332,7 +340,10 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let snapshot = observer_runtime.snapshot();
-            if snapshot.worker_running == 0 && snapshot.awaiting_release == 0 && snapshot.reserved_bytes == 0 {
+            if snapshot.worker_running == 0
+                && snapshot.awaiting_release == 0
+                && snapshot.reserved_bytes == 0
+            {
                 observer_done_tx.send(()).unwrap();
                 return;
             }
@@ -355,7 +366,8 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
         shutdown_started_tx.send(()).unwrap();
-        let report = shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        let report =
+            shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
         shutdown_done_tx.send(report).unwrap();
     });
     shutdown_started_rx
@@ -378,8 +390,12 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
     observer_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("snapshot observer must finish after registry cleanup");
-    shutdown.join().expect("completed shutdown thread must be reclaimable");
-    observer.join().expect("completed snapshot thread must be reclaimable");
+    shutdown
+        .join()
+        .expect("completed shutdown thread must be reclaimable");
+    observer
+        .join()
+        .expect("completed snapshot thread must be reclaimable");
 
     let final_snapshot = runtime.snapshot();
     assert!(final_snapshot.admission_closed);
@@ -390,7 +406,12 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         runtime.tasks.lock().unwrap().is_empty(),
         "released task must leave the registry"
     );
-    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        0,
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -414,7 +435,9 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     let (request_tx, request_rx) = mpsc::sync_channel(1);
     let request_bridge = Arc::clone(&bridge);
     let request_thread = std::thread::spawn(move || {
-        request_tx.send(block_on(request_bridge.next_request())).unwrap();
+        request_tx
+            .send(block_on(request_bridge.next_request()))
+            .unwrap();
     });
     let request = request_rx
         .recv_timeout(Duration::from_secs(5))
@@ -469,7 +492,8 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
         shutdown_started_tx.send(()).unwrap();
-        let report = shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        let report =
+            shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
         shutdown_done_tx.send(report).unwrap();
     });
     shutdown_started_rx
@@ -481,7 +505,10 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
 
     drop(driver);
     state.mark_driver_done();
-    assert_eq!(block_on(inference).unwrap().as_deref(), Some("application/x-bytes-4"));
+    assert_eq!(
+        block_on(inference).unwrap().as_deref(),
+        Some("application/x-bytes-4")
+    );
     let report = shutdown_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("shutdown must finish after the known-safe driver completes");
@@ -489,8 +516,12 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     observer_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("snapshot observer must finish after registry cleanup");
-    shutdown.join().expect("completed shutdown thread must be reclaimable");
-    observer.join().expect("completed snapshot thread must be reclaimable");
+    shutdown
+        .join()
+        .expect("completed shutdown thread must be reclaimable");
+    observer
+        .join()
+        .expect("completed snapshot thread must be reclaimable");
 
     let final_snapshot = runtime.snapshot();
     assert!(final_snapshot.admission_closed);
@@ -501,7 +532,12 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
         runtime.tasks.lock().unwrap().is_empty(),
         "released task must leave the registry"
     );
-    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        0,
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
 }
 
 #[test]
@@ -516,7 +552,10 @@ fn test_snapshot_unconfirmed_admission_drop_and_confirmed_or_unstarted_controls(
     });
     let waker = std::task::Waker::noop();
     let mut context = std::task::Context::from_waker(waker);
-    assert!(matches!(pending_provider.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        pending_provider.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
     drop(pending_provider);
     assert_eq!(1, runtime.snapshot().unconfirmed_provider_io);
     assert_eq!(2, runtime.snapshot().reserved_bytes);
@@ -556,7 +595,11 @@ fn assert_scope_admission_rollback(stopped: bool) {
     let mut operation = manager
         .as_async()
         .try_submit(options, move |scope| async move {
-            let _held = if stopped { None } else { Some(scope.manage(()).unwrap()) };
+            let _held = if stopped {
+                None
+            } else {
+                Some(scope.manage(()).unwrap())
+            };
             if stopped {
                 let status = scope.request_stop(StopReason::UserCancelled);
                 assert_eq!(status, qubit_operation::StopRequestStatus::Accepted);
@@ -587,7 +630,13 @@ fn assert_scope_admission_rollback(stopped: bool) {
                 })
                 .is_ok();
             facts_tx
-                .send((message, no_tasks, active, full_budget_returned, slots_returned))
+                .send((
+                    message,
+                    no_tasks,
+                    active,
+                    full_budget_returned,
+                    slots_returned,
+                ))
                 .unwrap();
             Ok::<_, MimeError>(())
         })
@@ -648,7 +697,11 @@ fn test_scope_admission_repeated_failures_do_not_accumulate() {
         .try_submit(options, move |scope| async move {
             let _held = scope.manage(()).unwrap();
             for _ in 0..32 {
-                assert!(request_runtime.reserve_for_provider(Some(&scope), 8).is_err());
+                assert!(
+                    request_runtime
+                        .reserve_for_provider(Some(&scope), 8)
+                        .is_err()
+                );
                 assert!(request_runtime.tasks.lock().unwrap().is_empty());
                 assert_eq!(
                     request_runtime
@@ -718,7 +771,12 @@ fn test_scope_admission_failure_preserves_other_request() {
     assert_eq!(tasks.len(), 1);
     assert!(Arc::ptr_eq(&tasks[0], &original_state));
     drop(tasks);
-    assert_eq!(runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     assert!(runtime.byte_budget.try_acquire(5).is_none());
     drop(
         runtime
@@ -731,10 +789,18 @@ fn test_scope_admission_failure_preserves_other_request() {
             .reserve_for_provider(None, 0)
             .expect("failed request must return request slot"),
     );
-    assert!(Arc::ptr_eq(&runtime.tasks.lock().unwrap()[0], &original_state));
+    assert!(Arc::ptr_eq(
+        &runtime.tasks.lock().unwrap()[0],
+        &original_state
+    ));
     drop(independent);
     assert!(runtime.tasks.lock().unwrap().is_empty());
-    assert_eq!(runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
     drop(
         runtime
             .byte_budget
@@ -828,18 +894,26 @@ fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
     let admission = runtime.reserve_for_provider(None, 4).unwrap();
     let request_runtime = Arc::clone(&runtime);
-    let mut request = Box::pin(async move { request_runtime.detect_bytes_admitted(admission, b"data".to_vec()).await });
+    let mut request = Box::pin(async move {
+        request_runtime
+            .detect_bytes_admitted(admission, b"data".to_vec())
+            .await
+    });
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     assert!(request.as_mut().poll(&mut context).is_pending());
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
     let shutdown_runtime = Arc::clone(&runtime);
-    let shutdown =
-        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)));
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+    });
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !runtime.snapshot().cancelling {
-        assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "runtime Cancel was not requested"
+        );
         std::thread::park_timeout(Duration::from_millis(1));
     }
     let stop_deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -851,7 +925,9 @@ fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
             std::time::Instant::now() < stop_deadline,
             "runtime Cancel did not end business waiting while worker was gated"
         );
-        std::thread::park_timeout(stop_deadline.saturating_duration_since(std::time::Instant::now()));
+        std::thread::park_timeout(
+            stop_deadline.saturating_duration_since(std::time::Instant::now()),
+        );
     };
     let cancelled_before_release = cancelled_result.is_err();
     let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
@@ -863,7 +939,10 @@ fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
         cancelled_before_release,
         "Cancel must end business waiting while worker is gated"
     );
-    assert!(capacity_still_held, "worker-owned bytes must retain aggregate capacity");
+    assert!(
+        capacity_still_held,
+        "worker-owned bytes must retain aggregate capacity"
+    );
     assert!(
         worker_still_running,
         "worker must still be executing before the gate opens"
@@ -895,18 +974,23 @@ fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
     ));
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
     let request_runtime = Arc::clone(&runtime);
-    let mut request = Box::pin(async move { request_runtime.detect_content_unmanaged(b"data").await });
+    let mut request =
+        Box::pin(async move { request_runtime.detect_content_unmanaged(b"data").await });
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     assert!(request.as_mut().poll(&mut context).is_pending());
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
     let shutdown_runtime = Arc::clone(&runtime);
-    let shutdown =
-        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)));
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+    });
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !runtime.snapshot().cancelling {
-        assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "runtime Cancel was not requested"
+        );
         std::thread::park_timeout(Duration::from_millis(1));
     }
     let stop_deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -918,7 +1002,9 @@ fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
             std::time::Instant::now() < stop_deadline,
             "runtime Cancel did not end business waiting while worker was gated"
         );
-        std::thread::park_timeout(stop_deadline.saturating_duration_since(std::time::Instant::now()));
+        std::thread::park_timeout(
+            stop_deadline.saturating_duration_since(std::time::Instant::now()),
+        );
     };
     let cancelled_before_release = cancelled_result.is_err();
     let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
@@ -930,7 +1016,10 @@ fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
         cancelled_before_release,
         "Cancel must end business waiting while worker is gated"
     );
-    assert!(capacity_still_held, "worker-owned bytes must retain aggregate capacity");
+    assert!(
+        capacity_still_held,
+        "worker-owned bytes must retain aggregate capacity"
+    );
     assert!(
         worker_still_running,
         "worker must still be executing before the gate opens"
@@ -962,18 +1051,28 @@ fn test_admitted_bytes_preserve_published_result_when_cancel_follows() {
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&release_gate));
     let admission = runtime.reserve_for_provider(None, 4).unwrap();
     let request_runtime = Arc::clone(&runtime);
-    let mut request = Box::pin(async move { request_runtime.detect_bytes_admitted(admission, b"data".to_vec()).await });
+    let mut request = Box::pin(async move {
+        request_runtime
+            .detect_bytes_admitted(admission, b"data".to_vec())
+            .await
+    });
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     assert!(request.as_mut().poll(&mut context).is_pending());
-    released_result_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    released_result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
 
     let shutdown_runtime = Arc::clone(&runtime);
-    let shutdown =
-        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)));
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+    });
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !runtime.snapshot().cancelling {
-        assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "runtime Cancel was not requested"
+        );
         std::thread::park_timeout(Duration::from_millis(1));
     }
     let result = loop {
@@ -1007,7 +1106,11 @@ fn test_range_driver_returns_published_result_after_runtime_stop_without_reading
             std::future::ready(Ok(1))
         }
 
-        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), MagikaError>> {
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), MagikaError>> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::future::ready(Ok(()))
         }
@@ -1065,7 +1168,10 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
             let admission = operation_runtime.reserve_for_provider(Some(&scope), 128)?;
-            let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(vec![b'x'; 128])
+            let provider =
+                crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+                    vec![b'x'; 128],
+                )
                 .with_range();
             let input = crate::internal::AsyncProviderInput::new_owned(
                 provider.async_file_system(),
@@ -1088,7 +1194,9 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
             loop {
                 match engine_started_rx.try_recv() {
                     Ok(()) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => panic!("worker exited before engine start"),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        panic!("worker exited before engine start")
+                    }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
                 assert!(
@@ -1107,7 +1215,10 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
             });
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while !operation_runtime.snapshot().cancelling {
-                assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "runtime Cancel was not requested"
+                );
                 std::thread::yield_now();
             }
             let result = match detection.as_mut().poll(&mut context) {
@@ -1127,7 +1238,10 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
     let OperationOutcome::Succeeded(result) = outcome else {
         panic!("outer operation should return the managed result observation: {outcome:?}");
     };
-    assert_eq!(Some("application/x-published-range".to_owned()), result.unwrap());
+    assert_eq!(
+        Some("application/x-published-range".to_owned()),
+        result.unwrap()
+    );
 }
 
 #[test]
@@ -1157,10 +1271,11 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
                     .build()
                     .unwrap(),
             );
-            let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
-                b"provider contents".to_vec(),
-            )
-            .with_range();
+            let provider =
+                crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+                    b"provider contents".to_vec(),
+                )
+                .with_range();
             let observations = provider.observations();
             let file_system = provider.async_file_system();
             let path = qubit_fs::Path::parse("/managed-handoff.py").unwrap();
@@ -1181,9 +1296,14 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
                             &request_path,
                             64,
                         ))
-                            as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
+                            as Pin<
+                                Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>,
+                            >
                     } else {
-                        Box::pin(request_detector.detect_bytes_managed(&scope, b"managed bytes".to_vec()))
+                        Box::pin(
+                            request_detector
+                                .detect_bytes_managed(&scope, b"managed bytes".to_vec()),
+                        )
                     };
                     {
                         let waker = Waker::from(Arc::new(SignalWake(started_tx)));
@@ -1214,10 +1334,13 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             }
             assert_eq!(1, runtime.snapshot().admitted_not_started);
             if worker_fault {
-                let fault = runtime.submit(None, WorkerInput::Bytes(vec![0xff].into())).unwrap();
+                let fault = runtime
+                    .submit(None, WorkerInput::Bytes(vec![0xff].into()))
+                    .unwrap();
                 assert!(block_on(fault).is_err());
             } else {
-                let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+                let report =
+                    runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
                 assert!(report.worker_stopped);
             }
 
@@ -1243,7 +1366,8 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             task_gate.release();
             let _ = block_on(operation.wait_outcome()).unwrap();
             if worker_fault {
-                let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+                let report =
+                    runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
                 assert!(report.worker_stopped);
             }
         }
@@ -1336,9 +1460,10 @@ fn test_managed_public_handoffs_cancel_before_child_body_starts() {
                 .build()
                 .unwrap(),
         );
-        let provider =
-            crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(b"not reached".to_vec())
-                .with_range();
+        let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+            b"not reached".to_vec(),
+        )
+        .with_range();
         let observations = provider.observations();
         let file_system = provider.async_file_system();
         let path = qubit_fs::Path::parse("/managed-before-start.py").unwrap();
@@ -1348,7 +1473,12 @@ fn test_managed_public_handoffs_cancel_before_child_body_starts() {
             .as_async()
             .try_submit(OperationOptions::default(), move |scope| async move {
                 let mut detection = if provider_entry {
-                    Box::pin(request_detector.detect_async_provider_path_managed(&scope, &file_system, &path, 64))
+                    Box::pin(request_detector.detect_async_provider_path_managed(
+                        &scope,
+                        &file_system,
+                        &path,
+                        64,
+                    ))
                         as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
                 } else {
                     Box::pin(request_detector.detect_bytes_managed(&scope, b"not reached".to_vec()))
@@ -1357,7 +1487,8 @@ fn test_managed_public_handoffs_cancel_before_child_body_starts() {
                 let mut context = Context::from_waker(waker);
                 assert!(detection.as_mut().poll(&mut context).is_pending());
                 assert_eq!(1, request_runtime.snapshot().admitted_not_started);
-                let report = request_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+                let report =
+                    request_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
                 assert!(report.worker_stopped);
                 assert_eq!(0, request_runtime.snapshot().reserved_bytes);
                 assert_eq!(0, request_runtime.active_requests.load(Ordering::SeqCst));
@@ -1388,7 +1519,9 @@ fn test_worker_fault_closes_an_unsubmitted_request_handoff() {
     let admission = runtime.reserve_for_provider(None, 4).unwrap();
     let state = admission.task_state();
     let (_handoff, _guard) = RequestAdmissionHandoff::new(admission);
-    let inference = runtime.submit(None, WorkerInput::Bytes(vec![1].into())).unwrap();
+    let inference = runtime
+        .submit(None, WorkerInput::Bytes(vec![1].into()))
+        .unwrap();
 
     assert!(block_on(inference).is_err());
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
@@ -1426,13 +1559,19 @@ fn test_unmanaged_content_waits_for_worker_settlement_after_business_result() {
             .unwrap();
     });
     business_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(matches!(result_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    assert!(matches!(
+        result_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
     assert!(runtime.byte_budget.try_acquire(8).is_none());
 
     gate_cleanup.release();
     assert_eq!(
         Some("application/x-settled".to_owned()),
-        result_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
     );
     request.join().unwrap();
     assert!(
@@ -1469,7 +1608,9 @@ impl Drop for PausedDropProbe {
         let (lock, changed) = &*self.gate;
         let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
         while !*released {
-            released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
+            released = changed
+                .wait(released)
+                .unwrap_or_else(|error| error.into_inner());
         }
     }
 }
@@ -1488,7 +1629,9 @@ fn test_cancelled_input_drops_before_worker_release() {
             let (lock, changed) = &*first_gate_worker;
             let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
             while !*released {
-                released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
+                released = changed
+                    .wait(released)
+                    .unwrap_or_else(|error| error.into_inner());
             }
             Ok(None)
         }),
@@ -1496,8 +1639,12 @@ fn test_cancelled_input_drops_before_worker_release() {
     ));
     let first_gate_cleanup = ReleaseWorkerGate(Arc::clone(&first_gate));
 
-    let _first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
-    first_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let _first = runtime
+        .submit(None, WorkerInput::Bytes(vec![b'a'].into()))
+        .unwrap();
+    first_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
     let (probe_entered_tx, probe_entered_rx) = mpsc::sync_channel(1);
     let probe_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let probe_gate_cleanup = ReleaseWorkerGate(Arc::clone(&probe_gate));
@@ -1546,7 +1693,9 @@ fn test_cancelled_queued_bytes_restore_byte_budget() {
             let (lock, changed) = &*worker_gate_copy;
             let mut released = lock.lock().unwrap_or_else(|error| error.into_inner());
             while !*released {
-                released = changed.wait(released).unwrap_or_else(|error| error.into_inner());
+                released = changed
+                    .wait(released)
+                    .unwrap_or_else(|error| error.into_inner());
             }
             Ok(None)
         }),
@@ -1554,10 +1703,14 @@ fn test_cancelled_queued_bytes_restore_byte_budget() {
     ));
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
 
-    let _first = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
+    let _first = runtime
+        .submit(None, WorkerInput::Bytes(vec![0; 4].into()))
+        .unwrap();
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let first_state = runtime.tasks.lock().unwrap()[0].clone();
-    let queued = runtime.submit(None, WorkerInput::Bytes(vec![0; 4].into())).unwrap();
+    let queued = runtime
+        .submit(None, WorkerInput::Bytes(vec![0; 4].into()))
+        .unwrap();
     let queued_state = runtime.tasks.lock().unwrap()[1].clone();
     drop(queued);
     // Dropping the result waiter requests stop, but the queued worker still
@@ -1579,10 +1732,16 @@ fn test_provider_read_error_is_mapped_and_settled() {
 
     impl magika::AsyncInput for FailedLengthInput {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
-            std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test length failed"))))
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
+                "test length failed",
+            ))))
         }
 
-        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
             std::future::ready(Ok(()))
         }
     }
@@ -1594,8 +1753,14 @@ fn test_provider_read_error_is_mapped_and_settled() {
             std::future::ready(Ok(8192))
         }
 
-        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
-            std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test read failed"))))
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
+                "test read failed",
+            ))))
         }
     }
 
@@ -1606,7 +1771,9 @@ fn test_provider_read_error_is_mapped_and_settled() {
         Box::new(|_| Ok(None)),
         Box::new(|| {}),
     ));
-    let mapped_error = map_provider_test_error(magika::Error::IOError(std::io::Error::other("test mapping")));
+    let mapped_error = map_provider_test_error(magika::Error::IOError(std::io::Error::other(
+        "test mapping",
+    )));
     assert!(matches!(mapped_error, MimeError::DetectorBackend { .. }));
     let length_admission = runtime.reserve_for_provider(None, 8192).unwrap();
     let length_result = block_on(runtime.detect_async_input_admitted_test(
@@ -1615,11 +1782,18 @@ fn test_provider_read_error_is_mapped_and_settled() {
         8192,
         map_provider_test_error,
     ));
-    assert!(matches!(length_result, Err(MimeError::DetectorBackend { .. })));
+    assert!(matches!(
+        length_result,
+        Err(MimeError::DetectorBackend { .. })
+    ));
 
     let admission = runtime.reserve_for_provider(None, 8192).unwrap();
-    let result =
-        block_on(runtime.detect_async_input_admitted_test(admission, FailedReadInput, 8192, map_provider_test_error));
+    let result = block_on(runtime.detect_async_input_admitted_test(
+        admission,
+        FailedReadInput,
+        8192,
+        map_provider_test_error,
+    ));
 
     assert!(matches!(result, Err(MimeError::Io(_))));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
@@ -1661,11 +1835,15 @@ fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registratio
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
         shutdown_started_tx.send(()).unwrap();
-        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Cancel, Duration::from_millis(250), move || {
-            scan_tx.send(()).unwrap()
-        })
+        shutdown_runtime.shutdown_blocking_with_hook(
+            ShutdownMode::Cancel,
+            Duration::from_millis(250),
+            move || scan_tx.send(()).unwrap(),
+        )
     });
-    shutdown_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    shutdown_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
     let scanned_before_registration = scan_rx.recv_timeout(Duration::from_millis(50)).is_ok();
 
     let (lock, changed) = &*reservation_gate;
@@ -1739,7 +1917,11 @@ fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
             std::future::ready(Ok(1))
         }
-        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
             let started = self.0.clone();
             async move {
                 started.send(()).unwrap();
@@ -1803,9 +1985,15 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
             std::future::ready(Ok(1))
         }
-        fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(
+            &mut self,
+            buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
             let _ = buffer;
-            std::future::ready(Err(magika::Error::IOError(std::io::Error::other("test read failed"))))
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
+                "test read failed",
+            ))))
         }
     }
 
@@ -1846,10 +2034,15 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
                 worker_gate_entered = true;
                 break;
             }
-            Err(mpsc::TryRecvError::Disconnected) => panic!("worker stopped before reaching its gate"),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("worker stopped before reaching its gate")
+            }
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        assert!(std::time::Instant::now() < deadline, "worker did not reach its gate");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not reach its gate"
+        );
         if matches!(future.as_mut().poll(&mut context), Poll::Ready(_)) {
             // The provider read error may publish the business result before
             // the worker's after-business gate sends its handshake.
@@ -1885,7 +2078,11 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
             std::future::ready(Ok(1))
         }
-        fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(
+            &mut self,
+            buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             buffer[0] = b'x';
             std::future::ready(Ok(()))
@@ -1929,7 +2126,11 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     let inference_gate_cleanup = ReleaseWorkerGate(Arc::clone(&inference_gate));
     let first_admission = runtime.reserve_for_provider(None, 8).unwrap();
     let first_runtime = Arc::clone(&runtime);
-    let mut first = Box::pin(async move { first_runtime.detect_bytes_admitted(first_admission, vec![b'a']).await });
+    let mut first = Box::pin(async move {
+        first_runtime
+            .detect_bytes_admitted(first_admission, vec![b'a'])
+            .await
+    });
     let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1948,7 +2149,12 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     let second_reads = Arc::clone(&reads);
     let mut second = Box::pin(async move {
         second_runtime
-            .detect_async_input_admitted_test(second_admission, CountedInput(second_reads), 8, map_provider_test_error)
+            .detect_async_input_admitted_test(
+                second_admission,
+                CountedInput(second_reads),
+                8,
+                map_provider_test_error,
+            )
             .await
     });
     assert!(second.as_mut().poll(&mut context).is_pending());
@@ -1967,7 +2173,10 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
             result.unwrap();
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "first request did not finish");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first request did not finish"
+        );
         std::thread::park_timeout(Duration::from_millis(1));
     }
     for state in states {
@@ -2043,11 +2252,13 @@ fn test_admitted_owned_bytes_return_worker_result() {
 
 #[test]
 fn test_shared_worker_classification_covers_success_and_panic() {
-    let (result, outcome) = execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
+    let (result, outcome) =
+        execute_classified(|| Ok::<_, MimeError>(Some("text/plain".to_owned())));
     assert!(matches!(result, Ok(Some(value)) if value == "text/plain"));
     assert_eq!(outcome, ChildOutcomeKind::Succeeded);
 
-    let (result, outcome): (qubit_mime::MimeResult<()>, _) = execute_classified(|| panic!("engine panic"));
+    let (result, outcome): (qubit_mime::MimeResult<()>, _) =
+        execute_classified(|| panic!("engine panic"));
     assert!(result.is_err());
     assert_eq!(outcome, ChildOutcomeKind::Panicked);
 }
@@ -2123,7 +2334,12 @@ fn test_worker_current_bridge_closed_on_success() {
 #[test]
 fn test_worker_current_bridge_closed_on_error() {
     assert_current_bridge_closes_for_engine(
-        Box::new(|_| Err(MimeError::detector_backend("magika", "injected inference error"))),
+        Box::new(|_| {
+            Err(MimeError::detector_backend(
+                "magika",
+                "injected inference error",
+            ))
+        }),
         ChildOutcomeKind::Failed,
     );
 }
@@ -2149,7 +2365,11 @@ fn test_drain_admitted_provider_completes_after_gate_closes() {
                 Ok(1)
             }
         }
-        fn read_at(&mut self, buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(
+            &mut self,
+            buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
             buffer[0] = b'x';
             std::future::ready(Ok(()))
         }
@@ -2174,9 +2394,13 @@ fn test_drain_admitted_provider_completes_after_gate_closes() {
     let (closed_tx, closed_rx) = mpsc::sync_channel(1);
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
-        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Drain, Duration::from_secs(2), move || {
-            closed_tx.send(()).unwrap();
-        })
+        shutdown_runtime.shutdown_blocking_with_hook(
+            ShutdownMode::Drain,
+            Duration::from_secs(2),
+            move || {
+                closed_tx.send(()).unwrap();
+            },
+        )
     });
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(runtime.reserve_for_provider(None, 1).is_err());
@@ -2241,9 +2465,13 @@ fn test_drain_real_managed_provider_route_completes_gated_read() {
     let (closed_tx, closed_rx) = mpsc::sync_channel(1);
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
-        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Drain, Duration::from_secs(2), move || {
-            closed_tx.send(()).unwrap();
-        })
+        shutdown_runtime.shutdown_blocking_with_hook(
+            ShutdownMode::Drain,
+            Duration::from_secs(2),
+            move || {
+                closed_tx.send(()).unwrap();
+            },
+        )
     });
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(runtime.reserve_for_provider(None, 1).is_err());
@@ -2292,9 +2520,13 @@ fn test_drain_reserved_content_can_submit_operation_after_gate_closes() {
     let (closed_tx, closed_rx) = mpsc::sync_channel(1);
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
-        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Drain, Duration::from_secs(2), move || {
-            closed_tx.send(()).unwrap();
-        })
+        shutdown_runtime.shutdown_blocking_with_hook(
+            ShutdownMode::Drain,
+            Duration::from_secs(2),
+            move || {
+                closed_tx.send(()).unwrap();
+            },
+        )
     });
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(runtime.reserve_for_provider(None, 1).is_err());
@@ -2318,7 +2550,11 @@ fn test_cancel_admitted_provider_does_not_submit_model_job() {
                 Ok(1)
             }
         }
-        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
             std::future::ready(Ok(()))
         }
     }
@@ -2351,9 +2587,13 @@ fn test_cancel_admitted_provider_does_not_submit_model_job() {
     let (closed_tx, closed_rx) = mpsc::sync_channel(1);
     let shutdown_runtime = Arc::clone(&runtime);
     let shutdown = std::thread::spawn(move || {
-        shutdown_runtime.shutdown_blocking_with_hook(ShutdownMode::Cancel, Duration::from_secs(2), move || {
-            closed_tx.send(()).unwrap();
-        })
+        shutdown_runtime.shutdown_blocking_with_hook(
+            ShutdownMode::Cancel,
+            Duration::from_secs(2),
+            move || {
+                closed_tx.send(()).unwrap();
+            },
+        )
     });
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     release_tx.send(()).unwrap();
@@ -2404,8 +2644,12 @@ fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
             Box::new(|| {}),
         ));
 
-        let first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
-        engine_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let first = runtime
+            .submit(None, WorkerInput::Bytes(vec![b'a'].into()))
+            .unwrap();
+        engine_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
 
         let (provider_started_tx, provider_started_rx) = mpsc::sync_channel(1);
         let (provider_result_tx, provider_result_rx) = mpsc::sync_channel(1);
@@ -2436,8 +2680,12 @@ fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
                 Ok::<_, MimeError>(())
             })
             .unwrap();
-        provider_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let provider_state = provider_state_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        provider_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        let provider_state = provider_state_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
 
         panic_tx.send(()).unwrap();
         let provider_result = provider_result_rx.recv_timeout(Duration::from_secs(2));
@@ -2449,7 +2697,9 @@ fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
         }
         let provider_result = match provider_result {
             Ok(result) => result,
-            Err(_) => provider_result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(_) => provider_result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap(),
         };
         let provider_error = provider_result.unwrap_err();
 
@@ -2512,8 +2762,12 @@ fn test_worker_panic_wakes_real_pending_provider_path_stages() {
             }),
             Box::new(|| {}),
         ));
-        let first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
-        engine_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let first = runtime
+            .submit(None, WorkerInput::Bytes(vec![b'a'].into()))
+            .unwrap();
+        engine_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
 
         let gate = Arc::new(TestAsyncReadGate::new());
         let _release_gate = ReleaseOnDrop(Arc::clone(&gate));
@@ -2613,7 +2867,9 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
         }),
         Box::new(|| {}),
     ));
-    let inference = runtime.submit(None, WorkerInput::Bytes(vec![b'x'].into())).unwrap();
+    let inference = runtime
+        .submit(None, WorkerInput::Bytes(vec![b'x'].into()))
+        .unwrap();
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let first = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(1));
     assert!(!first.worker_stopped);
@@ -2656,7 +2912,9 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
         Box::new(|| {}),
     ));
 
-    let _current = runtime.submit(None, WorkerInput::Bytes(vec![1].into())).unwrap();
+    let _current = runtime
+        .submit(None, WorkerInput::Bytes(vec![1].into()))
+        .unwrap();
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
     let _queued = runtime
@@ -2671,7 +2929,9 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
         read_started_tx.send(()).unwrap();
         waiting_bridge.read_at(0, &mut [0; 1])
     });
-    read_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    read_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
     let states = runtime.tasks.lock().unwrap().clone();
     assert_eq!(states.len(), 2);
 
@@ -2687,7 +2947,10 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
         states[0].inner.lock().unwrap().business,
         Some(ChildOutcomeKind::Panicked)
     );
-    assert_eq!(states[1].inner.lock().unwrap().business, Some(ChildOutcomeKind::Failed));
+    assert_eq!(
+        states[1].inner.lock().unwrap().business,
+        Some(ChildOutcomeKind::Failed)
+    );
     assert_eq!(
         states[1]
             .inner
@@ -2788,7 +3051,11 @@ fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
         .submit(None, WorkerInput::Bytes(vec![0; 5].into()))
         .expect("first job should fit the byte budget");
     started_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-    assert!(runtime.submit(None, WorkerInput::Bytes(vec![0; 5].into())).is_err());
+    assert!(
+        runtime
+            .submit(None, WorkerInput::Bytes(vec![0; 5].into()))
+            .is_err()
+    );
 
     let (lock, ready) = &*gate;
     *lock.lock().unwrap() = true;
@@ -2894,8 +3161,14 @@ fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
     assert!(third_admission.is_err());
     assert_eq!(7, reserved_while_worker_is_gated);
 
-    assert_eq!(Some("application/x-gated".to_owned()), block_on(first).unwrap());
-    assert_eq!(Some("application/x-gated".to_owned()), block_on(second).unwrap());
+    assert_eq!(
+        Some("application/x-gated".to_owned()),
+        block_on(first).unwrap()
+    );
+    assert_eq!(
+        Some("application/x-gated".to_owned()),
+        block_on(second).unwrap()
+    );
     assert!(first_state.wait_released_blocking(Duration::from_secs(2)));
     assert!(second_state.wait_released_blocking(Duration::from_secs(2)));
     assert_eq!(
@@ -2907,7 +3180,12 @@ fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
         second_state.inner.lock().unwrap().business
     );
     assert_eq!(0, runtime.snapshot().reserved_bytes);
-    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        0,
+        runtime
+            .active_requests
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
     assert!(
         runtime
             .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
@@ -2924,8 +3202,19 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
         Box::new(|| panic!("test worker exits before receiving")),
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !runtime.worker.lock().unwrap().handle.as_ref().unwrap().is_finished() {
-        assert!(std::time::Instant::now() < deadline, "test worker did not exit");
+    while !runtime
+        .worker
+        .lock()
+        .unwrap()
+        .handle
+        .as_ref()
+        .unwrap()
+        .is_finished()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test worker did not exit"
+        );
         std::thread::yield_now();
     }
     let admission = runtime.reserve_request(None, 4).unwrap();
@@ -2942,7 +3231,10 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
     let error = block_on(future).unwrap_err();
     assert!(error.to_string().contains("disconnected"));
     let inner = state.inner.lock().unwrap();
-    assert_eq!(Some(qubit_operation::ChildOutcomeKind::Failed), inner.business);
+    assert_eq!(
+        Some(qubit_operation::ChildOutcomeKind::Failed),
+        inner.business
+    );
     assert!(inner.released);
     drop(inner);
     assert_eq!(0, runtime.snapshot().reserved_bytes);
@@ -2950,6 +3242,63 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
     assert!(report.worker_panicked);
+}
+
+#[test]
+fn test_rejected_bytes_drop_before_worker_release_is_published() {
+    struct DropOrderProbe {
+        state: Arc<super::super::task_state::TaskState>,
+        observed_released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for DropOrderProbe {
+        fn drop(&mut self) {
+            let released = self.state.wait_released_blocking(Duration::ZERO);
+            self.observed_released
+                .store(released, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(|_| Ok(None)),
+        Box::new(|| panic!("test worker exits before receiving")),
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime
+        .worker
+        .lock()
+        .unwrap()
+        .handle
+        .as_ref()
+        .unwrap()
+        .is_finished()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test worker did not exit"
+        );
+        std::thread::yield_now();
+    }
+    let admission = runtime.reserve_request(None, 1).unwrap();
+    let state = Arc::clone(&admission.state);
+    let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let _result = runtime
+        .dispatch(
+            admission,
+            WorkerInput::Bytes(WorkerBytes::with_drop_probe(
+                vec![b'x'].into_boxed_slice(),
+                Box::new(DropOrderProbe {
+                    state: Arc::clone(&state),
+                    observed_released: Arc::clone(&observed_released),
+                }),
+            )),
+        )
+        .unwrap();
+    assert!(!observed_released.load(std::sync::atomic::Ordering::Acquire));
+    assert!(state.wait_released_blocking(Duration::ZERO));
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
 }
 
 #[test]
@@ -2961,7 +3310,15 @@ fn test_shutdown_timeout_observes_joinable_worker_while_admission_is_held() {
         Box::new(|| panic!("injected worker exit before first receive")),
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !runtime.worker.lock().unwrap().handle.as_ref().unwrap().is_finished() {
+    while !runtime
+        .worker
+        .lock()
+        .unwrap()
+        .handle
+        .as_ref()
+        .unwrap()
+        .is_finished()
+    {
         assert!(std::time::Instant::now() < deadline, "worker did not exit");
         std::thread::yield_now();
     }
@@ -2992,12 +3349,18 @@ fn test_shutdown_timeout_observes_joinable_worker_while_admission_is_held() {
         first.worker_stopped,
         "first timed-out shutdown must reap the exited worker"
     );
-    assert!(first.worker_panicked, "join must preserve the escaped panic fact");
+    assert!(
+        first.worker_panicked,
+        "join must preserve the escaped panic fact"
+    );
     assert!(
         second.worker_stopped,
         "concurrent shutdown must observe the completed join"
     );
-    assert!(second.worker_panicked, "concurrent shutdown must retain the panic fact");
+    assert!(
+        second.worker_panicked,
+        "concurrent shutdown must retain the panic fact"
+    );
 
     drop(admission);
     let resumed = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));

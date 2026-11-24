@@ -36,7 +36,10 @@ impl Response {
 /// * `response` - Request's one-shot response slot.
 /// * `result` - Exact bytes or the asynchronous read error.
 pub(super) fn set_response(response: &Response, result: io::Result<Vec<u8>>) {
-    let mut current = response.result.lock().unwrap_or_else(|error| error.into_inner());
+    let mut current = response
+        .result
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     if current.is_none() {
         *current = Some(result);
         response.ready.notify_all();
@@ -83,7 +86,14 @@ mod tests {
         set_response(&response, Err(std::io::Error::other("later response")));
 
         assert_eq!(
-            response.result.lock().unwrap().as_ref().unwrap().as_ref().unwrap(),
+            response
+                .result
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap(),
             &[1, 2]
         );
     }

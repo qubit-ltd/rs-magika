@@ -11,19 +11,36 @@ use std::task::Waker;
 
 use qubit_mime::MimeError;
 
+use super::super::super::worker_input::WorkerInput;
 use super::super::RequestAdmission;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::managed_runtime::request_admission_handoff) enum HandoffCloseReason {
+    RequestStopped,
+    Abandoned,
+}
+
+/// Admission and input moved together while the handoff is synchronized.
+pub(in crate::managed_runtime::request_admission_handoff) struct RequestAdmissionPayload {
+    pub(in crate::managed_runtime::request_admission_handoff) admission: RequestAdmission,
+    pub(in crate::managed_runtime::request_admission_handoff) input: Option<WorkerInput>,
+}
 
 /// State guarded while admissions and task wakers are exchanged.
 pub(in crate::managed_runtime::request_admission_handoff) struct HandoffState {
-    /// Request whose scope registration is still owned by the caller.
-    pub(in crate::managed_runtime::request_admission_handoff) caller_admission: Option<RequestAdmission>,
+    /// Admission and payload retained until their atomic handoff.
+    pub(in crate::managed_runtime::request_admission_handoff) caller_payload:
+        Option<RequestAdmissionPayload>,
     /// Admission or registration failure handed to the child body.
     pub(in crate::managed_runtime::request_admission_handoff) child_admission:
-        Option<Result<RequestAdmission, MimeError>>,
+        Option<Result<(RequestAdmission, Option<WorkerInput>), MimeError>>,
     /// Whether the submitted child body has entered its closure.
     pub(in crate::managed_runtime::request_admission_handoff) body_started: bool,
     /// Whether either party abandoned the handoff.
     pub(in crate::managed_runtime::request_admission_handoff) closed: bool,
+    /// First event that closed this handoff.
+    pub(in crate::managed_runtime::request_admission_handoff) close_reason:
+        Option<HandoffCloseReason>,
     /// Caller future waiting for the child body to start.
     pub(in crate::managed_runtime::request_admission_handoff) caller_waker: Option<Waker>,
     /// Child future waiting for the caller to finish registration.

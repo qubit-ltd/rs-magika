@@ -147,7 +147,11 @@ impl ManagedInferenceRuntime {
     /// The result is non-atomic and does not prove resources have been
     /// released; use operation settlement to observe release completion.
     pub fn snapshot(&self) -> ManagedInferenceSnapshot {
-        let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let mut admitted_not_started = 0;
         let mut worker_running = 0;
         let mut awaiting_release = 0;
@@ -169,7 +173,10 @@ impl ManagedInferenceRuntime {
             }
         }
         let (admission_closed, cancelling, faulted) = {
-            let gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+            let gate = self
+                .admission_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             (gate.closed, gate.cancelling, gate.faulted)
         };
         ManagedInferenceSnapshot {
@@ -208,7 +215,8 @@ impl ManagedInferenceRuntime {
             ));
         }
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(SERVICE_CAPACITY);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) =
+            mpsc::sync_channel(SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let tasks = Arc::new(Mutex::new(Vec::new()));
@@ -294,7 +302,11 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns an admission, size-limit, Magika, or worker error.
-    pub async fn detect_bytes(self: &Arc<Self>, scope: &OperationScope, bytes: Vec<u8>) -> MimeResult<Option<String>> {
+    pub async fn detect_bytes(
+        self: &Arc<Self>,
+        scope: &OperationScope,
+        bytes: Vec<u8>,
+    ) -> MimeResult<Option<String>> {
         let length = bytes.len();
         if length > self.max_in_flight_bytes() {
             return Err(MimeError::BufferLimitExceeded {
@@ -302,8 +314,11 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit_operation(Some(scope), WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))
-            .await
+        self.submit_operation(
+            Some(scope),
+            WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())),
+        )
+        .await
     }
 
     /// Classifies borrowed content through the worker without a parent scope.
@@ -323,9 +338,14 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns a size-limit, capacity, Magika, or worker error.
-    pub(crate) async fn detect_content_unmanaged(self: &Arc<Self>, content: &[u8]) -> MimeResult<Option<String>> {
-        self.detect_content_unmanaged_with_copy(content, |content| content.to_vec().into_boxed_slice())
-            .await
+    pub(crate) async fn detect_content_unmanaged(
+        self: &Arc<Self>,
+        content: &[u8],
+    ) -> MimeResult<Option<String>> {
+        self.detect_content_unmanaged_with_copy(content, |content| {
+            content.to_vec().into_boxed_slice()
+        })
+        .await
     }
 
     /// Reserves runtime capacity before copying borrowed content.
@@ -374,7 +394,10 @@ impl ManagedInferenceRuntime {
     ///
     /// Returns a size-limit, capacity, Magika, or worker error.
     #[cfg(test)]
-    pub(crate) async fn detect_bytes_unmanaged(self: &Arc<Self>, bytes: Vec<u8>) -> MimeResult<Option<String>> {
+    pub(crate) async fn detect_bytes_unmanaged(
+        self: &Arc<Self>,
+        bytes: Vec<u8>,
+    ) -> MimeResult<Option<String>> {
         let length = bytes.len();
         if length > self.max_in_flight_bytes() {
             return Err(MimeError::BufferLimitExceeded {
@@ -382,8 +405,11 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit_operation(None, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))
-            .await
+        self.submit_operation(
+            None,
+            WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())),
+        )
+        .await
     }
 
     /// Submits worker input through a public operation body.
@@ -413,7 +439,8 @@ impl ManagedInferenceRuntime {
         // The request scope is registered inside the accepted child body,
         // after submission succeeds and before that body dispatches work.
         let admission = self.reserve_request(None, byte_count)?;
-        self.submit_operation_admitted(parent, admission, input).await
+        self.submit_operation_admitted(parent, admission, input)
+            .await
     }
 
     /// Submits an operation using capacity acquired before input allocation.
@@ -467,19 +494,31 @@ impl ManagedInferenceRuntime {
         let cancellation_won = Arc::new(AtomicBool::new(false));
         let body_cancellation_won = Arc::clone(&cancellation_won);
         let state = Arc::clone(&admission.state);
-        let (request_handoff, mut request_handoff_guard, body_admission) = match parent {
+        let (request_handoff, mut request_handoff_guard, body_admission, body_input) = match parent
+        {
             Some(_) => {
-                let (handoff, guard) = super::request_admission_handoff::RequestAdmissionHandoff::new(admission);
-                (Some(handoff), Some(guard), None)
+                let (handoff, guard) =
+                    super::request_admission_handoff::RequestAdmissionHandoff::new_with_input(
+                        admission,
+                        Some(input),
+                    );
+                (Some(handoff), Some(guard), None, None)
             }
-            None => (None, None, Some(admission)),
+            None => (None, None, Some(admission), Some(input)),
         };
         let body_handoff = request_handoff.as_ref().map(Arc::clone);
         let body = move |scope| async move {
-            let admission = if let Some(handoff) = body_handoff {
+            let (admission, input) = if let Some(handoff) = body_handoff {
                 handoff.body_started();
                 match handoff.wait_for_child_admission(&scope).await {
-                    Some(Ok(admission)) => admission,
+                    Some(Ok((admission, Some(input)))) => (admission, input),
+                    Some(Ok((admission, None))) => {
+                        drop(admission);
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            "request admission handoff omitted worker input",
+                        ));
+                    }
                     Some(Err(error)) => return Err(error),
                     None => {
                         return Err(MimeError::detector_backend(
@@ -489,9 +528,13 @@ impl ManagedInferenceRuntime {
                     }
                 }
             } else {
-                let mut admission = body_admission.expect("scope-less request retains its admission");
+                let mut admission =
+                    body_admission.expect("scope-less request retains its admission");
                 admission.retain_in_scope(&scope)?;
-                admission
+                (
+                    admission,
+                    body_input.expect("scope-less request retains its worker input"),
+                )
             };
             let mut inference = Box::pin(runtime.dispatch(admission, input)?);
             let mut stop = Box::pin(scope.context().stop_requested());
@@ -503,7 +546,10 @@ impl ManagedInferenceRuntime {
                 if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
                     body_cancellation_won.store(true, std::sync::atomic::Ordering::Release);
                     state.request_stop();
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", state.provider_stop_reason())));
+                    return Poll::Ready(Err(MimeError::detector_backend(
+                        "magika",
+                        state.provider_stop_reason(),
+                    )));
                 }
                 Poll::Pending
             })
@@ -521,12 +567,21 @@ impl ManagedInferenceRuntime {
             Some(scope) => scope.manager().as_async().try_submit(options.clone(), body),
             None => self.service_group.as_async().try_submit(options, body),
         }
-        .map_err(|error| MimeError::detector_backend("magika", format!("operation submission failed: {error:?}")))?;
+        .map_err(|error| {
+            MimeError::detector_backend("magika", format!("operation submission failed: {error:?}"))
+        })?;
         let outcome_result = {
             let mut outcome = Box::pin(operation.wait_outcome());
-            match (parent, request_handoff.as_ref(), request_handoff_guard.as_mut()) {
+            match (
+                parent,
+                request_handoff.as_ref(),
+                request_handoff_guard.as_mut(),
+            ) {
                 (Some(parent), Some(handoff), Some(guard)) => {
-                    match handoff.register_on_parent(parent, guard, &mut outcome).await {
+                    match handoff
+                        .register_on_parent(parent, guard, &mut outcome)
+                        .await
+                    {
                         Some(outcome) => outcome,
                         None => outcome.await,
                     }
@@ -535,7 +590,10 @@ impl ManagedInferenceRuntime {
             }
         };
         let outcome = outcome_result.map_err(|error| {
-            MimeError::detector_backend("magika", format!("operation outcome unavailable: {error:?}"))
+            MimeError::detector_backend(
+                "magika",
+                format!("operation outcome unavailable: {error:?}"),
+            )
         })?;
         if parent.is_none() && !cancellation_won.load(std::sync::atomic::Ordering::Acquire) {
             // Legacy unmanaged calls have no public handle through which a
@@ -612,13 +670,17 @@ impl ManagedInferenceRuntime {
             let length = match length_result {
                 Ok(length) => length,
                 Err(error) => {
-                    admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
+                    admission.settle_error(MimeError::detector_backend(
+                        "magika",
+                        "provider length lookup failed",
+                    ));
                     return Err(map_error(error));
                 }
             };
             let bridge = AsyncSampleBridge::new(length);
             let driver = bridge.driver();
-            let inference = setup_runtime.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
+            let inference = setup_runtime
+                .dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
             let io_in_flight = input.io_in_flight();
             let guard = ProviderDriverGuard::new_with_io_status(input, driver, state, io_in_flight);
             Ok::<_, MimeError>((guard, inference))
@@ -627,10 +689,16 @@ impl ManagedInferenceRuntime {
         let (guard, inference) = poll_fn(|context| {
             if scope_stop.as_mut().poll(context).is_ready() {
                 stop_state.request_stop();
-                return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+                return Poll::Ready(Err(MimeError::detector_backend(
+                    "magika",
+                    "provider inference stopped",
+                )));
             }
             if request_stop.as_mut().poll(context).is_ready() {
-                return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+                return Poll::Ready(Err(MimeError::detector_backend(
+                    "magika",
+                    "provider inference stopped",
+                )));
             }
             setup.as_mut().poll(context)
         })
@@ -655,14 +723,18 @@ impl ManagedInferenceRuntime {
         let length = match length_result {
             Ok(length) => length,
             Err(error) => {
-                admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
+                admission.settle_error(MimeError::detector_backend(
+                    "magika",
+                    "provider length lookup failed",
+                ));
                 return Err(map_error(error));
             }
         };
         let bridge = AsyncSampleBridge::new(length);
         let driver = bridge.driver();
         let state = Arc::clone(&admission.state);
-        let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
+        let inference =
+            self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
         drive_async_input(ProviderDriverGuard::new(input, driver, state), inference).await
     }
 
@@ -686,7 +758,10 @@ impl ManagedInferenceRuntime {
         bytes: Vec<u8>,
     ) -> MimeResult<Option<String>> {
         let state = Arc::clone(&admission.state);
-        let inference = self.dispatch(admission, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?;
+        let inference = self.dispatch(
+            admission,
+            WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())),
+        )?;
         await_inference_or_runtime_stop(inference, state).await
     }
 
@@ -742,7 +817,11 @@ impl ManagedInferenceRuntime {
     ///
     /// Returns an error when capacity, scope registration, or worker admission
     /// rejects the request.
-    fn submit(&self, scope: Option<&OperationScope>, input: WorkerInput) -> MimeResult<InferenceFuture> {
+    fn submit(
+        &self,
+        scope: Option<&OperationScope>,
+        input: WorkerInput,
+    ) -> MimeResult<InferenceFuture> {
         let byte_count = match &input {
             WorkerInput::Bytes(bytes) => bytes.len(),
             WorkerInput::Bridge(_, byte_limit, _) => *byte_limit,
@@ -771,7 +850,11 @@ impl ManagedInferenceRuntime {
     ///
     /// Returns an error when shutdown has closed admission or a capacity or
     /// scope registration step fails.
-    fn reserve_request(&self, scope: Option<&OperationScope>, byte_count: usize) -> MimeResult<RequestAdmission> {
+    fn reserve_request(
+        &self,
+        scope: Option<&OperationScope>,
+        byte_count: usize,
+    ) -> MimeResult<RequestAdmission> {
         self.reserve_request_with_hook(scope, byte_count, || {})
     }
 
@@ -801,7 +884,10 @@ impl ManagedInferenceRuntime {
         byte_count: usize,
         after_service_reservation: impl FnOnce(),
     ) -> MimeResult<RequestAdmission> {
-        let admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+        let admission_gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if admission_gate.closed {
             let reason = if admission_gate.faulted {
                 "runtime admission is closed after worker fault"
@@ -812,12 +898,13 @@ impl ManagedInferenceRuntime {
             };
             return Err(MimeError::detector_backend("magika", reason));
         }
-        let byte_permit = self
-            .byte_budget
-            .try_acquire(byte_count)
-            .ok_or_else(|| MimeError::detector_backend("magika", "runtime in-flight byte budget is full"))?;
+        let byte_permit = self.byte_budget.try_acquire(byte_count).ok_or_else(|| {
+            MimeError::detector_backend("magika", "runtime in-flight byte budget is full")
+        })?;
         let admission = ServicePermit::try_acquire(&self.active_requests, SERVICE_CAPACITY)
-            .ok_or_else(|| MimeError::detector_backend("magika", "runtime service capacity is full"))?;
+            .ok_or_else(|| {
+                MimeError::detector_backend("magika", "runtime service capacity is full")
+            })?;
         after_service_reservation();
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let state = Arc::new(TaskState::new_registered(
@@ -852,8 +939,15 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns an error if the operation cannot be dispatched.
-    fn dispatch(&self, admission: RequestAdmission, input: WorkerInput) -> MimeResult<InferenceFuture> {
-        let admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+    fn dispatch(
+        &self,
+        admission: RequestAdmission,
+        input: WorkerInput,
+    ) -> MimeResult<InferenceFuture> {
+        let admission_gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if admission_gate.cancelling || admission_gate.faulted {
             let message = if admission_gate.faulted {
                 "runtime admission is closed after worker fault"
@@ -865,7 +959,10 @@ impl ManagedInferenceRuntime {
             return Err(MimeError::detector_backend("magika", message));
         }
         let sent_state = {
-            let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());
+            let sender = self
+                .sender
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             admission.state.mark_dispatched();
             match sender.as_ref() {
                 Some(sender) => admission.dispatch(input, sender)?,
@@ -928,12 +1025,19 @@ impl ManagedInferenceRuntime {
         after_task_scan: impl FnOnce(),
     ) -> ManagedInferenceShutdownReport {
         let deadline = std::time::Instant::now().checked_add(timeout);
-        let mut admission_gate = self.admission_gate.lock().unwrap_or_else(|error| error.into_inner());
+        let mut admission_gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         admission_gate.closed = true;
         admission_gate.cancelling |= mode == ShutdownMode::Cancel;
         drop(admission_gate);
         if mode == ShutdownMode::Cancel {
-            let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner()).clone();
+            let tasks = self
+                .tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
             for task in tasks {
                 task.request_stop();
             }
@@ -955,11 +1059,16 @@ impl ManagedInferenceRuntime {
                     worker_panicked,
                 };
             }
-            std::thread::sleep(remaining_timeout(deadline).min(std::time::Duration::from_millis(1)));
+            std::thread::sleep(
+                remaining_timeout(deadline).min(std::time::Duration::from_millis(1)),
+            );
         }
         let admission = self.admission_report();
         self.service_group.close_admission();
-        self.sender.lock().unwrap_or_else(|error| error.into_inner()).take();
+        self.sender
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         loop {
             let (worker_stopped, worker_panicked) = self.observe_finished_worker();
             if worker_stopped {
@@ -984,9 +1093,19 @@ impl ManagedInferenceRuntime {
     /// Joins the worker when its thread has already finished and returns the
     /// facts retained across concurrent and subsequent shutdown calls.
     fn observe_finished_worker(&self) -> (bool, bool) {
-        let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
-        if worker.handle.as_ref().is_some_and(|handle| handle.is_finished()) {
-            let handle = worker.handle.take().expect("finished worker handle is present");
+        let mut worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if worker
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            let handle = worker
+                .handle
+                .take()
+                .expect("finished worker handle is present");
             worker.panicked = handle.join().is_err();
             worker.stopped = true;
         }
@@ -1007,7 +1126,9 @@ impl ManagedInferenceRuntime {
                 unconfirmed_users: 0,
                 cleaning_resources: 0,
                 recovery_groups: 0,
-                service_resources: self.active_requests.load(std::sync::atomic::Ordering::Acquire),
+                service_resources: self
+                    .active_requests
+                    .load(std::sync::atomic::Ordering::Acquire),
             },
         }
     }
@@ -1019,8 +1140,14 @@ impl ManagedInferenceRuntime {
 ///
 /// * `tasks` - Runtime-local active request registry.
 /// * `faulted` - Request whose inference panic closed worker delivery.
-pub(super) fn notify_unqueued_provider_tasks(tasks: &Mutex<Vec<Arc<TaskState>>>, faulted: &Arc<TaskState>) {
-    let waiting = tasks.lock().unwrap_or_else(|error| error.into_inner()).clone();
+pub(super) fn notify_unqueued_provider_tasks(
+    tasks: &Mutex<Vec<Arc<TaskState>>>,
+    faulted: &Arc<TaskState>,
+) {
+    let waiting = tasks
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
     for task in waiting {
         if !Arc::ptr_eq(&task, faulted) && !task.was_dispatched() {
             task.request_stop();
@@ -1053,7 +1180,10 @@ async fn await_inference_or_runtime_stop(
             return Poll::Ready(result);
         }
         if stopped.as_mut().poll(context).is_ready() {
-            return Poll::Ready(Err(MimeError::detector_backend("magika", state.provider_stop_reason())));
+            return Poll::Ready(Err(MimeError::detector_backend(
+                "magika",
+                state.provider_stop_reason(),
+            )));
         }
         Poll::Pending
     })
@@ -1087,17 +1217,25 @@ fn remaining_timeout(deadline: Option<std::time::Instant>) -> std::time::Duratio
 /// The MIME mapping for a classified input, or `None` for unmapped types.
 fn infer_input(session: &mut Session, input: WorkerInput) -> MimeResult<Option<String>> {
     match input {
-        WorkerInput::Bytes(bytes) => match FeaturesOrRuled::extract_sync(&bytes[..]).map_err(map_magika_error)? {
-            FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
-            FeaturesOrRuled::Features(features) => identify_features(session, &features, map_magika_error),
-        },
+        WorkerInput::Bytes(bytes) => {
+            match FeaturesOrRuled::extract_sync(&bytes[..]).map_err(map_magika_error)? {
+                FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
+                FeaturesOrRuled::Features(features) => {
+                    identify_features(session, &features, map_magika_error)
+                }
+            }
+        }
         WorkerInput::Bridge(bridge, _, map_error) => {
             match FeaturesOrRuled::extract_sync(BridgeSyncInput(bridge)).map_err(map_error)? {
                 FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
-                FeaturesOrRuled::Features(features) => identify_features(session, &features, map_error),
+                FeaturesOrRuled::Features(features) => {
+                    identify_features(session, &features, map_error)
+                }
             }
         }
-        WorkerInput::Features(features, map_error) => identify_features(session, &features, map_error),
+        WorkerInput::Features(features, map_error) => {
+            identify_features(session, &features, map_error)
+        }
     }
 }
 
@@ -1138,7 +1276,10 @@ fn identify_features(
 ///
 /// The worker's MIME inference result.
 #[cfg(test)]
-async fn drive_async_input<I>(guard: ProviderDriverGuard<I>, inference: InferenceFuture) -> MimeResult<Option<String>>
+async fn drive_async_input<I>(
+    guard: ProviderDriverGuard<I>,
+    inference: InferenceFuture,
+) -> MimeResult<Option<String>>
 where
     I: AsyncInput,
 {
@@ -1181,14 +1322,18 @@ where
     let mut scope_stop = Box::pin(scope_stop);
     let mut request_stop = Box::pin(request_stop);
     loop {
-        let next_request = guard.driver.as_ref().expect("driver remains owned").next_request();
+        let next_request = guard
+            .driver
+            .as_ref()
+            .expect("driver remains owned")
+            .next_request();
         let mut next_request = Box::pin(next_request);
         let event = poll_fn(|cx| {
-            if scope_stop.as_mut().poll(cx).is_ready() {
-                return Poll::Ready(DriveEvent::Stopped);
-            }
             if let Poll::Ready(result) = inference.as_mut().poll(cx) {
                 return Poll::Ready(DriveEvent::Result(result));
+            }
+            if scope_stop.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(DriveEvent::Stopped);
             }
             if request_stop.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(DriveEvent::Stopped);
@@ -1203,13 +1348,31 @@ where
             DriveEvent::Result(result) => return result,
             DriveEvent::Stopped => {
                 guard.state.request_stop();
-                return Err(MimeError::detector_backend("magika", "provider inference stopped"));
+                return Err(MimeError::detector_backend(
+                    "magika",
+                    "provider inference stopped",
+                ));
             }
-            DriveEvent::Request(None) => return inference.await,
+            DriveEvent::Request(None) => {
+                guard.state.request_stop();
+                return finish_after_driver_close(
+                    &mut inference,
+                    &mut scope_stop,
+                    &mut request_stop,
+                    guard.state.provider_stop_reason(),
+                )
+                .await;
+            }
             DriveEvent::Request(Some(request)) => {
                 if !guard.state.try_start_provider_operation() {
                     guard.state.request_stop();
-                    return inference.await;
+                    return finish_after_driver_close(
+                        &mut inference,
+                        &mut scope_stop,
+                        &mut request_stop,
+                        guard.state.provider_stop_reason(),
+                    )
+                    .await;
                 }
                 let mut buffer = vec![0; request.len()];
                 let mut read = Box::pin(
@@ -1219,13 +1382,19 @@ where
                         .expect("input remains owned")
                         .read_at(&mut buffer, request.offset()),
                 );
-                let mut closed = Box::pin(guard.driver.as_ref().expect("driver remains owned").closed());
+                let mut closed = Box::pin(
+                    guard
+                        .driver
+                        .as_ref()
+                        .expect("driver remains owned")
+                        .closed(),
+                );
                 let read_result = poll_fn(|cx| {
-                    if scope_stop.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(ProviderReadEvent::Stopped);
-                    }
                     if let Poll::Ready(result) = inference.as_mut().poll(cx) {
                         return Poll::Ready(ProviderReadEvent::Result(result));
+                    }
+                    if scope_stop.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(ProviderReadEvent::Stopped);
                     }
                     if request_stop.as_mut().poll(cx).is_ready() {
                         return Poll::Ready(ProviderReadEvent::Stopped);
@@ -1234,18 +1403,21 @@ where
                         return Poll::Ready(ProviderReadEvent::Closed);
                     }
                     if guard.io_in_flight.is_none() {
-                        guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
+                        guard
+                            .unconfirmed_io
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     match read.as_mut().poll(cx) {
                         Poll::Ready(result) => {
-                            guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
+                            guard
+                                .unconfirmed_io
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
                             Poll::Ready(ProviderReadEvent::Read(result))
                         }
                         Poll::Pending => {
-                            let pending = guard
-                                .io_in_flight
-                                .as_ref()
-                                .is_none_or(|status| status.load(std::sync::atomic::Ordering::Acquire));
+                            let pending = guard.io_in_flight.as_ref().is_none_or(|status| {
+                                status.load(std::sync::atomic::Ordering::Acquire)
+                            });
                             guard
                                 .unconfirmed_io
                                 .store(pending, std::sync::atomic::Ordering::Relaxed);
@@ -1260,14 +1432,24 @@ where
                         guard.state.request_stop();
                         drop(read);
                         drop(closed);
-                        return Err(MimeError::detector_backend("magika", "provider inference stopped"));
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            "provider inference stopped",
+                        ));
                     }
                     ProviderReadEvent::Closed => {
                         // The read future was dropped on bridge close. rs-fs
                         // does not expose whether provider-native work completed.
                         drop(read);
                         drop(closed);
-                        return inference.await;
+                        guard.state.request_stop();
+                        return finish_after_driver_close(
+                            &mut inference,
+                            &mut scope_stop,
+                            &mut request_stop,
+                            guard.state.provider_stop_reason(),
+                        )
+                        .await;
                     }
                     ProviderReadEvent::Read(result) => result,
                 };
@@ -1282,6 +1464,31 @@ where
             }
         }
     }
+}
+
+/// Finishes a bridge closed path while observing published outcome and stops.
+/// The worker outcome is polled first so a result already published at close
+/// remains observable without polling the provider again.
+async fn finish_after_driver_close<S, R>(
+    inference: &mut std::pin::Pin<Box<InferenceFuture>>,
+    scope_stop: &mut std::pin::Pin<Box<S>>,
+    request_stop: &mut std::pin::Pin<Box<R>>,
+    stop_reason: &'static str,
+) -> MimeResult<Option<String>>
+where
+    S: Future,
+    R: Future,
+{
+    poll_fn(|cx| {
+        if let Poll::Ready(result) = inference.as_mut().poll(cx) {
+            return Poll::Ready(result);
+        }
+        if scope_stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(MimeError::detector_backend("magika", stop_reason)));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 #[cfg(test)]

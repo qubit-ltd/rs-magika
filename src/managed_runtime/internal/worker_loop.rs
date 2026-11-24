@@ -34,12 +34,17 @@ use super::WorkerInput;
 ///
 /// The closure result and a lifecycle outcome that distinguishes success,
 /// failure, and panic.
-pub(super) fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (MimeResult<T>, ChildOutcomeKind) {
+pub(super) fn execute_classified<T>(
+    work: impl FnOnce() -> MimeResult<T>,
+) -> (MimeResult<T>, ChildOutcomeKind) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok(Ok(value)) => (Ok(value), ChildOutcomeKind::Succeeded),
         Ok(Err(error)) => (Err(error), ChildOutcomeKind::Failed),
         Err(_) => (
-            Err(MimeError::detector_backend("magika", "inference worker panicked")),
+            Err(MimeError::detector_backend(
+                "magika",
+                "inference worker panicked",
+            )),
             ChildOutcomeKind::Panicked,
         ),
     }
@@ -62,7 +67,15 @@ pub(super) fn run_worker(
     after_business: impl Fn(),
     before_exit: impl FnOnce(),
 ) {
-    run_worker_with_before_first_recv(receiver, gate, infer, || {}, on_fault, after_business, before_exit);
+    run_worker_with_before_first_recv(
+        receiver,
+        gate,
+        infer,
+        || {},
+        on_fault,
+        after_business,
+        before_exit,
+    );
 }
 
 /// Runs the worker with an optional deterministic first-receive gate.
@@ -87,7 +100,11 @@ pub(super) fn run_worker_with_before_first_recv(
 ) {
     before_first_recv();
     while let Ok(job) = receiver.recv() {
-        let Job { input, state, owner } = job;
+        let Job {
+            input,
+            state,
+            owner,
+        } = job;
         let bridge = match &input {
             WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
             _ => None,
@@ -143,7 +160,11 @@ pub(super) fn run_worker_with_before_first_recv(
 /// * `reason` - Backend error message reported to queued operations.
 fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
     for job in receiver.try_iter() {
-        let Job { input, state, owner } = job;
+        let Job {
+            input,
+            state,
+            owner,
+        } = job;
         let bridge = match &input {
             WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
             _ => None,
