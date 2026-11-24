@@ -61,7 +61,7 @@ There is no verified downstream SLO, workload mix, or memory budget in this task
 
 ## MAG-R11 workload evidence audit
 
-Date: 2026-11-23
+Date: 2026-11-24
 
 Searched the local source-layout root (`/data/working/qubit/rust-common`) across 60 `rs-*` repositories. Manifest search found no downstream `qubit-magika` consumer; the Magika crate itself is the sole manifest hit. Documentation search found Magika references in eight repositories: `rs-config`, `rs-fs`, `rs-fs-local`, `rs-io`, `rs-local-files`, `rs-magika`, `rs-mime`, and `rs-spi`. Version, CI, and planning references were excluded when assessing workload evidence. The relevant reviewed evidence was:
 
@@ -72,9 +72,7 @@ Searched the local source-layout root (`/data/working/qubit/rust-common`) across
 
 The 2026-11-17 experiment above remains useful as a mechanism check: it used one deliberately gated provider request and a small Python byte request, with 30 warm rounds per topology and injected delays of 0, 10, and 100 ms. Those values are test controls, not observed production delays or acceptance thresholds. It reports completion p50/p95 and admission/refusal counts, but not cold startup, peak RSS, CPU, or production request distributions. It therefore cannot establish whether either topology meets a real service objective.
 
-No representative request mix, target concurrency, tail-latency SLO, or memory cap was found. Accordingly, the ignored experiment was not rerun as a workload comparison; the available evidence does not justify an architectural change, so retain the shared runtime architecture. A future decision needs an identified consumer, its mixed request distribution and concurrency, explicit p95/p99 and memory limits, then cold-start time, peak RSS, success/refusal rate, and warm p50/p95 measurements for both topologies on the same machine and sample set.
-
-The concrete MAG-R11 evidence gap is consumer-side workload data: no downstream manifest identifies a `qubit-magika` deployment, and the reviewed MIME integration guides, compatibility references, fixture, and planning documents contain no measured request distribution, target concurrency, p95/p99 objective, or process-memory budget. The historical gated test supplies controlled delay values and one small Python input only; it has no startup, peak-RSS, or CPU measurements. These missing inputs prevent a representative shared-versus-independent runtime comparison. Keep the single-worker design until an identified consumer supplies those values; do not use the historical p50/p95 table as a production SLO result.
+No representative request mix, target concurrency, tail-latency SLO, or memory cap was found. The reviewed consumer and compatibility materials also provide no per-poll segment distribution or executor-fairness measurements; deterministic gate tests establish ordering and cancellation behavior, not fairness under representative load. Accordingly, the ignored experiment was not rerun as a workload comparison. The available evidence does not justify an architectural change, so retain the shared runtime architecture. A future decision needs an identified consumer, its mixed request distribution and concurrency, explicit p95/p99 and memory limits, then cold-start time, peak RSS, success/refusal rate, warm p50/p95 measurements, and small-segment per-poll work or fairness measurements for both topologies on the same machine and sample set. Do not use the historical p50/p95 table as a production SLO result.
 
 Evidence search commands (read-only):
 

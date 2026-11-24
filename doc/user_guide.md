@@ -68,6 +68,15 @@ Python 3's `renamex_np` (default executable `python3`; override it with
 missing checkout. Preparing an existing valid worktree and running strict
 `--check-locked` validation do not require a publisher.
 
+The registry versions required by the examples were not all available on
+2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
+0.21.1, `qubit-fs` 0.3.3, and `qubit-operation` 0.3.1, while these examples
+require 0.18, 0.22, 0.4, and 0.3.2 respectively. The README registry-only
+check also failed to resolve `qubit-magika = "^0.18"`. Until those releases
+are available, use the fixed source-checkout procedure above and compile the
+guide examples with `python3 .infra/check-managed-guide-examples.py` from the
+source checkout.
+
 ## Scenario
 
 An application accepts an uploaded Python script and needs a content-derived
@@ -79,6 +88,14 @@ filename.
 ## Installation and Minimal Configuration
 
 Add the crate versions used by this release:
+
+As of 2026-11-24, crates.io search returned `qubit-magika` 0.16.0,
+`qubit-mime` 0.21.1, `qubit-fs` 0.3.3, and `qubit-operation` 0.3.1; this
+guide needs 0.18, 0.22, 0.4, and 0.3.2. The README registry-only check still
+fails to resolve `qubit-magika = "^0.18"`. Until the required releases are
+available, follow the fixed source-checkout procedure in
+[Conceptual Model](#conceptual-model) and run
+`python3 .infra/check-managed-guide-examples.py` from the source checkout.
 
 ```toml
 [dependencies]
@@ -250,6 +267,9 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 ```
 <!-- managed-dependencies-end -->
 
+If these registry versions are not available, use the fixed source-checkout
+procedure in [Conceptual Model](#conceptual-model) before compiling this block.
+
 Create the runtime during application startup and register a configured
 provider in an isolated registry explicitly:
 
@@ -293,6 +313,10 @@ application-owned runtime.
 To use an ONNX Runtime library supplied by the application, disable the bundled
 binary and enable `ort`'s dynamic loader. These declarations are copy-pasteable
 and keep the versions aligned with `qubit-magika` 0.18:
+
+If the registry prerequisites are not yet available, use the fixed
+source-checkout procedure in [Conceptual Model](#conceptual-model); the
+managed and custom ONNX dependency blocks use the same procedure.
 
 ```toml
 [dependencies]

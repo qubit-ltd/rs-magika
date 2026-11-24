@@ -30,7 +30,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。发布完成前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并在本源码仓库运行 `python3 .infra/check-readme-examples.py`。`python3 .infra/check-readme-examples.py --registry-only` 是干净 registry 验收门禁；所需版本可解析后即可通过。给该命令增加 `--run-example` 会通过 registry 版本运行当前的 `examples/basic.rs`；此 opt-in 会下载并运行 bundled ONNX Runtime，要求当前原生环境受支持。
+此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1；registry-only README 检查仍无法解析 `qubit-magika = "^0.18"`。发布完成前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并在本源码仓库运行 `python3 .infra/check-readme-examples.py`。`python3 .infra/check-readme-examples.py --registry-only` 是干净 registry 验收门禁；所需版本可解析后即可通过。给该命令增加 `--run-example` 会通过 registry 版本运行当前的 `examples/basic.rs`；此 opt-in 会下载并运行 bundled ONNX Runtime，要求当前原生环境受支持。
 
 ## 快速开始
 
@@ -129,7 +129,7 @@ runtime `Cancel` 可能先返回停止错误，worker 仍会保留输入和许�
 `use qubit_magika as _;` 引用 crate，避免链接器移除提交项。
 
 在源码仓库中准备缺少的本地依赖 checkout 时，请使用
-[准备脚本](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/prepare-local-path-dependencies.sh)。
+[准备脚本](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)。
 `--check-locked` 只检查现有兄弟仓库是否处于固定提交且工作区干净；发现缺失、提交不符或工作区有改动时会报错，
 但不会修复。准备操作不会改动现有 Git checkout，因此需先手动将漂移的 checkout 恢复到固定提交再检查。
 常规和动态 fixture bootstrap 模式共用同一个准备 helper。发布新建的缺失 checkout 需要独占目标路径的重命名：

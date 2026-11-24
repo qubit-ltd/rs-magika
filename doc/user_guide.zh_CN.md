@@ -62,6 +62,12 @@ Provider 读取，但不接收 parent operation scope。应用若要把 Provider
 
 在依赖中加入当前版本：
 
+截至 2026-11-24，crates.io 搜索返回 `qubit-magika` 0.16.0、`qubit-mime`
+0.21.1、`qubit-fs` 0.3.3 和 `qubit-operation` 0.3.1；本手册需要的版本分别为
+0.18、0.22、0.4 和 0.3.2。README 的 registry-only 检查仍无法解析
+`qubit-magika = "^0.18"`。所需版本发布前，请按[概念模型](#概念模型)中的固定源码
+checkout 步骤操作，并在源码仓库运行 `python3 .infra/check-managed-guide-examples.py`。
+
 ```toml
 [dependencies]
 qubit-mime = "0.22"
@@ -197,6 +203,8 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 ```
 <!-- managed-dependencies-end -->
 
+若这些 registry 版本尚不可用，请先按[概念模型](#概念模型)中的固定源码 checkout 步骤准备依赖，再编译此代码块。
+
 在应用启动时创建 runtime，并将已配置的 Provider 显式注册到独立 registry：
 
 <!-- provider-runtime-example-start -->
@@ -251,6 +259,9 @@ provider-path 检测调用它。path backend 将候选 MIME type 返回给高层
 
 如果应用自行提供 ONNX Runtime，可以关闭 bundled binary，并启用 `ort` 的动态加载器。
 下面的声明可以直接复制，并与 `qubit-magika 0.18` 版本保持一致：
+
+若 registry 前置版本尚未发布，请按[概念模型](#概念模型)中的固定源码 checkout 步骤操作；
+受管依赖块和自定义 ONNX 依赖块共用该步骤。
 
 ```toml
 [dependencies]

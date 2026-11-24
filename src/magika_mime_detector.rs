@@ -467,7 +467,11 @@ impl MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// Reports whether all admission and worker resources have stopped.
+    /// Reports admission and worker termination facts. `worker_stopped` only
+    /// confirms that the worker joined; it can be true while an unconfirmed
+    /// provider request still retains capacity. `false` means the worker has
+    /// not been confirmed joined, and a later call can continue observing it.
+    /// Inspect the admission report separately for request resource settlement.
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,
@@ -736,9 +740,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// not bound all process memory, provider buffers, or transient
     /// allocations. Successful return reports the hook's MIME result; the
     /// hook has no public operation handle or separate settlement result.
-    /// Its internal unmanaged path waits for resource settlement on
-    /// ordinary completion, but runtime cancellation may win the result
-    /// race and return before release.
+    /// Ordinary completion waits for the internal operation to settle, but
+    /// runtime cancellation may return its stop error before the worker
+    /// releases its input and byte capacity.
     ///
     /// # Parameters
     ///
