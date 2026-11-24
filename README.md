@@ -119,9 +119,10 @@ each managed request, and drain the runtime during application shutdown.
 The returned detection result is the business outcome. The scope observer
 reports settlement separately: a bounded wait may return `Pending(snapshot)`;
 it may also return terminal `Ready(report)` while `all_released()` is false.
-That negative report can describe resources owned elsewhere in the scope. Magika
-retains its own capacity when this request's Provider I/O completion is
-unconfirmed. The local future, reader, and driver still drop when the request is
+That negative report can describe resources owned elsewhere in the scope and
+does not by itself show that Magika retains capacity. Magika keeps capacity
+while this request's Provider I/O completion is unconfirmed or a worker may
+still access request resources. The local future, reader, and driver still drop when the request is
 stopped; this does not confirm that native or remote I/O completed. Built-in
 cleanup has no way to receive completion evidence for discarded provider I/O,
 and retrying its current policy cannot release that capacity. A

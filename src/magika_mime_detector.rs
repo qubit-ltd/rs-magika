@@ -197,7 +197,10 @@ impl MagikaMimeDetector {
     /// The returned future reports the child business outcome; the parent
     /// scope observer separately reports settlement. A bounded observation
     /// can return `Pending(snapshot)` or terminal `Ready(report)` with
-    /// `all_released() == false`; in the latter case capacity remains reserved.
+    /// `all_released() == false`. A negative report can concern other scope
+    /// resources and does not by itself show that this request retains
+    /// capacity. This request retains capacity while provider I/O completion
+    /// is unconfirmed or the worker may still access request resources.
     /// Built-in cleanup has no input for completion evidence from discarded
     /// provider I/O, so retrying its current policy cannot release that
     /// capacity. A `RecoveryHandle` can inspect the state, retry the policy, or

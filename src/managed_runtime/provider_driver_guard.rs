@@ -16,8 +16,10 @@ use crate::managed_runtime::task_state::TaskState;
 
 /// Keeps the provider input and bridge driver alive until sampling has ended.
 ///
-/// On drop, the provider input and bridge driver are destroyed locally and
-/// driver completion is published. If provider I/O was still pending, its
+/// The guard can be created after the bridge driver is created and before
+/// dispatching the bridge to the worker. On drop, the provider input and
+/// bridge driver are destroyed locally and driver completion is always
+/// published. If provider I/O was still pending, its
 /// native completion remains unknown, so request capacity stays reserved even
 /// though the local future, input, and driver have been dropped.
 ///
@@ -38,19 +40,19 @@ pub(super) struct ProviderDriverGuard<I> {
 }
 
 impl<I> ProviderDriverGuard<I> {
-    /// Creates a guard for a successfully dispatched provider input.
+    /// Creates a guard for a provider input and its bridge driver.
     ///
     /// # Parameters
     ///
     /// * `input` - Provider input used to fulfill worker read requests.
-    /// * `driver` - Bridge driver returned by the successful dispatch.
+    /// * `driver` - Driver created from the bridge, which may precede dispatch.
     /// * `state` - Request state whose driver completion is reported on drop.
     ///
     /// # Returns
     ///
     /// A guard that owns the input and driver until sampling ends, then drops
-    /// both locally before publishing driver completion. Unconfirmed provider
-    /// I/O is reported separately and keeps request capacity reserved.
+    /// both locally and always publishes driver completion. Unconfirmed
+    /// provider I/O is reported separately and keeps request capacity reserved.
     #[cfg(test)]
     pub(super) fn new(input: I, driver: AsyncSampleDriver, state: Arc<TaskState>) -> Self {
         Self::new_with_io_status(input, driver, state, None)
@@ -65,7 +67,7 @@ impl<I> ProviderDriverGuard<I> {
     /// # Parameters
     ///
     /// * `input` - Provider input used to fulfill worker read requests.
-    /// * `driver` - Bridge driver returned by the successful dispatch.
+    /// * `driver` - Driver created from the bridge, which may precede dispatch.
     /// * `state` - Request state notified when the bridge driver completes.
     /// * `io_in_flight` - Optional marker for actual I/O status reported by an
     ///   aggregate reader.
@@ -107,7 +109,8 @@ impl<I> Drop for ProviderDriverGuard<I> {
         }
         // The read future is scoped inside the driver loop and drops before
         // this owner. Drop the input before closing the bridge, then publish
-        // completion only when no provider-native work is unconfirmed.
+        // completion regardless of whether provider-native work is confirmed;
+        // the separate unconfirmed-I/O fact controls capacity release.
         drop(self.input.take());
         drop(self.driver.take());
         if self.unconfirmed_io.load(Ordering::Relaxed) {
