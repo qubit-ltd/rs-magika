@@ -20,6 +20,7 @@ from _local_package_identities import (
     run_self_tests as run_local_package_identity_self_tests,
     validate_local_package_identities,
 )
+from _dynamic_loader_feature_policy import violations as dynamic_ort_feature_violations
 
 
 
@@ -169,10 +170,11 @@ def validate_and_rebase_manifest(
         if not isinstance(magika, dict) or magika.get("default-features") is not False:
             raise ValueError(f"{guide_name}: dynamic manifest must disable Magika default features")
         features = ort.get("features", []) if isinstance(ort, dict) else []
-        if "load-dynamic" not in features:
-            raise ValueError(f"{guide_name}: dynamic manifest must enable ort/load-dynamic")
-        if "bundled-onnxruntime" in magika.get("features", []) or "download-binaries" in features:
-            raise ValueError(f"{guide_name}: dynamic manifest must not enable bundled runtime downloads")
+        violations = dynamic_ort_feature_violations(features)
+        if violations:
+            raise ValueError(f"{guide_name}: dynamic manifest ORT features {sorted(features)}: {'; '.join(violations)}")
+        if "bundled-onnxruntime" in magika.get("features", []):
+            raise ValueError(f"{guide_name}: dynamic manifest Magika features {magika.get('features', [])}: must not enable bundled-onnxruntime")
     if tomllib.loads(manifest_text(rebased, add_package=False, add_workspace=False)) != rebased:
         raise ValueError(f"{guide_name}: TOML serialization changed the rebased manifest structure")
     return rebased
@@ -265,16 +267,27 @@ def validate_feature_graph(metadata: dict[str, object], variant: str, guide: str
 
     magika = one("qubit-magika")
     ort = one("ort")
+    def require(feature: str, actual: set[str], package: str) -> None:
+        if feature not in actual:
+            raise ValueError(f"{guide}: {variant} variant {package} actual features {sorted(actual)}: missing {feature}")
+
+    def exclude(feature: str, actual: set[str], package: str) -> None:
+        if feature in actual:
+            raise ValueError(f"{guide}: {variant} variant {package} actual features {sorted(actual)}: forbidden {feature}")
+
     if variant in ("default", "inventory"):
-        if "bundled-onnxruntime" not in magika or "download-binaries" not in ort:
-            raise ValueError(f"{guide}: {variant} variant must enable Magika bundled and ort/download-binaries")
-    if variant == "inventory" and "inventory" not in magika:
-        raise ValueError(f"{guide}: inventory variant did not enable qubit-magika/inventory")
+        require("bundled-onnxruntime", magika, "qubit-magika")
+        require("download-binaries", ort, "ort")
+        exclude("load-dynamic", ort, "ort")
+    if variant == "default":
+        exclude("inventory", magika, "qubit-magika")
+    if variant == "inventory":
+        require("inventory", magika, "qubit-magika")
     if variant == "dynamic":
-        if "load-dynamic" not in ort:
-            raise ValueError(f"{guide}: dynamic variant did not enable ort/load-dynamic")
-        if "bundled-onnxruntime" in magika or "download-binaries" in ort:
-            raise ValueError(f"{guide}: dynamic variant enables a bundled runtime download")
+        policy_violations = dynamic_ort_feature_violations(ort)
+        if policy_violations:
+            raise ValueError(f"{guide}: dynamic variant ort actual features {sorted(ort)}: {'; '.join(policy_violations)}")
+        exclude("bundled-onnxruntime", magika, "qubit-magika")
 
 
 def inventory_dependency(markdown: str, guide_name: str) -> dict[str, object]:
@@ -408,6 +421,12 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
     )
     sibling_manifest = tomllib.loads(sibling_consumer)
     assert sibling_manifest["patch"]["crates-io"]["qubit-operation"]["path"] == "layout/rs-operation"
+    mime_dependency = {"version": "0.22", "default-features": False, "features": ["inventory"]}
+    mime_consumer = tomllib.loads(consumer_manifest(
+        {"qubit-mime": mime_dependency}, Path("layout/rs-magika"), Path("layout/rs-operation")
+    ))["dependencies"]["qubit-mime"]
+    assert {key: value for key, value in mime_consumer.items() if key != "path"} == mime_dependency
+    assert mime_consumer["path"] == "layout/rs-mime"
     validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
     try:
         validate_current_settlement_names(guide, "released()")
@@ -562,14 +581,16 @@ qubit-operation = { path = "../rs-operation" }
     }
     assert inventory_missing_fields["dependencies"]["qubit-mime"] == parsed_application["dependencies"]["qubit-mime"]
     assert inventory_missing_fields["patch"] == parsed_application["patch"]
-    dynamic_bad = json.loads(json.dumps(dynamic_manifest))
-    dynamic_bad["dependencies"]["ort"]["features"].append("download-binaries")
-    try:
-        validate_and_rebase_manifest(dynamic_bad, guide, Path("/layout/rs-magika"), dynamic=True)
-    except ValueError as error:
-        assert "must not enable bundled runtime downloads" in str(error)
-    else:
-        raise AssertionError("accepted dynamic manifest with bundled download feature")
+    for forbidden in ("download-binaries", "copy-dylibs", "download-binaries-check", "tls-rustls", "tls-rustls-no-provider"):
+        dynamic_bad = json.loads(json.dumps(dynamic_manifest))
+        dynamic_bad["dependencies"]["ort"]["features"].append(forbidden)
+        try:
+            validate_and_rebase_manifest(dynamic_bad, guide, Path("/layout/rs-magika"), dynamic=True)
+        except ValueError as error:
+            assert forbidden in str(error), str(error)
+            assert guide in str(error) and "dynamic" in str(error)
+        else:
+            raise AssertionError(f"accepted dynamic manifest with forbidden ORT feature {forbidden}")
     for invalid in (
         marked.replace(APPLICATION_START, ""),
         marked + "\n" + APPLICATION_START,
@@ -613,9 +634,32 @@ qubit-operation = { path = "../rs-operation" }
             try:
                 validate_feature_graph(unbundled, variant, guide)
             except ValueError as error:
-                assert "must enable Magika bundled" in str(error)
+                assert guide in str(error) and variant in str(error)
+                assert "actual features" in str(error) and "missing bundled-onnxruntime" in str(error)
             else:
                 raise AssertionError(f"accepted {variant} graph without bundled runtime")
+    for variant, magika_features, ort_features, expected_message in (
+        ("default", ["bundled-onnxruntime", "inventory"], ["download-binaries"], "forbidden inventory"),
+        ("default", ["bundled-onnxruntime"], ["download-binaries", "load-dynamic"], "forbidden load-dynamic"),
+        ("inventory", ["bundled-onnxruntime", "inventory"], ["download-binaries", "load-dynamic"], "forbidden load-dynamic"),
+    ):
+        graph = {
+            "packages": [
+                {"id": "path+magika#0.18.0", "name": "qubit-magika"},
+                {"id": "registry+ort#2.0.0", "name": "ort"},
+            ],
+            "resolve": {"nodes": [
+                {"id": "path+magika#0.18.0", "features": magika_features},
+                {"id": "registry+ort#2.0.0", "features": ort_features},
+            ]},
+        }
+        try:
+            validate_feature_graph(graph, variant, guide)
+        except ValueError as error:
+            assert guide in str(error) and variant in str(error) and expected_message in str(error), str(error)
+            assert "actual features" in str(error), str(error)
+        else:
+            raise AssertionError(f"accepted invalid {variant} graph: {magika_features}, {ort_features}")
     inventory_without_feature = json.loads(json.dumps({
         "packages": [
             {"id": "path+magika#0.18.0", "name": "qubit-magika"},
@@ -629,9 +673,28 @@ qubit-operation = { path = "../rs-operation" }
     try:
         validate_feature_graph(inventory_without_feature, "inventory", guide)
     except ValueError as error:
-        assert "did not enable qubit-magika/inventory" in str(error)
+        assert guide in str(error) and "inventory" in str(error)
+        assert "actual features" in str(error) and "missing inventory" in str(error)
     else:
         raise AssertionError("accepted inventory graph without the inventory feature")
+    for forbidden in ("download-binaries", "copy-dylibs", "download-binaries-check", "tls-rustls", "tls-rustls-no-provider"):
+        dynamic_forbidden = {
+            "packages": [
+                {"id": "path+magika#0.18.0", "name": "qubit-magika"},
+                {"id": "registry+ort#2.0.0", "name": "ort"},
+            ],
+            "resolve": {"nodes": [
+                {"id": "path+magika#0.18.0", "features": []},
+                {"id": "registry+ort#2.0.0", "features": ["load-dynamic", forbidden]},
+            ]},
+        }
+        try:
+            validate_feature_graph(dynamic_forbidden, "dynamic", guide)
+        except ValueError as error:
+            assert guide in str(error) and "dynamic" in str(error)
+            assert forbidden in str(error) and "actual features" in str(error)
+        else:
+            raise AssertionError(f"accepted dynamic graph with forbidden ORT feature {forbidden}")
     duplicate_graph = {
         "packages": [
             {"id": "path+magika#0.18.0", "name": "qubit-magika"},
@@ -704,9 +767,13 @@ def consumer_manifest(
                 mapped.update({k: v for k, v in value.items() if k != "path"})
             value = mapped
         elif package == "qubit-mime" and operation_path is not None:
-            version = dependency_version(value)
-            assert version is not None
-            value = {"version": version, "path": str(project_root.parent / "rs-mime")}
+            if isinstance(value, dict):
+                value = dict(value)
+            else:
+                version = dependency_version(value)
+                assert version is not None
+                value = {"version": version}
+            value["path"] = str(project_root.parent / "rs-mime")
         elif package == "qubit-fs" and operation_path is not None:
             version = dependency_version(value)
             assert version is not None
