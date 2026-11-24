@@ -1048,9 +1048,7 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         assert!(
             crate::tests::internal::bridge_wait::join_before(
                 worker,
-                &format!(
-                    "{stage}; reads={reads}; cancellation_observed={cancellation_observed}"
-                ),
+                &format!("{stage}; reads={reads}; cancellation_observed={cancellation_observed}"),
                 Duration::from_secs(2),
             )
             .is_err(),

@@ -23,7 +23,5 @@ pub(crate) fn join_before<T>(worker: JoinHandle<T>, stage: &str, timeout: Durati
         worker.is_finished(),
         "timed out waiting for bridge worker; stage={stage}"
     );
-    worker
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }

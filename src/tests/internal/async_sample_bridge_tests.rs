@@ -98,7 +98,9 @@ fn test_close_wakes_worker_waiting_for_range_response() {
     bridge.close();
     assert_eq!(
         std::io::ErrorKind::Interrupted,
-        join_before(worker, "explicit close", Duration::from_secs(2)).unwrap_err().kind()
+        join_before(worker, "explicit close", Duration::from_secs(2))
+            .unwrap_err()
+            .kind()
     );
     drop(request);
 }
@@ -142,7 +144,9 @@ fn test_dropping_async_driver_closes_pending_bridge_and_wakes_worker() {
     drop(driver);
     assert_eq!(
         std::io::ErrorKind::Interrupted,
-        join_before(worker, "driver drop", Duration::from_secs(2)).unwrap_err().kind(),
+        join_before(worker, "driver drop", Duration::from_secs(2))
+            .unwrap_err()
+            .kind(),
     );
     drop(request);
 }
