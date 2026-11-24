@@ -51,6 +51,7 @@ optional = true
 [dev-dependencies]
 qubit-config = "^0.15"
 qubit-fs-local = { version = "^0.12", path = "../rs-fs-local" }
+qubit-operation-registry = { package = "qubit-operation", version = "^0.3.2", path = "../rs-operation" }
 tempfile = "^3.27"
 
 

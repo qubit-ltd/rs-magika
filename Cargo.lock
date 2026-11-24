@@ -586,6 +586,7 @@ dependencies = [
  "qubit-io",
  "qubit-mime",
  "qubit-operation 0.3.1",
+ "qubit-operation 0.3.2",
  "qubit-spi",
  "tempfile",
 ]
