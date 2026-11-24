@@ -240,54 +240,6 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
     Ok(())
 }
 
-/// Reads a complete asynchronous request using the supplied maximum range.
-///
-/// # Parameters
-///
-/// * `file_system` - Asynchronous filesystem that supplies each segment.
-/// * `path` - Path of the resource within the filesystem.
-/// * `version` - Optional version condition applied to every segment.
-/// * `buffer` - Destination filled by the segments.
-/// * `offset` - Start offset of the complete request.
-/// * `max_segment` - Maximum byte length of one provider request.
-///
-/// # Errors
-///
-/// Returns an I/O error when the segment limit is zero, an offset overflows,
-/// or a provider segment fails or returns the wrong length.
-#[cfg(test)]
-pub(crate) async fn read_async_segments(
-    file_system: &qubit_fs::AsyncFileSystem,
-    path: &Path,
-    version: Option<&ResourceVersion>,
-    buffer: &mut [u8],
-    offset: u64,
-    max_segment: usize,
-) -> MagikaResult<()> {
-    if max_segment == 0 {
-        return Err(invalid_input("provider maximum read range is zero").into());
-    }
-    let mut completed = 0;
-    while completed < buffer.len() {
-        let segment_length = (buffer.len() - completed).min(max_segment);
-        let segment_offset = offset
-            .checked_add(completed as u64)
-            .ok_or_else(|| invalid_input("provider input offset overflow"))?;
-        let bytes = file_system
-            .read_prefix(
-                path,
-                read_options(segment_offset, segment_length, version),
-                segment_length,
-            )
-            .await
-            .map_err(|error| error.into_io_error())?
-            .into_bytes();
-        copy_exact(&mut buffer[completed..completed + segment_length], bytes)?;
-        completed += segment_length;
-    }
-    Ok(())
-}
-
 /// Validates a random-access read and reserves its requested bytes from the
 /// per-detection cumulative budget before the provider is called.
 ///
