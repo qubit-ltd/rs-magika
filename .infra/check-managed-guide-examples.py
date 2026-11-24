@@ -278,76 +278,30 @@ def validate_feature_graph(metadata: dict[str, object], variant: str, guide: str
 
 
 def inventory_dependency(markdown: str, guide_name: str) -> dict[str, object]:
-    parsed: list[dict[str, object]] = []
-    for code in re.findall(r"`([^`]+)`", markdown):
-        if not re.search(r"\bqubit-magika\s*=", code):
-            continue
-        try:
-            normalized_code = _join_inline_toml_array_lines(code)
-            value = tomllib.loads("[dependencies]\n" + normalized_code)["dependencies"].get("qubit-magika")
-        except tomllib.TOMLDecodeError:
-            continue
-        if (
-            isinstance(value, dict)
-            and "inventory" in value.get("features", [])
-        ):
-            parsed.append(value)
-    if len(parsed) != 1:
+    if markdown.count(APPLICATION_END) != 1:
+        raise ValueError(f"{guide_name}: expected exactly one fixed-source manifest end marker")
+    section_start = markdown.index(APPLICATION_END) + len(APPLICATION_END)
+    next_heading = re.search(r"(?m)^#{1,6}\s+", markdown[section_start:])
+    section_end = section_start + next_heading.start() if next_heading else len(markdown)
+    fixed_source_section = markdown[section_start:section_end]
+    declarations = [
+        code.strip()
+        for code in re.findall(r"`([^`]+)`", fixed_source_section)
+        if re.match(r"qubit-magika\s*=\s*\{", code.strip())
+    ]
+    if len(declarations) != 1:
         raise ValueError(f"{guide_name}: expected exactly one inventory dependency declaration")
-    dependency = parsed[0]
-    if not isinstance(dependency, dict) or "inventory" not in dependency.get("features", []):
+    try:
+        dependency = tomllib.loads("[dependencies]\n" + declarations[0])["dependencies"]["qubit-magika"]
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"{guide_name}: invalid fixed-source inventory dependency TOML: {error}") from error
+    if not isinstance(dependency, dict):
+        raise ValueError(f"{guide_name}: inventory dependency must be an inline table")
+    if "inventory" not in dependency.get("features", []):
         raise ValueError(f"{guide_name}: inventory dependency does not enable inventory")
+    if dependency.get("path") != "../rs-magika":
+        raise ValueError(f"{guide_name}: inventory dependency must explicitly use path '../rs-magika'")
     return dependency
-
-
-def _join_inline_toml_array_lines(source: str) -> str:
-    output: list[str] = []
-    index = 0
-    in_basic_string = False
-    in_literal_string = False
-    escaped = False
-    while index < len(source):
-        char = source[index]
-        if in_basic_string:
-            output.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_basic_string = False
-            index += 1
-            continue
-        if in_literal_string:
-            output.append(char)
-            if char == "'":
-                in_literal_string = False
-            index += 1
-            continue
-        if char == '"':
-            in_basic_string = True
-            output.append(char)
-            index += 1
-            continue
-        if char == "'":
-            in_literal_string = True
-            output.append(char)
-            index += 1
-            continue
-        if char == "\n":
-            previous = len(output) - 1
-            while previous >= 0 and output[previous].isspace():
-                previous -= 1
-            following = index + 1
-            while following < len(source) and source[following].isspace():
-                following += 1
-            if previous >= 0 and output[previous] == "=" and following < len(source) and source[following] == "[":
-                output.append(" ")
-                index = following
-                continue
-        output.append(char)
-        index += 1
-    return "".join(output)
 
 
 def inventory_manifest(
@@ -356,11 +310,6 @@ def inventory_manifest(
     merged = json.loads(json.dumps(manifest))
     dependencies = merged["dependencies"]
     declaration = inventory_dependency(markdown, guide_name)
-    if "path" not in declaration:
-        original = manifest["dependencies"]["qubit-magika"]
-        if not isinstance(original, dict) or not isinstance(original.get("path"), str):
-            raise ValueError(f"{guide_name}: inventory dependency has no fixed source path to preserve")
-        declaration["path"] = original["path"]
     dependencies["qubit-magika"] = declaration
     return merged
 
@@ -514,6 +463,13 @@ qubit-operation = { path = "../rs-operation" }
         manifest_text(parsed_application, add_package=False, add_workspace=False)
     )
     assert serialized == parsed_application
+    def inventory_chapter(declaration: str) -> str:
+        return (
+            f"Text before the replacement. {APPLICATION_END}\n"
+            f"{declaration}\n\n## Following section\n"
+            '`qubit-magika = { version = "0.18", features = ["inventory"] }`\n'
+        )
+
     shell_fixtures = (
         {"dependencies": {}, "package": {"name": "existing-package", "version": "1.0.0"}},
         {"dependencies": {}, "workspace": {"members": ["member"]}},
@@ -535,13 +491,17 @@ qubit-operation = { path = "../rs-operation" }
         )
         assert tomllib.loads(generated) == expected
     inventory_line = '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`'
-    inventory_source = inventory_manifest(parsed_application, inventory_line, guide)
+    inventory_source = inventory_manifest(
+        parsed_application, inventory_chapter(inventory_line), guide
+    )
     inventory_rebased = validate_and_rebase_manifest(inventory_source, guide, Path("/layout/rs-magika"))
     assert inventory_rebased["dependencies"]["qubit-magika"]["features"] == ["inventory"]
     try:
         invalid_inventory = inventory_manifest(
             parsed_application,
-            inventory_line.replace('path = "../rs-magika"', 'path = "../wrong-magika"'),
+            inventory_chapter(
+                inventory_line.replace('path = "../rs-magika"', 'path = "../wrong-magika"')
+            ),
             guide,
         )
         validate_and_rebase_manifest(invalid_inventory, guide, Path("/layout/rs-magika"))
@@ -592,7 +552,9 @@ qubit-operation = { path = "../rs-operation" }
     inventory_base["dependencies"]["qubit-magika"]["optional"] = True
     inventory_missing_fields = inventory_manifest(
         inventory_base,
-        '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`',
+        inventory_chapter(
+            '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`'
+        ),
         guide,
     )
     assert inventory_missing_fields["dependencies"]["qubit-magika"] == {
@@ -643,6 +605,33 @@ qubit-operation = { path = "../rs-operation" }
             ]},
         }
         validate_feature_graph(graph, variant, guide)
+        if variant in ("default", "inventory"):
+            unbundled = json.loads(json.dumps(graph))
+            unbundled["resolve"]["nodes"][0]["features"] = (
+                ["inventory"] if variant == "inventory" else []
+            )
+            try:
+                validate_feature_graph(unbundled, variant, guide)
+            except ValueError as error:
+                assert "must enable Magika bundled" in str(error)
+            else:
+                raise AssertionError(f"accepted {variant} graph without bundled runtime")
+    inventory_without_feature = json.loads(json.dumps({
+        "packages": [
+            {"id": "path+magika#0.18.0", "name": "qubit-magika"},
+            {"id": "registry+ort#2.0.0", "name": "ort"},
+        ],
+        "resolve": {"nodes": [
+            {"id": "path+magika#0.18.0", "features": ["bundled-onnxruntime"]},
+            {"id": "registry+ort#2.0.0", "features": ["download-binaries"]},
+        ]},
+    }))
+    try:
+        validate_feature_graph(inventory_without_feature, "inventory", guide)
+    except ValueError as error:
+        assert "did not enable qubit-magika/inventory" in str(error)
+    else:
+        raise AssertionError("accepted inventory graph without the inventory feature")
     duplicate_graph = {
         "packages": [
             {"id": "path+magika#0.18.0", "name": "qubit-magika"},
@@ -664,16 +653,26 @@ qubit-operation = { path = "../rs-operation" }
         raise AssertionError("accepted duplicate qubit-magika package identities")
     for public_guide in ("README.md", "README.zh_CN.md"):
         normal_dependency = inventory_dependency(
-            '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`',
+            inventory_chapter(
+                '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`'
+            ),
             public_guide,
         )
         assert normal_dependency["path"] == "../rs-magika"
         assert normal_dependency["features"] == ["inventory"]
-    whitespace_inventory = inventory_dependency(
-        r'`qubit-magika = { version = "0.18", features =' + "\n"
-        + r'["inventory"], note = "two  spaces and \\ slash" }`',
-        guide,
-    )
+    for declaration, expected_message in (
+        ('`qubit-magika = { version = "0.18", features = ["inventory"] }`', "must explicitly use path"),
+        ('`qubit-magika = { version = "0.18", path = "../rs-magika", features = [] }`', "does not enable inventory"),
+    ):
+        try:
+            inventory_dependency(inventory_chapter(declaration), guide)
+        except ValueError as error:
+            assert expected_message in str(error), str(error)
+        else:
+            raise AssertionError(f"accepted invalid inventory declaration: {declaration}")
+    whitespace_inventory = inventory_dependency(inventory_chapter(
+        '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"], note = "two  spaces and \\\\ slash" }`'
+    ), guide)
     assert whitespace_inventory["note"] == "two  spaces and \\ slash"
 
 
