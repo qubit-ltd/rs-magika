@@ -13,12 +13,14 @@ use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_magika::ManagedInferenceRuntime;
 #[cfg(feature = "bundled-onnxruntime")]
 use qubit_mime::MediaStreamType;
-#[cfg(feature = "bundled-onnxruntime")]
+#[cfg(any(feature = "bundled-onnxruntime", feature = "inventory"))]
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorRegistry;
+#[cfg(feature = "inventory")]
+use qubit_operation::GroupOptions;
 #[cfg(feature = "bundled-onnxruntime")]
 use qubit_operation::ManagerOptions;
-#[cfg(feature = "bundled-onnxruntime")]
+#[cfg(any(feature = "bundled-onnxruntime", feature = "inventory"))]
 use qubit_operation::OperationManager;
 use qubit_spi::ProviderMetadata;
 #[cfg(feature = "bundled-onnxruntime")]
@@ -179,6 +181,31 @@ fn test_magika_provider_is_discovered_with_repository_default() {
         qubit_spi::ProviderSelection::named("repository").expect("valid repository ID"),
         registry.default_selection(),
     );
-    let selection = qubit_spi::ProviderSelection::named("magika").expect("valid magika ID");
-    registry.resolve_selected(&selection).expect("Magika should resolve");
+    for selector in ["magika", "magika-mime-detector", "magikamimedetector"] {
+        let selection = qubit_spi::ProviderSelection::named(selector).expect("valid Magika selector");
+        registry
+            .resolve_selected(&selection)
+            .expect("Magika selector should resolve");
+    }
+
+    let manager = OperationManager::new(Default::default()).expect("operation manager should initialize");
+    let group = manager
+        .group(GroupOptions { capacity: 1 })
+        .expect("operation group should initialize");
+    let services = qubit_mime::MimeExecutionServices::new(
+        manager,
+        group,
+        std::sync::Arc::new(qubit_mime::FixedMimeExecutionPort::new(1, 1)),
+        1024,
+    )
+    .expect("execution services should initialize");
+    let magika = qubit_spi::ProviderSelection::named("magika").expect("valid Magika selector");
+    assert!(matches!(
+        registry.create_async_backend(&magika, &MimeConfig::default(), &services),
+        Err(qubit_mime::MimeError::AsyncUnsupported),
+    ));
+    let repository = qubit_spi::ProviderSelection::named("repository").expect("valid repository selector");
+    registry
+        .create_async_backend(&repository, &MimeConfig::default(), &services)
+        .expect("registered async repository provider should create a backend");
 }

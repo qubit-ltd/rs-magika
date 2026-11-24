@@ -90,6 +90,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 supervisor 和 detector；每个受管请求显式传入 scope；应用关闭前 drain detector。旧版
 `MimeDetector` hooks 不接收 operation scope，仍遵循原有契约。
 
+`qubit-mime` 的 async provider registry 负责选择并创建 async backend，但其 hooks
+不会收到 parent operation scope。Inventory 只向该 registry 注册未配置的 Provider。
+若请求需要纳入应用 scope 的生命周期观察，应显式调用 managed API。
+需要复现固定依赖布局时，先运行
+[`prepare-local-path-dependencies.sh --check-locked`](.infra/bin/prepare-local-path-dependencies.sh)，
+再按 [`local-path-dependencies.tsv`](.infra/ci/local-path-dependencies.tsv) 中的固定提交，
+依次检查根项目、动态加载 fixture 和 README consumer fixture 的锁定依赖：
+
+```bash
+cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
+cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/dynamic_loader/Cargo.toml
+cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/readme_consumer/Cargo.toml
+```
+
 受管请求会在访问 Provider 之前预留 runtime 容量、逻辑上的 `max_bytes` 采样预算，
 并提交 scope 子操作；runtime 已关闭、容量已满或请求已取消时，不会调用 Provider。
 如果 Provider future 尚处于 Pending 就被丢弃，只能确认本地轮询停止。无法观察 native
@@ -160,6 +174,7 @@ parent-scope 生命周期观察；需要 scope 跟踪时使用 managed API。
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-magika)
 - [English README](README.md)
+- [固定的本地依赖提交](.infra/ci/local-path-dependencies.tsv)
 
 ## 测试
 

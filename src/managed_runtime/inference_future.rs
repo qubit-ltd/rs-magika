@@ -264,4 +264,35 @@ mod tests {
         let future = InferenceFuture::new(state);
         assert!(matches!(future.wait_blocking(), Ok(None)));
     }
+
+    #[test]
+    fn test_blocking_wait_settled_waits_for_release_after_result() {
+        let state = Arc::new(TaskState::new(104, None));
+        let poisoned_state = Arc::clone(&state);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned_state.inner.lock().unwrap();
+            panic!("poison result lock before settled wait");
+        })
+        .join();
+        state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
+        let (result_tx, result_rx) = mpsc::channel();
+        let waiter_state = Arc::clone(&state);
+        let waiter = std::thread::spawn(move || {
+            let future = InferenceFuture::new(waiter_state);
+            let _ = result_tx.send(future.wait_blocking_settled());
+        });
+
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        state.mark_worker_done();
+        state.mark_released();
+
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(Ok(Some(mime))) if mime == "text/plain"
+        ));
+        waiter.join().unwrap();
+    }
 }

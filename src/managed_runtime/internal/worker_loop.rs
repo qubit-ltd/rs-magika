@@ -57,10 +57,32 @@ pub(super) fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (Mi
 pub(super) fn run_worker(
     receiver: mpsc::Receiver<Job>,
     gate: Arc<Mutex<AdmissionGate>>,
-    mut infer: impl FnMut(WorkerInput) -> MimeResult<Option<String>>,
+    infer: impl FnMut(WorkerInput) -> MimeResult<Option<String>>,
     after_business: impl Fn(),
     before_exit: impl FnOnce(),
 ) {
+    run_worker_with_before_first_recv(receiver, gate, infer, || {}, after_business, before_exit);
+}
+
+/// Runs the worker with an optional deterministic first-receive gate.
+///
+/// # Parameters
+///
+/// * `receiver` - Queue of admitted worker jobs.
+/// * `gate` - Admission state synchronized with the queue.
+/// * `infer` - Inference operation run for each input.
+/// * `before_first_recv` - Hook called before receiving the first job.
+/// * `after_business` - Hook called after publishing each business result.
+/// * `before_exit` - Hook called before the worker exits.
+pub(super) fn run_worker_with_before_first_recv(
+    receiver: mpsc::Receiver<Job>,
+    gate: Arc<Mutex<AdmissionGate>>,
+    mut infer: impl FnMut(WorkerInput) -> MimeResult<Option<String>>,
+    before_first_recv: impl FnOnce(),
+    after_business: impl Fn(),
+    before_exit: impl FnOnce(),
+) {
+    before_first_recv();
     while let Ok(job) = receiver.recv() {
         let Job { input, state, owner } = job;
         let bridge = match &input {

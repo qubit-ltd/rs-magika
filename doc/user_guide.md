@@ -33,6 +33,15 @@ media-stream classifier must still be constructed and registered explicitly.
 Reference the crate in the application with `use qubit_magika as _;` so its
 inventory submission is linked.
 
+The `qubit-mime` async provider registry selects and constructs an
+`AsyncMimeDetectorBackend`; its async hooks still do not receive a parent
+operation scope. Inventory only registers a provider with that registry. Use
+the explicit managed API when application code must attach provider sampling to
+an operation scope. To reproduce the tested local dependency layout, run
+[`prepare-local-path-dependencies.sh --check-locked`](../.infra/bin/prepare-local-path-dependencies.sh)
+and follow the fixed revisions in
+[`local-path-dependencies.tsv`](../.infra/ci/local-path-dependencies.tsv).
+
 ## Scenario
 
 An application accepts an uploaded Python script and needs a content-derived
@@ -356,6 +365,11 @@ sampling accounting is a total process-memory limit.
 Use the managed entry point when an application needs the provider sample reads
 to be children of a `qubit-operation` scope. Share one supervisor and detector
 for the application lifetime, then pass the request scope explicitly:
+Supply the application's `ClockSource` at startup and use the same source for
+each observation deadline. `ManagerOptions::default()` has no clock, so
+`wait_settlement_until` would otherwise return `ClockUnavailable`.
+The caller also supplies `wait_ticks`, converted from the desired wait duration
+using that clock's documented tick scale; this value is not seconds.
 
 <!-- managed-guide-example-start -->
 ```rust,no_run
@@ -365,21 +379,26 @@ use std::time::Duration;
 
 use qubit_fs::{AsyncFileSystem, Path};
 use qubit_magika::MagikaMimeDetector;
+use qubit_magika::ManagedInferenceShutdownReport;
 use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};
+use qubit_operation::{AsyncOperationObserver, ClockSource, Deadline, MonotonicTime, SettlementWait, ShutdownHandle, ShutdownReport, ShutdownSnapshot, ShutdownWait};
 
-fn prepare_application() -> Result<(
+fn prepare_application(clock: Arc<dyn ClockSource>) -> Result<(
     OperationManager,
     qubit_operation::OperationGroup,
     Arc<MagikaMimeDetector>,
+    Arc<dyn ClockSource>,
 ), Box<dyn Error>> {
-    let manager = OperationManager::new(ManagerOptions::default())?;
+    let mut options = ManagerOptions::default();
+    options.clock = Some(Arc::clone(&clock));
+    let manager = OperationManager::new(options)?;
     let service = manager.group(GroupOptions { capacity: 4 })?;
     let detector = Arc::new(
         MagikaMimeDetector::builder()
             .operation_manager(manager.clone())
             .build()?,
     );
-    Ok((manager, service, detector))
+    Ok((manager, service, detector, clock))
 }
 
 async fn detect_request(
@@ -387,7 +406,9 @@ async fn detect_request(
     detector: &Arc<MagikaMimeDetector>,
     file_system: AsyncFileSystem,
     path: Path,
-) -> Result<(), Box<dyn Error>> {
+    clock: &dyn ClockSource,
+    wait_ticks: u64,
+) -> Result<(OperationOutcome<Option<String>, qubit_mime::MimeError>, AsyncOperationObserver, SettlementWait), Box<dyn Error>> {
     let request_detector = Arc::clone(detector);
     let mut request = service
         .as_async()
@@ -396,38 +417,74 @@ async fn detect_request(
                 .detect_async_provider_path_managed(&scope, &file_system, &path, 1024 * 1024)
                 .await
         })?;
-    match request.wait_outcome().await? {
-        OperationOutcome::Succeeded(mime) => println!("detected MIME: {mime:?}"),
-        other => return Err(format!("detection operation did not succeed: {other:?}").into()),
+    let observer = request.observer();
+    let outcome = request.wait_outcome().await?;
+    match &outcome {
+        OperationOutcome::Succeeded(mime) => println!("detection completed: {mime:?}"),
+        OperationOutcome::Failed(error) => eprintln!("detection failed: {error}"),
+        other => eprintln!("detection did not complete successfully: {other:?}"),
     }
-    let settlement = request.wait_settlement().await;
-    if !settlement.all_released() {
-        return Err("request resources are still in use".into());
+    // The caller converted the desired wait duration to this clock's tick units.
+    let now = clock.now();
+    let deadline = Deadline::at(MonotonicTime::new(now.domain(), now.ticks().saturating_add(wait_ticks)));
+    let settlement = observer.wait_settlement_until(deadline).await?;
+    match &settlement {
+        SettlementWait::Ready(report) if report.all_released() => println!("request resources released"),
+        SettlementWait::Ready(report) => eprintln!("settlement report has unreleased resources: {report:?}"),
+        SettlementWait::Pending(snapshot) => eprintln!("settlement is pending at the deadline: {snapshot:?}"),
     }
-    Ok(())
+    Ok((outcome, observer, settlement))
+}
+
+enum ShutdownProgress {
+    DetectorPending(ManagedInferenceShutdownReport),
+    ManagerPending {
+        detector: ManagedInferenceShutdownReport,
+        handle: ShutdownHandle,
+        snapshot: ShutdownSnapshot,
+    },
+    Complete { detector: ManagedInferenceShutdownReport, manager: ShutdownReport },
 }
 
 fn shutdown_application(
     manager: &OperationManager,
     detector: &MagikaMimeDetector,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<ShutdownProgress, Box<dyn Error>> {
     let detector_report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
-    assert!(detector_report.worker_stopped);
-    let manager_report = manager
-        .request_shutdown(ShutdownMode::Drain)
-        .wait_for(Duration::from_secs(30))?;
-    let _snapshot = manager_report;
-    Ok(())
+    if !detector_report.worker_stopped {
+        return Ok(ShutdownProgress::DetectorPending(detector_report));
+    }
+    let handle = manager.request_shutdown(ShutdownMode::Drain);
+    match handle.wait_for(Duration::from_secs(30))? {
+        ShutdownWait::Completed(report) => Ok(ShutdownProgress::Complete { detector: detector_report, manager: report }),
+        ShutdownWait::Pending(snapshot) => Ok(ShutdownProgress::ManagerPending { detector: detector_report, handle, snapshot }),
+    }
 }
 ```
 <!-- managed-guide-example-end -->
 
-Inspect the `OperationOutcome` returned by `detect_request`: `Succeeded(Some(mime))`
-contains a classification, `Succeeded(None)` means there was no classification,
-and `Failed(error)` carries the detector error. Other variants report stopped
-or otherwise failed operation work. `wait_settlement().await` returns a
-`SettlementReport`; use `SettlementReport::all_released()` to check whether the
-request resources settled. Keep `shutdown_application` at a synchronous application
+`detect_request` returns the exact tuple
+`(OperationOutcome<Option<String>, MimeError>, AsyncOperationObserver, SettlementWait)`.
+Inspect the business outcome independently: `Succeeded(Some(mime))` contains a
+classification, `Succeeded(None)` means there was no classification,
+`Failed(error)` carries the detector error, and the other variants report stopped
+or otherwise failed operation work. The observer uses the same `ClockSource`
+installed in `ManagerOptions`, and the sample creates its deadline from
+`clock.now()` in that source's domain. The application converts its desired
+wait duration to that source's tick units and passes `wait_ticks`; ticks are not
+assumed to be seconds. `wait_settlement_until(deadline)` returns
+`Result<SettlementWait, ObservationError>`. `SettlementWait::Pending(snapshot)`
+is a bounded observation, not a release confirmation. The deadline must come
+from the operation's clock domain. The example matches both variants and checks
+`all_released()` on a ready report, then returns the outcome, observer, and
+original settlement result so callers retain a negative report for recovery
+handling and can continue observation after a pending snapshot. Failed
+cleanup retains an unconfirmed resource for recovery observation; retry is
+available only through the registered recovery policy/handle, not by resubmitting
+the inference request. `shutdown_application` returns `DetectorPending` with the
+diagnostic report so the caller can retry detector shutdown before closing the
+manager. `ManagerPending` retains both its snapshot and handle for another
+`wait_for`; `Completed` carries the final manager report. Keep shutdown at a synchronous application
 shutdown boundary. An async-only host should run that boundary on its own
 blocking executor facility after it stops admission and awaits active requests.
 
@@ -437,8 +494,9 @@ different instants, and counts include every detector sharing that runtime.
 `faulted` records a caught inference-session panic; `worker_panicked` only records
 an uncaught panic observed while joining the worker. A nonzero
 `unconfirmed_provider_io` means a pending Provider operation was dropped before
-completion could be confirmed. A snapshot does not prove settlement; continue to
-use `wait_settlement().await` for release observation.
+completion could be confirmed. A snapshot does not prove settlement; retain the
+operation observer and use `wait_settlement_until(deadline)` with a deadline from
+the same clock domain for bounded release observation.
 
 In a real application, keep the service group, supervisor, and detector for the
 application lifetime so request scopes come from the same supervisor, and call

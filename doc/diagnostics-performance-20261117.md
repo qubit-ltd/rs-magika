@@ -58,3 +58,27 @@ independent, delay=100ms, completion_us=[4753,4984,5261,5886,6572,6593,6620,6622
 The shared-runtime completion latency rises with the gated provider delay, while the independent runtime remains near its warmed inference latency. This reproduces the head-of-line mechanism and shows that a separately owned runtime isolates the second request in this test. It also costs an additional Magika session/runtime; this experiment did not measure its memory or initialization cost.
 
 There is no verified downstream SLO, workload mix, or memory budget in this task establishing that an additional session or scheduling redesign is warranted. Keep the existing single-worker architecture for this change. Deployments that require isolation can use separate runtimes and should budget for the extra session. Consider a future sampling/inference split only with workload-specific SLO and memory measurements.
+
+## MAG-R11 workload evidence audit
+
+Date: 2026-11-23
+
+Searched the local downstream documentation and manifests for Magika consumers and workload targets. The reviewed evidence was:
+
+- `rs-mime/doc/user_guide.md` and `rs-mime/doc/user_guide.zh_CN.md` show how an application links the Magika provider into the MIME registry; both state that the default provider remains `repository`. They define no request mix, concurrency target, latency objective, or memory budget.
+- The local FS and FS-local implementation planning documents mention Magika as a downstream dependency/compatibility validation target. They provide no deployment workload or performance acceptance criteria. These are uncommitted internal planning files; their exact paths and search output are kept in the task's external evidence directory.
+- Searching local `rs-*/Cargo.toml` manifests found no downstream manifest declaring `qubit-magika`; the crate manifest itself identifies it as the Magika-backed MIME detector integration. The documentation examples are integration guidance, not evidence of a deployed workload.
+
+The 2026-11-17 experiment above remains useful as a mechanism check: it used one deliberately gated provider request and a small Python byte request, with 30 warm rounds per topology and injected delays of 0, 10, and 100 ms. Those values are test controls, not observed production delays or acceptance thresholds. It reports completion p50/p95 and admission/refusal counts, but not cold startup, peak RSS, CPU, or production request distributions. It therefore cannot establish whether either topology meets a real service objective.
+
+No representative workload, target concurrency, accepted tail-latency bound, or memory budget was found. Accordingly, the ignored experiment was not rerun as a workload comparison, since no representative input distribution or acceptance criteria exist. No isolation mechanism can be selected against an absent target; retain the shared runtime architecture for this change. A future decision needs an identified consumer, its mixed request distribution and concurrency, explicit p95/p99 and memory limits, then cold-start time, peak RSS, success/refusal rate, and warm p50/p95 measurements for both topologies on the same machine and sample set.
+
+Evidence search commands (read-only):
+
+Run from the adjacent source-layout root (the directory containing `rs-*`):
+
+```text
+rg -l -i 'rs-magika|magika' rs-* --glob 'Cargo.toml' --glob '*.md' --glob '*.yml' --glob '*.yaml' --glob '*.toml'  # exit 0
+rg -n -i 'qubit-magika|rs-magika|magika' rs-*/Cargo.toml  # exit 0
+rg -n -i 'rs-magika|magika' rs-fs/doc rs-fs-local/doc --glob '*.md' rs-mime/doc/user_guide.md rs-mime/doc/user_guide.zh_CN.md  # exit 0
+```

@@ -572,8 +572,8 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
     *lock.lock().unwrap() = true;
     ready.notify_all();
     let report = detector.shutdown_blocking(qubit_operation::ShutdownMode::Cancel, Duration::from_millis(50));
+    assert!(report.worker_stopped);
     assert!(report.admission.snapshot.service_resources != 0);
-    assert!(!report.worker_stopped);
 }
 
 #[test]

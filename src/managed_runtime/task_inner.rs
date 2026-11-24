@@ -24,6 +24,8 @@ pub(super) struct TaskInner {
     pub(super) business: Option<ChildOutcomeKind>,
     /// Whether worker-owned input and permits have been dropped.
     pub(super) released: bool,
+    /// Whether worker and provider driver have stopped accessing local state.
+    pub(super) access_complete: bool,
     /// Whether the worker has completed its participant duties.
     pub(super) worker_done: bool,
     /// Whether a dropped provider operation had no confirmed completion.
@@ -41,6 +43,7 @@ impl TaskInner {
             result: None,
             business: None,
             released: false,
+            access_complete: false,
             worker_done: false,
             unconfirmed_provider_io: false,
             wakers: Vec::new(),

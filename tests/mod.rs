@@ -13,6 +13,7 @@ mod local_file_type_tests;
 mod magika_mime_detector_provider_tests;
 #[cfg(feature = "bundled-onnxruntime")]
 mod magika_mime_detector_tests;
+mod operation_cleanup_contract_tests;
 #[cfg(feature = "bundled-onnxruntime")]
 mod provider_path_tests;
 #[cfg(feature = "bundled-onnxruntime")]

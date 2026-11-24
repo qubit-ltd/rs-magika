@@ -29,7 +29,6 @@ use qubit_operation::GroupOptions;
 use qubit_operation::OperationGroup;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
-use qubit_operation::OperationOutcome;
 use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 use qubit_operation::ShutdownReport;
@@ -49,7 +48,9 @@ use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 use super::worker_input::worker_bytes;
+use crate::internal::INFERENCE_OUTCOME;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
+use crate::internal::map_operation_outcome;
 use crate::magika_mime_detector::content_type_to_mime;
 use crate::magika_mime_detector::map_magika_error;
 
@@ -66,6 +67,9 @@ mod test_support;
 
 /// Monotonically allocates identifiers for runtime child operations.
 static NEXT_CHILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Maximum number of admitted requests retained by the runtime.
+const SERVICE_CAPACITY: usize = 2;
 
 /// Shareable managed execution runtime. One worker owns its Magika session and
 /// one queued request; the supervisor service group admits at most one running
@@ -201,7 +205,7 @@ impl ManagedInferenceRuntime {
             ));
         }
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(1);
+        let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let worker = match std::thread::Builder::new()
@@ -243,7 +247,9 @@ impl ManagedInferenceRuntime {
                 ));
             }
         }
-        let service_group = match manager.group(GroupOptions { capacity: 2 }) {
+        let service_group = match manager.group(GroupOptions {
+            capacity: SERVICE_CAPACITY,
+        }) {
             Ok(service_group) => service_group,
             Err(error) => {
                 return Err(MimeError::detector_backend(
@@ -398,7 +404,7 @@ impl ManagedInferenceRuntime {
             WorkerInput::Bridge(_, limit, _) => *limit,
             WorkerInput::Features(_, _) => 0,
         };
-        let admission = self.reserve_request(None, byte_count)?;
+        let admission = self.reserve_request(parent, byte_count)?;
         self.submit_operation_admitted(parent, admission, input).await
     }
 
@@ -485,19 +491,7 @@ impl ManagedInferenceRuntime {
             // this operation's resources have actually been released.
             let _settlement = operation.wait_settlement().await;
         }
-        match outcome {
-            OperationOutcome::Succeeded(result) => Ok(result),
-            OperationOutcome::Failed(error) => Err(error),
-            OperationOutcome::Stopped(_) => Err(MimeError::detector_backend("magika", "inference stopped")),
-            OperationOutcome::ChildFailed(summary) => Err(MimeError::detector_backend(
-                "magika",
-                format!("inference child failed: {summary:?}"),
-            )),
-            OperationOutcome::Panicked(_) => Err(MimeError::detector_backend("magika", "inference operation panicked")),
-            OperationOutcome::ExecutionFailed(_) => {
-                Err(MimeError::detector_backend("magika", "inference executor failed"))
-            }
-        }
+        map_operation_outcome(outcome, INFERENCE_OUTCOME)
     }
 
     /// Reserves operation and byte capacity before a provider performs I/O.
@@ -560,7 +554,6 @@ impl ManagedInferenceRuntime {
     where
         I: AsyncInput + Send + 'static,
     {
-        admission.retain_in_scope(scope)?;
         let state = Arc::clone(&admission.state);
         let state_for_stop = Arc::clone(&state);
         let worker = async move {
@@ -582,8 +575,9 @@ impl ManagedInferenceRuntime {
         };
         let mut worker = Box::pin(worker);
         let mut stop = Box::pin(scope.context().stop_requested());
+        let mut request_stop = Box::pin(state_for_stop.wait_stopped());
         poll_fn(|cx: &mut Context<'_>| {
-            if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
+            if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
                 state_for_stop.request_stop();
                 return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
             }
@@ -769,7 +763,7 @@ impl ManagedInferenceRuntime {
             .byte_budget
             .try_acquire(byte_count)
             .ok_or_else(|| MimeError::detector_backend("magika", "runtime in-flight byte budget is full"))?;
-        let admission = ServicePermit::try_acquire(&self.active_requests, 2)
+        let admission = ServicePermit::try_acquire(&self.active_requests, SERVICE_CAPACITY)
             .ok_or_else(|| MimeError::detector_backend("magika", "runtime service capacity is full"))?;
         after_service_reservation();
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -784,7 +778,7 @@ impl ManagedInferenceRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .push(Arc::clone(&state));
         drop(admission_gate);
-        let mut request = RequestAdmission::new(state, admission, Vec::new(), byte_permit);
+        let mut request = RequestAdmission::new(state, admission, byte_permit);
         if let Some(scope) = scope {
             request.retain_in_scope(scope)?;
         }
@@ -888,9 +882,10 @@ impl ManagedInferenceRuntime {
         after_task_scan();
         loop {
             let admission = self.admission_report();
-            if admission.snapshot.active_operations == 0
-                && self.tasks.lock().unwrap_or_else(|error| error.into_inner()).is_empty()
-            {
+            let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+            let local_access_complete = tasks.iter().all(|task| task.access_complete());
+            drop(tasks);
+            if admission.snapshot.active_operations == 0 && local_access_complete {
                 break;
             }
             if remaining_timeout(deadline).is_zero() {
@@ -1077,14 +1072,16 @@ where
                         .read_at(&mut buffer, request.offset()),
                 );
                 let mut closed = Box::pin(guard.driver.as_ref().expect("driver remains owned").closed());
+                let state_for_stop = Arc::clone(&guard.state);
+                let mut stopped = Box::pin(state_for_stop.wait_stopped());
                 let read_result = poll_fn(|cx| {
+                    if stopped.as_mut().poll(cx).is_ready() || closed.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(None);
+                    }
                     guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Poll::Ready(result) = read.as_mut().poll(cx) {
                         guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
                         return Poll::Ready(Some(result));
-                    }
-                    if closed.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(None);
                     }
                     Poll::Pending
                 })
