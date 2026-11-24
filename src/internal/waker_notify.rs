@@ -56,7 +56,7 @@ pub(crate) fn wake_all(wakers: impl IntoIterator<Item = Waker>) {
 /// # Parameters
 ///
 /// - `payload`: The panic payload whose destructor must be contained.
-fn drop_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+pub(crate) fn drop_panic_payload(payload: Box<dyn std::any::Any + Send>) {
     if let Err(second_payload) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(payload))) {
         // The second panic is caused by destruction of the first payload. Its
         // own payload may have the same destructor, so deliberately leak it.

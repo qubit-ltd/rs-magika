@@ -18,6 +18,7 @@ use qubit_operation::ChildOutcomeKind;
 use super::super::job::Job;
 use super::super::task_state::AdmissionGate;
 use super::WorkerInput;
+use crate::internal::waker_notify::drop_panic_payload;
 
 /// Converts inference execution into a result and its matching child outcome.
 ///
@@ -38,10 +39,13 @@ pub(super) fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (Mi
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok(Ok(value)) => (Ok(value), ChildOutcomeKind::Succeeded),
         Ok(Err(error)) => (Err(error), ChildOutcomeKind::Failed),
-        Err(_) => (
-            Err(MimeError::detector_backend("magika", "inference worker panicked")),
-            ChildOutcomeKind::Panicked,
-        ),
+        Err(payload) => {
+            drop_panic_payload(payload);
+            (
+                Err(MimeError::detector_backend("magika", "inference worker panicked")),
+                ChildOutcomeKind::Panicked,
+            )
+        }
     }
 }
 

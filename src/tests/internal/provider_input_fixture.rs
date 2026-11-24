@@ -9,6 +9,7 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -58,6 +59,8 @@ pub(crate) struct ProviderFileSystemSpi {
     short_read: bool,
     one_byte_reads: bool,
     fail_conditional_on_open: Option<usize>,
+    async_pending_once: bool,
+    async_pending_observed: Option<Arc<AtomicBool>>,
     observations: Arc<ProviderObservations>,
 }
 
@@ -78,6 +81,8 @@ impl ProviderFileSystemSpi {
             short_read: false,
             one_byte_reads: false,
             fail_conditional_on_open: None,
+            async_pending_once: false,
+            async_pending_observed: None,
             observations: Arc::new(ProviderObservations::default()),
         }
     }
@@ -99,6 +104,12 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn one_byte_reads(mut self) -> Self {
         self.one_byte_reads = true;
+        self
+    }
+
+    pub(crate) fn with_pending_first_async_read(mut self, observed: Arc<AtomicBool>) -> Self {
+        self.async_pending_once = true;
+        self.async_pending_observed = Some(observed);
         self
     }
 
@@ -205,6 +216,8 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 bytes,
                 self.one_byte_reads,
                 Arc::clone(&self.observations),
+                false,
+                None,
             )),
         ))
     }
@@ -228,6 +241,8 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     bytes,
                     self.one_byte_reads,
                     Arc::clone(&self.observations),
+                    self.async_pending_once,
+                    self.async_pending_observed.as_ref().map(Arc::clone),
                 )),
             ))
         })
@@ -239,15 +254,25 @@ struct ProviderReader {
     position: usize,
     one_byte_reads: bool,
     observations: Arc<ProviderObservations>,
+    async_pending_once: bool,
+    async_pending_observed: Option<Arc<AtomicBool>>,
 }
 
 impl ProviderReader {
-    fn new(bytes: Vec<u8>, one_byte_reads: bool, observations: Arc<ProviderObservations>) -> Self {
+    fn new(
+        bytes: Vec<u8>,
+        one_byte_reads: bool,
+        observations: Arc<ProviderObservations>,
+        async_pending_once: bool,
+        async_pending_observed: Option<Arc<AtomicBool>>,
+    ) -> Self {
         Self {
             bytes,
             position: 0,
             one_byte_reads,
             observations,
+            async_pending_once,
+            async_pending_observed,
         }
     }
 
@@ -281,6 +306,13 @@ impl AsyncInput for ProviderReader {
         index: usize,
         count: usize,
     ) -> std::task::Poll<io::Result<usize>> {
+        if self.async_pending_once {
+            self.async_pending_once = false;
+            if let Some(observed) = &self.async_pending_observed {
+                observed.store(true, Ordering::SeqCst);
+            }
+            return std::task::Poll::Pending;
+        }
         std::task::Poll::Ready(self.read_bytes(&mut output[index..index + count]))
     }
 }
