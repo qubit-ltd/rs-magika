@@ -118,7 +118,7 @@ def ort_link_graph_violations(metadata: dict[str, Any], mode: str) -> list[str]:
     return errors
 
 
-def check_dynamic_metadata(metadata: dict[str, Any]) -> list[str]:
+def check_dynamic_metadata(metadata: dict[str, Any], expect_inventory: str | None = None) -> list[str]:
     errors = ort_link_graph_violations(metadata, "dynamic")
     try:
         magika_id, magika_features = _one(metadata, "qubit-magika")
@@ -129,6 +129,28 @@ def check_dynamic_metadata(metadata: dict[str, Any]) -> list[str]:
             errors.append(
                 f"dynamic qubit-magika {magika_id} features {sorted(magika_features)}: "
                 "forbidden bundled-onnxruntime"
+            )
+        if expect_inventory is not None:
+            if expect_inventory not in ("enabled", "disabled"):
+                errors.append(f"invalid expected inventory state {expect_inventory!r}")
+            elif ("inventory" in magika_features) != (expect_inventory == "enabled"):
+                expectation = "enabled" if expect_inventory == "enabled" else "disabled"
+                errors.append(
+                    f"dynamic qubit-magika {magika_id} features {sorted(magika_features)}: "
+                    f"expected inventory {expectation}"
+                )
+        root_id = metadata.get("resolve", {}).get("root")
+        root_node = next((node for node in metadata["resolve"]["nodes"] if node.get("id") == root_id), None)
+        normal_magika_edges = [
+            dep for dep in (root_node or {}).get("deps", [])
+            if isinstance(dep, dict) and str(dep.get("pkg")) == magika_id
+            and any(isinstance(kind, dict) and kind.get("kind") is None
+                    for kind in dep.get("dep_kinds", []))
+        ]
+        if len(normal_magika_edges) != 1:
+            errors.append(
+                f"dynamic root {root_id} must have one normal dependency edge to qubit-magika "
+                f"{magika_id}; found {len(normal_magika_edges)}"
             )
     return errors
 
@@ -176,7 +198,12 @@ def run_self_tests() -> None:
         return {"packages": packages, "resolve": {"root": ids["app"], "nodes": nodes}}
 
     dynamic = graph(["load-dynamic"], ["disable-linking"])
-    assert not check_dynamic_metadata(dynamic)
+    assert not check_dynamic_metadata(dynamic, "disabled")
+    inventory_graph = graph(["load-dynamic"], ["disable-linking"])
+    next(node for node in inventory_graph["resolve"]["nodes"] if node["id"] == "path+qubit-magika#0.18")["features"].append("inventory")
+    assert not check_dynamic_metadata(inventory_graph, "enabled")
+    assert check_dynamic_metadata(dynamic, "enabled")
+    assert check_dynamic_metadata(inventory_graph, "disabled")
     assert not ort_link_graph_violations(graph(["download-binaries"], ["download-binaries"]), "bundled")
     alternative_backend = graph(["load-dynamic", "alternative-backend"], ["disable-linking"])
     errors = check_dynamic_metadata(alternative_backend)
@@ -213,3 +240,8 @@ def run_self_tests() -> None:
     ]
     errors = check_dynamic_metadata(missing_magika)
     assert errors and "expected one reachable qubit-magika package identity" in " ".join(errors)
+    for kind in ("dev", "build"):
+        wrong_kind = graph(["load-dynamic"], ["disable-linking"])
+        wrong_kind["resolve"]["nodes"][0]["deps"][1]["dep_kinds"] = [{"kind": kind, "target": None}]
+        errors = check_dynamic_metadata(wrong_kind)
+        assert errors and "normal dependency edge" in " ".join(errors)

@@ -12,13 +12,14 @@ from _dynamic_loader_feature_policy import check_dynamic_metadata, parse_metadat
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--expect-inventory", choices=("enabled", "disabled"))
     args = parser.parse_args()
     if args.self_test:
         run_self_tests()
         print("dynamic loader feature checker self-tests passed")
         return 0
     try:
-        errors = check_dynamic_metadata(parse_metadata(sys.stdin.read()))
+        errors = check_dynamic_metadata(parse_metadata(sys.stdin.read()), args.expect_inventory)
     except ValueError as error:
         errors = [str(error)]
     if errors:
