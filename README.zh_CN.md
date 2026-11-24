@@ -8,15 +8,16 @@
 [![English Document](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 
 `qubit-magika` 为 `qubit-mime` 提供基于 Magika 的
-`qubit_mime::MimeDetector`。它适合需要结合文件内容识别 MIME 类型，并希望在应用
-启动时创建一个 detector、在多次检测之间复用它的应用或库。
+`qubit_mime::MimeDetector`，适用于文件名可能与实际内容不符的上传检测场景。它能在
+不让 `qubit-mime` 直接依赖 Magika 和 ONNX Runtime 的前提下识别内容，并允许应用在启动时
+创建一个 detector，供后续检测复用。
 
 ## 概述
 
 本 crate 默认启用 `bundled-onnxruntime`，普通构建无需单独安装 ONNX Runtime 即可
 链接和运行。应用也可以关闭默认 feature，自行提供兼容的 ONNX Runtime 共享库。使用
 `ort` 动态加载器时，须先调用 `ort::init_from` 初始化共享库，再创建 detector。
-Linux CI 的 [`dynamic-loader` job](.github/workflows/ci.yml) 会用这套配置对
+Linux CI 的 [`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml) 会用这套配置对
 Python 内容实际执行一次推理；依赖和启动示例见[用户手册](doc/user_guide.zh_CN.md)。
 
 ## 安装
@@ -26,6 +27,7 @@ Python 内容实际执行一次推理；依赖和启动示例见[用户手册](d
 qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
+qubit-operation = "0.3"
 ```
 
 ## 快速开始
@@ -34,39 +36,57 @@ qubit-spi = "0.14"
 use std::error::Error;
 use std::sync::Arc;
 
-use qubit_magika::MagikaMimeDetectorProvider;
+use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
 use qubit_mime::{
     MimeConfig,
     MimeDetector,
     MimeDetectorRegistry,
+    MimeDetectionPolicy,
 };
+use qubit_operation::{ManagerOptions, OperationManager};
 use qubit_spi::ProviderSelection;
 
-// 应用启动时注册 Provider，并且只创建一次开销较高的推理 Session。
-fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
-    let registry = MimeDetectorRegistry::global();
-    registry.register(MagikaMimeDetectorProvider::new())?;
+// 应用在整个生命周期内保留 Registry 和 runtime。
+fn create_detector() -> Result<(
+    MimeDetectorRegistry,
+    Arc<ManagedInferenceRuntime>,
+    Arc<dyn MimeDetector>,
+), Box<dyn Error>> {
+    let manager = OperationManager::new(ManagerOptions::default())?;
+    let runtime = Arc::new(ManagedInferenceRuntime::new(
+        manager,
+        MimeConfig::default().max_buffer_size(),
+    )?);
+    let registry = MimeDetectorRegistry::default();
+    registry.register(
+        MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)),
+    )?;
     let selection = ProviderSelection::named("magika")?;
-    registry
-        .set_default_selection(selection.clone())
-        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
-    Ok(provider.create_configured(&MimeConfig::default())?)
+    let detector = provider.create_configured(&MimeConfig::default())?;
+    Ok((registry, runtime, detector))
 }
 
-// 下游库复用 Detector，不重复初始化模型。
-fn library_x(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
-    detector.detect_by_content(
+// 文件名有误时，按上传内容验证类型。
+fn inspect_upload(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
+    detector.detect(
         b"#!/usr/bin/env python3\nprint('hello')\n",
+        Some("upload.txt"),
+        MimeDetectionPolicy::VerifyContent,
     )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let detector = create_detector()?;
+    let (_registry, runtime, detector) = create_detector()?;
     assert_eq!(
         Some("text/x-python".to_owned()),
-        library_x(detector.as_ref())?,
+        inspect_upload(detector.as_ref())?,
     );
+    let report = runtime.shutdown_blocking(
+        qubit_operation::ShutdownMode::Drain,
+        std::time::Duration::from_secs(5),
+    );
+    assert!(report.worker_stopped);
     Ok(())
 }
 ```
@@ -85,18 +105,30 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 ### 带 Operation scope 的异步 Provider 检测
 
-需要对异步 Provider 采样进行取消和资源释放跟踪的应用，可在 operation scope 中调用
-`MagikaMimeDetector::detect_async_provider_path_managed`。应用启动时创建并共享一个
-supervisor 和 detector；每个受管请求显式传入 scope；应用关闭前 drain detector。旧版
-`MimeDetector` hooks 不接收 operation scope，仍遵循原有契约。
+需要对异步 Provider 采样进行取消和资源释放跟踪的应用，可向
+`MagikaMimeDetector::detect_async_provider_path_managed` 或 `detect_bytes_managed` 传入
+`OperationScope`。受管调用会将工作关联到该 scope，使其报告能独立跟踪资源释放和业务结果。
+应用启动时创建 runtime 和 detector，每个受管请求传入 scope，并在应用关闭时 drain runtime。
 
-`qubit-mime` 的 async provider registry 负责选择并创建 async backend，但其 hooks
-不会收到 parent operation scope。Inventory 只向该 registry 注册未配置的 Provider。
-若请求需要纳入应用 scope 的生命周期观察，应显式调用 managed API。
-需要复现固定依赖布局时，先运行
-[`prepare-local-path-dependencies.sh --check-locked`](.infra/bin/prepare-local-path-dependencies.sh)，
-再按 [`local-path-dependencies.tsv`](.infra/ci/local-path-dependencies.tsv) 中的固定提交，
-依次检查根项目、动态加载 fixture 和 README consumer fixture 的锁定依赖：
+Inventory 只提交同步 `MimeDetectorSpec` factory，不会向 `qubit-mime` 独立的 async provider
+registry 添加 Provider，也不会附加应用 scope。通过支持 scope 的 async `MimeRuntime` 路由
+选择这个仅支持同步的 `magika` Provider 时，会返回 `AsyncUnsupported`，不会回退到同步推理。
+若需 scope 跟踪，可直接调用 Magika 的 managed API。旧版 content hook 通常等待推理结算；但
+runtime 的 `Cancel` 结果可能先返回，worker 仍会保留输入和许可直至访问结束。旧版 provider-path
+hook 等待业务结果，不暴露结算状态或 parent-scope 观察。区别见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
+
+启用 inventory 时，`MimeDetectorRegistry::builtin()` 会发现未配置的同步 Provider；默认选择仍是
+`repository`，因此需显式选择 `magika`。独立的 `MimeDetectorRegistry::default()` 初始为空，适合
+像上例那样为应用单独注册 Provider。重复注册同名 Provider 会报错。依赖 inventory 时需通过
+`use qubit_magika as _;` 引用 crate，避免链接器移除提交项。
+
+在源码仓库中准备缺少的本地依赖 checkout 时，请使用
+[准备脚本](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/prepare-local-path-dependencies.sh)。
+`--check-locked` 只检查现有兄弟仓库是否处于固定提交且工作区干净；发现缺失、提交不符或工作区有改动时会报错，
+但不会修复。准备操作不会改动现有 Git checkout，因此需先手动将漂移的 checkout 恢复到固定提交再检查。
+它会拒绝覆盖已占用的非 Git 路径。创建缺失 checkout 需要支持 `-Tn` 的 GNU `mv`。Cargo 包不
+包含 `.infra`，因此脚本和[固定提交列表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
+链接到源码仓库。准备好兄弟目录后，可用以下命令检查各 manifest 的锁定依赖：
 
 ```bash
 cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
@@ -110,9 +142,13 @@ cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtu
 或远端操作何时完成时，子操作释放和容量会继续保持 Pending，甚至可能一直如此。详见
 [受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)中的边界、worker 错误和关闭超时。
 
+Magika 返回 `Unknown` 或 `Undefined` 时没有 MIME 候选，结果为 `Ok(None)`，由选定的
+`MimeDetectionPolicy` 决定文件名回退。关闭超时不会强制中断 native 推理或 Provider I/O；请检查报告中的
+`worker_stopped` 和 `worker_panicked`。worker 尚未停止时，runtime 会保留句柄，后续关闭调用可继续观察并等待它退出。
+
 Provider 选择和 detector 配置是两个独立输入：`ProviderSelection` 决定允许哪个已注册
 Provider 创建服务，`MimeConfig` 则控制 Provider 解析完成后创建的 detector 实例。
-默认情况下，应用仍需在启动时显式注册 Provider。启用 `qubit-magika` 的
+未启用 inventory 时，应用需在启动时显式注册 Provider。启用 `qubit-magika` 的
 `inventory` feature 后，已链接的应用会在 `MimeDetectorRegistry::builtin()` 和
 `global()` 中发现由 `MagikaMimeDetectorProvider::new()` 提交的 `magika` Provider。
 默认选择仍是 `repository`；需要 Magika 时应显式选择。若需配置媒体流分类器，
@@ -174,7 +210,7 @@ parent-scope 生命周期观察；需要 scope 跟踪时使用 managed API。
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API 文档](https://docs.rs/qubit-magika)
 - [English README](README.md)
-- [固定的本地依赖提交](.infra/ci/local-path-dependencies.tsv)
+- [固定的本地依赖提交](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 
 ## 测试
 
@@ -185,12 +221,14 @@ cargo test
 # 使用项目声明的全部 feature 运行测试
 cargo test --all-features
 
-# 运行项目 CI 检查
-./.infra/bin/ci-check.sh
+# 运行项目检查（仅源码仓库提供）
+./.infra/bin/project-ci-check.sh
 
 # 检查代码覆盖率
 ./.infra/bin/coverage.sh
 ```
+
+发布的 Cargo 包不包含 `.infra` 脚本，请到[源码仓库](https://github.com/qubit-ltd/rs-magika)查看。
 
 ## 许可证
 
@@ -201,8 +239,9 @@ Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
 
 ## 贡献
 
-欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交
-Pull Request 前运行 `./.infra/bin/align-ci.sh`格式化代码，运行`./.infra/bin/ci-check.sh`对齐CI要求。
+欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交 Pull Request 前运行源码仓库中的
+[`align-ci.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/align-ci.sh) 格式化代码，
+再运行 [`project-ci-check.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/project-ci-check.sh)。
 
 ## 作者
 
