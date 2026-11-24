@@ -24,6 +24,9 @@ use qubit_operation::OperationOptions;
 use qubit_operation::OperationOutcome;
 use qubit_operation::RecoveryPhase;
 use qubit_operation::ResourceId;
+use qubit_operation::ResourceScopeError;
+use qubit_operation::ResourceScopeOptions;
+use qubit_operation::ScopeLimits;
 
 struct FailingCleanup {
     resource_id: Arc<OnceLock<ResourceId>>,
@@ -192,6 +195,112 @@ fn test_exhausted_recovery_store_capacity_leaves_parent_report_unreleased() {
     assert!(!settlement.all_released());
 
     store.request_shutdown().wait().unwrap();
+    drop(
+        manager
+            .request_shutdown(qubit_operation::ShutdownMode::Drain)
+            .wait()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn test_locked_operation_api_reuses_resource_and_attached_scope_capacity_after_cleanup() {
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use qubit_operation::ResourceCapacityError;
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_operation = Arc::clone(&attempts);
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let mut handle = manager
+        .try_submit(
+            OperationOptions {
+                limits: ScopeLimits {
+                    resources: 1,
+                    resource_scopes: 1,
+                    ..ScopeLimits::default()
+                },
+                ..OperationOptions::default()
+            },
+            move |scope| {
+                let first_scope = scope
+                    .resource_scope(ResourceScopeOptions { capacity: 1 })
+                    .unwrap();
+                assert!(matches!(
+                    scope.resource_scope(ResourceScopeOptions { capacity: 1 }),
+                    Err(ResourceScopeError::CapacityExceeded)
+                ));
+
+                let resource_id = Arc::new(OnceLock::new());
+                let cleanup = Arc::new(FailingCleanup {
+                    resource_id: Arc::clone(&resource_id),
+                    attempts: Arc::clone(&attempts_for_operation),
+                    failures_before_release: 0,
+                });
+                let resource = first_scope
+                    .reserve_resource()
+                    .unwrap()
+                    .commit_with(String::from("retained payload"), cleanup)
+                    .unwrap_or_else(|_| panic!("reserved resource should commit"));
+                resource_id
+                    .set(resource.id())
+                    .unwrap_or_else(|_| panic!("resource ID should be written once"));
+                drop(resource);
+                first_scope.end();
+
+                // Scope capacity is returned only after its cleanup report is
+                // aggregated into the parent. Retry admission until that
+                // public behavior shows the single attached-scope slot free.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let second_scope = loop {
+                    match scope.resource_scope(ResourceScopeOptions { capacity: 1 }) {
+                        Ok(resource_scope) => break resource_scope,
+                        Err(ResourceScopeError::CapacityExceeded) if Instant::now() < deadline => {
+                            std::thread::yield_now();
+                        }
+                        Err(error) => panic!("attached-scope capacity was not reusable: {error:?}"),
+                    }
+                };
+
+                // The first resource's successful cleanup also has to return
+                // the sole inherited resource permit.
+                let reservation = loop {
+                    match second_scope.reserve_resource() {
+                        Ok(reservation) => break reservation,
+                        Err(ResourceCapacityError::CapacityExceeded) if Instant::now() < deadline => {
+                            std::thread::yield_now();
+                        }
+                        Err(error) => panic!("resource capacity was not reusable: {error:?}"),
+                    }
+                };
+                let second_resource_id = Arc::new(OnceLock::new());
+                let second_cleanup = Arc::new(FailingCleanup {
+                    resource_id: Arc::clone(&second_resource_id),
+                    attempts: Arc::clone(&attempts_for_operation),
+                    failures_before_release: 0,
+                });
+                let second_resource = reservation
+                    .commit_with(String::from("retained payload"), second_cleanup)
+                    .unwrap_or_else(|_| panic!("reused resource reservation should commit"));
+                second_resource_id
+                    .set(second_resource.id())
+                    .unwrap_or_else(|_| panic!("second resource ID should be written once"));
+                drop(second_resource);
+                second_scope.end();
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+
+    assert!(matches!(
+        handle.wait_outcome().unwrap(),
+        OperationOutcome::Succeeded(())
+    ));
+    let settlement = handle.wait_settlement().unwrap();
+    assert!(settlement.all_released());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
     drop(
         manager
             .request_shutdown(qubit_operation::ShutdownMode::Drain)
