@@ -1134,9 +1134,7 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         if std::time::Instant::now() >= cancel_deadline {
             break None;
         }
-        std::thread::park_timeout(
-            cancel_deadline.saturating_duration_since(std::time::Instant::now()),
-        );
+        std::thread::park_timeout(cancel_deadline.saturating_duration_since(std::time::Instant::now()));
     };
     drop(driver);
     let worker_result = worker.join().unwrap();
