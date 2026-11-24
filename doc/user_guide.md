@@ -213,8 +213,11 @@ A configured media-stream classifier is used only for eligible high-level
 inputs, and precise detection must be enabled. When an input has a filename
 extension, that extension must be enabled and the initially detected MIME type
 must be one of the MIME types paired with that extension. Without an extension,
-the initially detected MIME type is matched directly. Conflicting extension
-and MIME candidates are skipped instead of refined.
+the initially detected MIME type is matched against configured ambiguous
+mappings. If it matches mappings that imply different audio/video pairings,
+refinement keeps the original MIME selection. Reusing the same pairing in
+multiple mappings is not a conflict. An extension and initial MIME type that
+do not form a configured pair are not refined.
 
 | Detection entry point | Classifier behavior |
 | --- | --- |
@@ -275,8 +278,10 @@ asynchronous equivalent is `detect_async_path` on `AsyncFileSystem`.
 
 ## Media Classifier Example
 
-Media refinement is optional. For example, the built-in ffprobe classifier can
-distinguish audio-only, video-only, and audio-video content. `ffprobe` must be
+Media refinement is optional. It follows the matching and conflict rules in
+[Media Refinement Support](#media-refinement-support). For example, the built-in
+ffprobe classifier can distinguish audio-only, video-only, and audio-video
+content. `ffprobe` must be
 installed and available on `PATH`:
 
 Enable precise detection before starting the application by setting
@@ -285,8 +290,10 @@ Enable precise detection before starting the application by setting
 The default ambiguous mappings cover `webm` (`video/webm` or `audio/webm`)
 and `ogg` (`video/ogg` or `audio/ogg`). With a filename extension, refinement
 requires that the extension is enabled and the initial MIME type belongs to
-its mapping. Without an extension, the initial MIME type is matched directly;
-conflicting extension and MIME candidates are skipped.
+its mapping. Without an extension, the initial MIME type is matched against
+configured mappings; different audio/video pairings keep the original MIME
+selection, while a pairing reused by several mappings is not a conflict. An
+extension and MIME type that do not form a configured pair are not refined.
 
 ```rust
 use std::sync::Arc;
@@ -308,8 +315,9 @@ For registry construction, pass the same classifier to
 `MagikaMimeDetectorProvider::with_media_stream_classifier` and pass the enabled
 configuration to `create_configured(&config)`. `MagikaMimeDetector::from_mime_config`
 accepts a configuration but does not attach a classifier; use the builder when
-both settings are needed. Classifier failures are reported as `MimeError`;
-refinement is best-effort and is applied only when the classifier succeeds.
+both settings are needed. A classifier result that cannot refine the selected
+candidate leaves that selection unchanged. Errors raised by the classifier
+propagate as `MimeError`.
 
 ### Sharing an application-managed inference runtime
 

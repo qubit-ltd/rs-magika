@@ -26,7 +26,10 @@ use qubit_mime::MediaStreamType;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
+use qubit_mime::MimeDetectorRegistry;
 use qubit_mime::MimeResult;
+use qubit_magika::MagikaMimeDetectorProvider;
+use qubit_spi::ProviderSelection;
 use tempfile::tempdir;
 
 use crate::support::ProviderFileSystemSpi;
@@ -194,6 +197,89 @@ fn test_provider_path_routes_do_not_refine_after_full_content_positive_control()
         true,
         "text/x-shellscript",
     );
+}
+
+#[test]
+fn test_registry_configured_classifier_refines_content() {
+    let mut raw_config = Config::new();
+    raw_config
+        .set(CONFIG_MIME_DETECTOR_DEFAULT, "magika")
+        .expect("detector default should be configurable");
+    raw_config
+        .set(CONFIG_MIME_ENABLE_PRECISE_DETECTION, true)
+        .expect("precise detection should be configurable");
+    raw_config
+        .set(CONFIG_MIME_PRECISE_DETECTION_PATTERNS, "sh")
+        .expect("precise patterns should be configurable");
+    raw_config
+        .set(
+            CONFIG_MIME_AMBIGUOUS_MIME_MAPPING,
+            "sh:application/x-shellscript,text/x-shellscript",
+        )
+        .expect("ambiguous mapping should be configurable");
+    let config = MimeConfig::from_config(&raw_config).expect("refinement config should parse");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let registry = MimeDetectorRegistry::default();
+    registry
+        .register(MagikaMimeDetectorProvider::with_media_stream_classifier(
+            Arc::new(OverrideClassifier {
+                content_calls: Arc::clone(&calls),
+                reader_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        ))
+        .expect("configured Magika provider should register");
+    let selection = ProviderSelection::named("magika").expect("canonical selection should parse");
+    let provider = registry
+        .resolve_selected(&selection)
+        .expect("canonical magika provider should resolve");
+    let detector = provider
+        .create_configured(&config)
+        .expect("configured provider should create its detector");
+
+    assert_eq!(
+        Some("application/x-shellscript".to_owned()),
+        detector
+            .detect_by_content(SHELL_SCRIPT)
+            .expect("registry detector should refine content"),
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "registry path must pass classifier"
+    );
+
+    // With precise detection disabled, the initial candidate stays at the
+    // other shell-script mapping, so a missing classifier cannot pass unnoticed.
+    let mut control_raw_config = Config::new();
+    control_raw_config
+        .set(CONFIG_MIME_DETECTOR_DEFAULT, "magika")
+        .expect("detector default should be configurable");
+    control_raw_config
+        .set(CONFIG_MIME_ENABLE_PRECISE_DETECTION, false)
+        .expect("precise detection should be disableable");
+    control_raw_config
+        .set(CONFIG_MIME_PRECISE_DETECTION_PATTERNS, "sh")
+        .expect("precise patterns should be configurable");
+    control_raw_config
+        .set(
+            CONFIG_MIME_AMBIGUOUS_MIME_MAPPING,
+            "sh:application/x-shellscript,text/x-shellscript",
+        )
+        .expect("ambiguous mapping should be configurable");
+    let control_config =
+        MimeConfig::from_config(&control_raw_config).expect("control config should parse");
+    let initial_detector = qubit_magika::MagikaMimeDetector::builder()
+        .mime_config(control_config)
+        .build()
+        .expect("control detector should initialize");
+    assert_eq!(
+        Some("text/x-shellscript".to_owned()),
+        initial_detector
+            .detect_by_content(SHELL_SCRIPT)
+            .expect("initial candidate detection should succeed"),
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

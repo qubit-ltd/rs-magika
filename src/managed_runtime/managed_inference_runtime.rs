@@ -213,8 +213,8 @@ impl ManagedInferenceRuntime {
     ///
     /// # Errors
     ///
-    /// Returns an error for a zero byte limit, worker startup failure, or
-    /// Magika session initialization failure.
+    /// Returns an error for a zero byte limit, failure to create a service
+    /// group from `manager`, worker startup, or Magika session initialization.
     pub fn new(manager: OperationManager, max_in_flight_bytes: usize) -> MimeResult<Self> {
         if max_in_flight_bytes == 0 {
             return Err(MimeError::detector_backend(
