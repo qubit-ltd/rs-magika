@@ -18,6 +18,7 @@ use std::task::Waker;
 use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::ResourceRef;
+use super::request_resource_scope_guard::RequestResourceScopeGuard;
 
 pub(super) use super::admission_gate::AdmissionGate;
 use super::task_control::register_waker;
@@ -40,6 +41,8 @@ pub(crate) struct TaskState {
     /// User reference to the scope-owned cleanup record, dropped after local
     /// worker and driver access ends.
     scope_resource: std::sync::Mutex<Option<ResourceRef<Arc<super::request_resource_owner::RequestResourceOwner>>>>,
+    /// Attached one-request scope ended when local request access completes.
+    request_scope: std::sync::Mutex<Option<RequestResourceScopeGuard>>,
     /// Weak back-reference lets aggregate release prune the runtime's strong
     /// registry.
     active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
@@ -86,6 +89,7 @@ impl TaskState {
             bridge: std::sync::Mutex::new(bridge),
             owner: std::sync::Mutex::new(None),
             scope_resource: std::sync::Mutex::new(None),
+            request_scope: std::sync::Mutex::new(None),
             active_tasks,
             admission_gate,
         }
@@ -219,6 +223,11 @@ impl TaskState {
         *self.scope_resource.lock().unwrap_or_else(|error| error.into_inner()) = scope_resource;
     }
 
+    /// Attaches the one-request cleanup scope to this task lifecycle.
+    pub(super) fn attach_request_scope(&self, scope: RequestResourceScopeGuard) {
+        *self.request_scope.lock().unwrap_or_else(|error| error.into_inner()) = Some(scope);
+    }
+
     /// Clones the request owner while it remains attached to this task.
     pub(super) fn request_resource_owner(&self) -> Option<Arc<super::request_resource_owner::RequestResourceOwner>> {
         self.owner
@@ -337,6 +346,14 @@ impl TaskState {
         wake_all(wakers);
         self.released.notify_all();
         let owner = self.owner.lock().unwrap_or_else(|error| error.into_inner()).take();
+        let mut request_scope = self
+            .request_scope
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(scope) = request_scope.as_mut() {
+            scope.end();
+        }
         let scope_resource = self
             .scope_resource
             .lock()
@@ -362,6 +379,14 @@ impl TaskState {
         };
         wake_all(wakers);
         self.released.notify_all();
+        let mut request_scope = self
+            .request_scope
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(scope) = request_scope.as_mut() {
+            scope.end();
+        }
         let scope_resource = self
             .scope_resource
             .lock()

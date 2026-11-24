@@ -224,7 +224,9 @@ impl MagikaMimeDetector {
                 limit,
             });
         }
-        let admission = self.runtime.reserve_for_provider(Some(scope), max_bytes)?;
+        // This admission is created before the child operation is submitted;
+        // attach its resource scope only after the child body starts.
+        let admission = self.runtime.reserve_for_provider(None, max_bytes)?;
         let runtime = std::sync::Arc::clone(&self.runtime);
         let file_system = file_system.clone();
         let path = path.clone();
@@ -240,7 +242,10 @@ impl MagikaMimeDetector {
                     .await
             })
             .map_err(|error| {
-                MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
+                MimeError::detector_backend(
+                    "magika",
+                    format!("operation scope rejected inference: provider operation submission failed: {error:?}"),
+                )
             })?;
         let outcome = operation.wait_outcome().await.map_err(|error| {
             MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))

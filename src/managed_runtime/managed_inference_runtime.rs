@@ -406,7 +406,9 @@ impl ManagedInferenceRuntime {
             WorkerInput::Bridge(_, limit, _) => *limit,
             WorkerInput::Features(_, _) => 0,
         };
-        let admission = self.reserve_request(parent, byte_count)?;
+        // The request scope is registered inside the accepted child body,
+        // after submission succeeds and before that body dispatches work.
+        let admission = self.reserve_request(None, byte_count)?;
         self.submit_operation_admitted(parent, admission, input).await
     }
 

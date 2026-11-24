@@ -21,6 +21,7 @@ pub(super) mod provider_driver_guard;
 pub(super) mod request_admission;
 mod request_resource_cleanup;
 mod request_resource_completion_facts;
+mod request_resource_scope_guard;
 pub(super) mod request_resource_owner;
 pub(super) mod service_permit;
 pub(super) mod task_control;

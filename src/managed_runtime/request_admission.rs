@@ -15,10 +15,12 @@ use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::OperationScope;
+use qubit_operation::ResourceScopeOptions;
 
 use super::byte_permit::BytePermit;
 use super::job::Job;
 use super::request_resource_cleanup::RequestResourceCleanup;
+use super::request_resource_scope_guard::RequestResourceScopeGuard;
 pub(super) use super::request_resource_owner::RequestResourceOwner;
 use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
@@ -308,7 +310,13 @@ impl RequestAdmission {
         if self.state.request_resource_owner().is_some() {
             return Ok(());
         }
-        let reservation = scope.reserve_resource().map_err(|error| {
+        let resource_scope = scope
+            .resource_scope(ResourceScopeOptions { capacity: 1 })
+            .map_err(|error| {
+                MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
+            })?;
+        let request_scope = RequestResourceScopeGuard::new(resource_scope);
+        let reservation = request_scope.scope().reserve_resource().map_err(|error| {
             MimeError::detector_backend("magika", format!("operation scope rejected inference: {error:?}"))
         })?;
         let owner = Arc::new(RequestResourceOwner::new(
@@ -319,13 +327,19 @@ impl RequestAdmission {
             self.bytes.take().expect("unregistered admission retains byte capacity"),
             false,
         ));
-        let resource = reservation
-            .commit_with(Arc::clone(&owner), Arc::new(RequestResourceCleanup))
-            .map_err(|error| {
+        let resource = match reservation.commit_with(Arc::clone(&owner), Arc::new(RequestResourceCleanup)) {
+            Ok(resource) => resource,
+            Err(error) => {
                 drop(error);
-                MimeError::detector_backend("magika", "operation scope rejected inference resource commit")
-            })?;
+                owner.release_resources();
+                return Err(MimeError::detector_backend(
+                    "magika",
+                    "operation scope rejected inference resource commit",
+                ));
+            }
+        };
         owner.set_resource_id(resource.id());
+        self.state.attach_request_scope(request_scope);
         self.state.attach_owner(owner, Some(resource));
         Ok(())
     }
@@ -416,6 +430,64 @@ mod tests {
                 let mut admission = admission;
                 admission.retain_in_scope(&scope).unwrap();
                 admission.retain_in_scope(&scope).unwrap();
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        assert!(matches!(
+            operation.wait_outcome().unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
+        assert!(operation.wait_settlement().unwrap().all_released());
+    }
+
+    #[test]
+    fn test_scope_resource_registration_reuses_parent_resource_and_scope_capacity() {
+        use std::time::Duration;
+        use std::time::Instant;
+
+        use qubit_operation::ScopeLimits;
+
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let mut options = OperationOptions::default();
+        options.limits = ScopeLimits {
+            resources: 1,
+            resource_scopes: 1,
+            ..ScopeLimits::default()
+        };
+        let mut operation = manager
+            .try_submit(options, |scope| {
+                let budget = Arc::new(ByteBudget::new(1));
+                let first = RequestAdmission::new(
+                    Arc::new(TaskState::new(709, None)),
+                    service_resource(),
+                    budget.try_acquire(1).unwrap(),
+                );
+                let mut first = first;
+                first.retain_in_scope(&scope).unwrap();
+                first.settle_error(qubit_mime::MimeError::detector_backend("magika", "first request complete"));
+
+                let second = RequestAdmission::new(
+                    Arc::new(TaskState::new(710, None)),
+                    service_resource(),
+                    budget.try_acquire(1).unwrap(),
+                );
+                let mut second = second;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match second.retain_in_scope(&scope) {
+                        Ok(()) => break,
+                        Err(error) if Instant::now() < deadline => {
+                            assert!(
+                                error.to_string().contains("CapacityExceeded"),
+                                "unexpected request scope rejection: {error}"
+                            );
+                            std::thread::yield_now();
+                        }
+                        Err(error) => panic!("request scope capacity was not reusable: {error}"),
+                    }
+                }
+                second.settle_error(qubit_mime::MimeError::detector_backend("magika", "second request complete"));
                 Ok::<_, ()>(())
             })
             .unwrap();
