@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from _local_package_identities import (
     run_self_tests as run_local_package_identity_self_tests,
@@ -148,7 +148,7 @@ def consumer_manifest(
         + "\n"
         + (
             "\n[patch.crates-io]\n"
-            f'qubit-operation = {{ path = "{local_paths["qubit-operation"]}" }}\n'
+            f'qubit-operation = {toml_value({"path": str(local_paths["qubit-operation"])})}\n'
             if filename is not None
             else ""
         )
@@ -292,6 +292,26 @@ def run_self_tests() -> None:
             local_manifest["patch"]["crates-io"]["qubit-operation"]["path"]
             == "layout/rs-operation"
         )
+        for root in (
+            Path('/tmp/quoted"directory/rs-magika'),
+            PureWindowsPath("C:/Users/example/rs-magika"),
+        ):
+            for inventory in (False, True):
+                local_dependencies = dict(dependencies)
+                if inventory:
+                    magika = local_dependencies["qubit-magika"]
+                    if isinstance(magika, dict):
+                        magika = dict(magika)
+                    else:
+                        magika = {"version": magika}
+                    magika["features"] = ["inventory"]
+                    local_dependencies["qubit-magika"] = magika
+                generated = tomllib.loads(consumer_manifest(local_dependencies, root, filename))
+                dependency_path = generated["dependencies"]["qubit-operation"]["path"]
+                patch_path = generated["patch"]["crates-io"]["qubit-operation"]["path"]
+                expected_operation_path = str(root.parent / "rs-operation")
+                assert dependency_path == expected_operation_path
+                assert patch_path == expected_operation_path
         for invalid_registry_manifest in (
             registry_manifest.replace('qubit-magika = "0.18"', 'qubit-magika = { version = "0.18", path = "../rs-magika" }'),
             registry_manifest + "\n[patch.crates-io]\nqubit-magika = { path = \"../rs-magika\" }\n",
