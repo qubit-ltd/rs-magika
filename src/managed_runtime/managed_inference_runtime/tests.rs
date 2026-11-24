@@ -3672,23 +3672,29 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
         )
         .unwrap();
 
-    assert!(crate::tests::internal::bridge_wait::poll_before(
-        bridge.next_request(),
-        "disconnected provider request closure",
-        Duration::from_secs(2),
-    )
-    .is_none());
-    let error = crate::tests::internal::bridge_wait::poll_before(
-        future,
-        "disconnected provider business result",
-        Duration::from_secs(2),
-    )
-    .unwrap_err();
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut next_request = std::pin::pin!(bridge.next_request());
+    assert!(
+        matches!(Pin::as_mut(&mut next_request).poll(&mut context), Poll::Ready(None)),
+        "disconnected provider request should resolve to Ready(None)"
+    );
+    let mut future = std::pin::pin!(future);
+    let business_result = Pin::as_mut(&mut future).poll(&mut context);
+    assert!(
+        matches!(&business_result, Poll::Ready(Err(_))),
+        "disconnected provider business future should resolve to Ready(Err(...))"
+    );
+    let error = match business_result {
+        Poll::Ready(Err(error)) => error,
+        Poll::Ready(Ok(_)) => panic!("disconnected provider business future resolved successfully"),
+        Poll::Pending => panic!("disconnected provider business future remained pending"),
+    };
     assert!(error.to_string().contains("disconnected"));
-    crate::tests::internal::bridge_wait::poll_before(
-        bridge.closed(),
-        "disconnected bridge closed notification",
-        Duration::from_secs(2),
+    let mut closed = std::pin::pin!(bridge.closed());
+    assert!(
+        matches!(Pin::as_mut(&mut closed).poll(&mut context), Poll::Ready(())),
+        "disconnected bridge should resolve closed() to Ready(())"
     );
     assert!(!input_dropped.load(std::sync::atomic::Ordering::Acquire));
     {
