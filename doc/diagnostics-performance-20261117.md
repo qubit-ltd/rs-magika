@@ -133,3 +133,18 @@ Each resolved the fixture root `magika-inventory-consumer 0.0.0`, `qubit-magika 
 | Per-poll segment sampling / fairness evidence | Missing; fixture behavior assertions do not record segment counts, work per poll, or fairness under load. |
 
 There is no identified production load and no complete target set, so the planned same-input topology comparison was not run. Existing cold-start, peak RSS, p99, success/refusal under representative load, and segment fairness evidence remain absent. The downstream fixture establishes integration shape and locked dependency resolution, not production performance. No evidence supports changing the runtime topology in this pass; keep the architectural decision and evidence limits stated above.
+
+## 2026-11-24 T8 revalidation against the assigned dependency layout
+
+The assigned Magika worktree is `rs-magika@2ad8d078c20202eef3388cd2f38492ebc8f9f0ab`; its sibling dependency worktree is the requested `rs-mime@33424a6f63feb8dab3a1214fd68f9ce1151c7762`. The sibling worktree has no `tests/fixtures/magika_inventory_consumer` directory. Both requested locked offline metadata commands were therefore attempted from the assigned Magika worktree and failed before resolving a graph (exit 101, `manifest path ... does not exist`):
+
+```text
+cargo +1.94.0 metadata --locked --offline --format-version 1 --manifest-path ../rs-mime/tests/fixtures/magika_inventory_consumer/Cargo.toml
+cargo +1.94.0 metadata --locked --offline --format-version 1 --manifest-path ../rs-mime/tests/fixtures/magika_inventory_consumer/Cargo.toml --features inventory
+```
+
+For comparison, the read-only source-layout repository currently has `rs-mime@d47152393640a1c632e12c0204dea5f114a9ea27`, and contains the fixture and workflow. Running the same metadata configurations there succeeded offline (exit 0) for both explicit registration and `inventory`. Both graphs resolve the fixture root `magika-inventory-consumer 0.0.0`, `qubit-magika 0.18.0`, `qubit-mime 0.22.0`, and `qubit-operation 0.3.2`. These resolve the source-layout path dependencies at the time of the check; they are not the assigned fixed dependency graph and do not reproduce the workflow's historical pins.
+
+The source-layout `.github/workflows/magika-consumer.yml` checks out Magika at `d78dd23a1b849ff8a3e3cbfcdd97def889ce0a7b` and operation at `81048bfdee881d45d510e14eec5c1c3016a545d1`, then verifies operation identity and runs both consumer configurations after downloading and checking ONNX Runtime. The assigned rs-mime SHA lacks that workflow and fixture, so this pass inspected the workflow and repeated metadata only; it did not run the historical checkout graph, download ONNX Runtime, or execute the consumer.
+
+This revalidation does not change the workload evidence finding: the fixture is integration coverage, while representative request mix, target concurrency, p95/p99 objectives, memory ceiling, and per-poll segment/fairness data remain unavailable. The existing synthetic, warm two-request experiment remains a mechanism check and does not justify a topology change.
