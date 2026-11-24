@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import posixpath
 import re
@@ -123,6 +124,12 @@ def validate_and_rebase_manifest(
             raise ValueError(f"{guide_name}: cannot preserve non-table value at root key {table!r}")
     for name, value in manifest.items():
         _validate_toml_value(value, guide_name, name)
+    patch_table = manifest.get("patch", {})
+    if not isinstance(patch_table, dict):
+        raise ValueError(f"{guide_name}: cannot preserve non-table value at patch")
+    for registry, packages in patch_table.items():
+        if not isinstance(packages, dict):
+            raise ValueError(f"{guide_name}: cannot preserve non-table value at patch.{registry}")
     dependencies = manifest["dependencies"]
     assert isinstance(dependencies, dict)
     virtual_siblings = {
@@ -166,7 +173,7 @@ def validate_and_rebase_manifest(
             raise ValueError(f"{guide_name}: dynamic manifest must enable ort/load-dynamic")
         if "bundled-onnxruntime" in magika.get("features", []) or "download-binaries" in features:
             raise ValueError(f"{guide_name}: dynamic manifest must not enable bundled runtime downloads")
-    if tomllib.loads(manifest_text(rebased, add_package=False)) != rebased:
+    if tomllib.loads(manifest_text(rebased, add_package=False, add_workspace=False)) != rebased:
         raise ValueError(f"{guide_name}: TOML serialization changed the rebased manifest structure")
     return rebased
 
@@ -180,7 +187,11 @@ def _guide_relative_path(value: str, guide_name: str, key: str) -> str:
 
 
 def _validate_toml_value(value: object, guide_name: str, key: str) -> None:
-    if isinstance(value, (str, bool, int, float)):
+    if isinstance(value, bool) or isinstance(value, (str, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{guide_name}: cannot preserve non-finite TOML value at {key}")
         return
     if isinstance(value, list):
         for index, item in enumerate(value):
@@ -193,7 +204,9 @@ def _validate_toml_value(value: object, guide_name: str, key: str) -> None:
     raise ValueError(f"{guide_name}: cannot preserve unsupported TOML value at {key}")
 
 
-def manifest_text(manifest: dict[str, object], add_package: bool) -> str:
+def manifest_text(
+    manifest: dict[str, object], *, add_package: bool, add_workspace: bool
+) -> str:
     unsupported = set(manifest) - {"package", "workspace", "dependencies", "patch"}
     if unsupported:
         raise ValueError(f"cannot serialize unsupported root table/key {sorted(unsupported)[0]!r}")
@@ -210,7 +223,7 @@ def manifest_text(manifest: dict[str, object], add_package: bool) -> str:
         lines.append("[workspace]")
         lines.extend(f"{toml_key(key)} = {toml_value(value)}" for key, value in workspace.items())
         lines.append("")
-    elif add_package:
+    elif add_workspace:
         lines.extend(("[workspace]", ""))
     for section in ("dependencies",):
         values = manifest.get(section, {})
@@ -270,7 +283,7 @@ def inventory_dependency(markdown: str, guide_name: str) -> dict[str, object]:
         if not re.search(r"\bqubit-magika\s*=", code):
             continue
         try:
-            normalized_code = re.sub(r"\s+", " ", code).strip()
+            normalized_code = _join_inline_toml_array_lines(code)
             value = tomllib.loads("[dependencies]\n" + normalized_code)["dependencies"].get("qubit-magika")
         except tomllib.TOMLDecodeError:
             continue
@@ -285,6 +298,56 @@ def inventory_dependency(markdown: str, guide_name: str) -> dict[str, object]:
     if not isinstance(dependency, dict) or "inventory" not in dependency.get("features", []):
         raise ValueError(f"{guide_name}: inventory dependency does not enable inventory")
     return dependency
+
+
+def _join_inline_toml_array_lines(source: str) -> str:
+    output: list[str] = []
+    index = 0
+    in_basic_string = False
+    in_literal_string = False
+    escaped = False
+    while index < len(source):
+        char = source[index]
+        if in_basic_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_basic_string = False
+            index += 1
+            continue
+        if in_literal_string:
+            output.append(char)
+            if char == "'":
+                in_literal_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_basic_string = True
+            output.append(char)
+            index += 1
+            continue
+        if char == "'":
+            in_literal_string = True
+            output.append(char)
+            index += 1
+            continue
+        if char == "\n":
+            previous = len(output) - 1
+            while previous >= 0 and output[previous].isspace():
+                previous -= 1
+            following = index + 1
+            while following < len(source) and source[following].isspace():
+                following += 1
+            if previous >= 0 and output[previous] == "=" and following < len(source) and source[following] == "[":
+                output.append(" ")
+                index = following
+                continue
+        output.append(char)
+        index += 1
+    return "".join(output)
 
 
 def inventory_manifest(
@@ -447,8 +510,30 @@ qubit-operation = { path = "../rs-operation" }
     assert rebased["dependencies"]["qubit-magika"]["path"] == "/layout/rs-magika"
     assert rebased["dependencies"]["qubit-operation"]["path"] == "/layout/rs-operation"
     assert rebased["patch"]["crates-io"]["qubit-operation"]["path"] == "/layout/rs-operation"
-    serialized = tomllib.loads(manifest_text(parsed_application, add_package=False))
+    serialized = tomllib.loads(
+        manifest_text(parsed_application, add_package=False, add_workspace=False)
+    )
     assert serialized == parsed_application
+    shell_fixtures = (
+        {"dependencies": {}, "package": {"name": "existing-package", "version": "1.0.0"}},
+        {"dependencies": {}, "workspace": {"members": ["member"]}},
+        {"dependencies": {}, "package": {"name": "existing-package"}, "workspace": {}},
+        {"dependencies": {}},
+    )
+    for fixture in shell_fixtures:
+        add_package = "package" not in fixture
+        add_workspace = "workspace" not in fixture
+        expected = json.loads(json.dumps(fixture))
+        if add_package:
+            expected["package"] = {
+                "name": "managed-guide-graph", "version": "0.0.0", "edition": "2024"
+            }
+        if add_workspace:
+            expected["workspace"] = {}
+        generated = manifest_text(
+            fixture, add_package=add_package, add_workspace=add_workspace
+        )
+        assert tomllib.loads(generated) == expected
     inventory_line = '`qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`'
     inventory_source = inventory_manifest(parsed_application, inventory_line, guide)
     inventory_rebased = validate_and_rebase_manifest(inventory_source, guide, Path("/layout/rs-magika"))
@@ -468,6 +553,16 @@ qubit-operation = { path = "../rs-operation" }
     dynamic_manifest["dependencies"]["qubit-magika"]["default-features"] = False
     dynamic_manifest["dependencies"]["ort"] = {"version": ">=2.0.0-rc.12,<2.1", "default-features": False, "features": ["std", "ndarray", "load-dynamic", "api-24"]}
     validate_and_rebase_manifest(dynamic_manifest, guide, Path("/layout/rs-magika"), dynamic=True)
+    for invalid_text, expected_error in (
+        (application.replace('metadata = { "display name" = "Application" }', 'metadata = { value = inf }'), "non-finite TOML value at package.metadata.value"),
+        (application.replace('[patch.crates-io]\nqubit-operation = { path = "../rs-operation" }', '[patch]\ncrates-io = "not-a-table"'), "non-table value at patch.crates-io"),
+    ):
+        try:
+            validate_and_rebase_manifest(tomllib.loads(invalid_text), guide, Path("/layout/rs-magika"))
+        except ValueError as error:
+            assert expected_error in str(error), str(error)
+        else:
+            raise AssertionError(f"accepted unrepresentable TOML fixture: {expected_error}")
     for table in (
         "[target.'cfg(unix)'.dependencies]\nort = { features = [\"download-binaries\"] }\n",
         "[replace]\n\"qubit-magika:0.18.0\" = { path = \"../rs-magika\" }\n",
@@ -574,6 +669,12 @@ qubit-operation = { path = "../rs-operation" }
         )
         assert normal_dependency["path"] == "../rs-magika"
         assert normal_dependency["features"] == ["inventory"]
+    whitespace_inventory = inventory_dependency(
+        r'`qubit-magika = { version = "0.18", features =' + "\n"
+        + r'["inventory"], note = "two  spaces and \\ slash" }`',
+        guide,
+    )
+    assert whitespace_inventory["note"] == "two  spaces and \\ slash"
 
 
 def toml_value(value: object) -> str:
@@ -720,7 +821,23 @@ def main() -> int:
                 (graph_dir / "src").mkdir()
                 (graph_dir / "src" / "lib.rs").write_text("// metadata-only guide consumer\n", encoding="utf-8")
                 graph_manifest = graph_dir / "Cargo.toml"
-                graph_manifest.write_text(manifest_text(selected, add_package="package" not in selected), encoding="utf-8")
+                add_package = "package" not in selected
+                add_workspace = "workspace" not in selected
+                serialized_manifest = manifest_text(
+                    selected, add_package=add_package, add_workspace=add_workspace
+                )
+                expected_manifest = json.loads(json.dumps(selected))
+                if add_package:
+                    expected_manifest["package"] = {
+                        "name": "managed-guide-graph",
+                        "version": "0.0.0",
+                        "edition": "2024",
+                    }
+                if add_workspace:
+                    expected_manifest["workspace"] = {}
+                if tomllib.loads(serialized_manifest) != expected_manifest:
+                    raise ValueError(f"{guide}: generated {variant} Cargo shell changed manifest semantics")
+                graph_manifest.write_text(serialized_manifest, encoding="utf-8")
                 metadata_result = subprocess.run(
                     ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(graph_manifest)],
                     cwd=project_root, env=cargo_env, capture_output=True, text=True, check=False,
