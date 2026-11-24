@@ -657,7 +657,10 @@ mod tests {
             recovery.snapshot().resources[0]
         );
 
-        let retry = recovery.try_retry().unwrap().wait().unwrap();
+        let retry = block_on(
+            recovery.try_retry().unwrap().wait_async(),
+            "pending provider I/O recovery retry",
+        );
         assert_eq!(retry.recovery.phase, RecoveryPhase::Pending);
         assert_eq!(recovery.snapshot().failures_total, 1);
         assert!(!settlement.all_released());
