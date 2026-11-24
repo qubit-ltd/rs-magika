@@ -18,9 +18,9 @@ use std::task::Waker;
 use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::ResourceRef;
-use super::request_resource_scope_guard::RequestResourceScopeGuard;
 
 pub(super) use super::admission_gate::AdmissionGate;
+use super::request_resource_scope_guard::RequestResourceScopeGuard;
 use super::task_control::register_waker;
 use super::task_inner::TaskInner;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
@@ -145,6 +145,16 @@ impl TaskState {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .access_complete
+    }
+
+    /// Records that this request's input is owned by the worker queue.
+    pub(super) fn mark_dispatched(&self) {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner()).dispatched = true;
+    }
+
+    /// Reports whether the worker queue can deliver this request's result.
+    pub(super) fn was_dispatched(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner()).dispatched
     }
 
     /// Polls whether stop was requested, registering the caller under the

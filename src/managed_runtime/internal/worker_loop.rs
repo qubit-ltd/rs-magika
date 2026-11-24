@@ -58,10 +58,11 @@ pub(super) fn run_worker(
     receiver: mpsc::Receiver<Job>,
     gate: Arc<Mutex<AdmissionGate>>,
     infer: impl FnMut(WorkerInput) -> MimeResult<Option<String>>,
+    on_fault: impl Fn(&Arc<super::super::task_state::TaskState>),
     after_business: impl Fn(),
     before_exit: impl FnOnce(),
 ) {
-    run_worker_with_before_first_recv(receiver, gate, infer, || {}, after_business, before_exit);
+    run_worker_with_before_first_recv(receiver, gate, infer, || {}, on_fault, after_business, before_exit);
 }
 
 /// Runs the worker with an optional deterministic first-receive gate.
@@ -72,6 +73,7 @@ pub(super) fn run_worker(
 /// * `gate` - Admission state synchronized with the queue.
 /// * `infer` - Inference operation run for each input.
 /// * `before_first_recv` - Hook called before receiving the first job.
+/// * `on_fault` - Callback after the worker fault is linearized with admission.
 /// * `after_business` - Hook called after publishing each business result.
 /// * `before_exit` - Hook called before the worker exits.
 pub(super) fn run_worker_with_before_first_recv(
@@ -79,6 +81,7 @@ pub(super) fn run_worker_with_before_first_recv(
     gate: Arc<Mutex<AdmissionGate>>,
     mut infer: impl FnMut(WorkerInput) -> MimeResult<Option<String>>,
     before_first_recv: impl FnOnce(),
+    on_fault: impl Fn(&Arc<super::super::task_state::TaskState>),
     after_business: impl Fn(),
     before_exit: impl FnOnce(),
 ) {
@@ -113,6 +116,8 @@ pub(super) fn run_worker_with_before_first_recv(
                 let mut gate = gate.lock().unwrap_or_else(|error| error.into_inner());
                 gate.closed = true;
                 gate.faulted = true;
+                drop(gate);
+                on_fault(&state);
             }
             state.finish_business(result, outcome);
         }

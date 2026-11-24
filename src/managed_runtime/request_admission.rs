@@ -355,6 +355,15 @@ impl RequestAdmission {
         if self.state.request_resource_owner().is_some() {
             return Ok(());
         }
+        if scope.context().stop_reason().is_some() {
+            return Err(MimeError::detector_backend(
+                "magika",
+                format!(
+                    "operation scope rejected inference: {:?}",
+                    qubit_operation::ResourceScopeError::Stopped
+                ),
+            ));
+        }
         let resource_scope = scope
             .resource_scope(ResourceScopeOptions { capacity: 1 })
             .map_err(|error| {

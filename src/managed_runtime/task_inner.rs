@@ -16,6 +16,8 @@ use qubit_operation::ChildOutcomeKind;
 pub(super) struct TaskInner {
     /// Whether the worker has started consuming this job.
     pub(super) started: bool,
+    /// Whether this request's input has been handed to the worker queue.
+    pub(super) dispatched: bool,
     /// Whether cancellation has been requested.
     pub(super) stop_requested: bool,
     /// Result available to the inference future, if finished.
@@ -39,6 +41,7 @@ impl TaskInner {
     pub(super) const fn new() -> Self {
         Self {
             started: false,
+            dispatched: false,
             stop_requested: false,
             result: None,
             business: None,
