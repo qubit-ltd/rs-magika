@@ -17,7 +17,7 @@ use crate::internal::async_sample_bridge::AsyncSampleBridge;
 
 /// Owned byte payload moved through the inference worker.
 #[cfg(not(test))]
-pub(super) type WorkerBytes = Box<[u8]>;
+pub(crate) type WorkerBytes = Box<[u8]>;
 
 /// Constructs the production byte payload without changing its representation.
 ///
@@ -31,7 +31,7 @@ pub(super) fn worker_bytes(bytes: Box<[u8]>) -> WorkerBytes {
 
 /// Test payload that can pause destruction after its bytes have been dropped.
 #[cfg(test)]
-pub(super) struct WorkerBytes {
+pub(crate) struct WorkerBytes {
     /// Owned input bytes.
     bytes: Box<[u8]>,
     /// Optional test observer dropped after the byte allocation.
@@ -93,7 +93,7 @@ impl std::ops::Deref for WorkerBytes {
 }
 
 /// Owned work item consumed by the session-owning inference thread.
-pub(super) enum WorkerInput {
+pub(crate) enum WorkerInput {
     /// Input bytes whose sampling and features are owned by the worker.
     Bytes(
         /// Bounded payload retained while sampling and inference run.

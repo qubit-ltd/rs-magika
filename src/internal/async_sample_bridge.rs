@@ -91,9 +91,9 @@ impl AsyncSampleBridge {
     /// range beyond the resource or a short provider response, and
     /// `Interrupted` when the bridge closes before the range is answered.
     pub(crate) fn read_at(self: &Arc<Self>, offset: u64, output: &mut [u8]) -> io::Result<()> {
-        let end = offset
-            .checked_add(output.len() as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sample range offset overflow"))?;
+        let end = offset.checked_add(output.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "sample range offset overflow")
+        })?;
         if end > self.length {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -105,13 +105,21 @@ impl AsyncSampleBridge {
         }
 
         let response = Arc::new(Response::new());
-        let request = ReadRequest::new(offset, output.len(), Arc::clone(&response), Arc::downgrade(self));
+        let request = ReadRequest::new(
+            offset,
+            output.len(),
+            Arc::clone(&response),
+            Arc::downgrade(self),
+        );
         let wake = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             while !state.closed && (state.pending.is_some() || state.active.is_some()) {
                 #[cfg(test)]
                 self.waiting_readers.fetch_add(1, Ordering::Release);
-                state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner());
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner());
                 #[cfg(test)]
                 self.waiting_readers.fetch_sub(1, Ordering::Release);
             }
@@ -125,11 +133,17 @@ impl AsyncSampleBridge {
             waker.wake();
         }
 
-        let mut result = response.result.lock().unwrap_or_else(|error| error.into_inner());
+        let mut result = response
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         while result.is_none() {
             #[cfg(test)]
             self.waiting_responses.fetch_add(1, Ordering::Release);
-            result = response.ready.wait(result).unwrap_or_else(|error| error.into_inner());
+            result = response
+                .ready
+                .wait(result)
+                .unwrap_or_else(|error| error.into_inner());
             #[cfg(test)]
             self.waiting_responses.fetch_sub(1, Ordering::Release);
         }
@@ -174,7 +188,11 @@ impl AsyncSampleBridge {
             if state.closed {
                 return Poll::Ready(());
             }
-            if !state.close_wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+            if !state
+                .close_wakers
+                .iter()
+                .any(|waker| waker.will_wake(cx.waker()))
+            {
                 state.close_wakers.push(cx.waker().clone());
             }
             Poll::Pending
@@ -183,7 +201,12 @@ impl AsyncSampleBridge {
     }
 
     #[cfg(test)]
-    pub(crate) fn wait_for_test_waiters(&self, readers: usize, responses: usize, timeout: std::time::Duration) -> bool {
+    pub(crate) fn wait_for_test_waiters(
+        &self,
+        readers: usize,
+        responses: usize,
+        timeout: std::time::Duration,
+    ) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             if self.waiting_readers.load(Ordering::Acquire) >= readers
@@ -238,8 +261,28 @@ impl AsyncSampleBridge {
 }
 
 /// Creates the interruption returned when a worker's bridge has closed.
-fn closed_error() -> io::Error {
-    io::Error::new(io::ErrorKind::Interrupted, "async sample bridge closed")
+pub(crate) fn closed_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, BridgeClosed)
+}
+
+/// Private source that distinguishes an artificial bridge close from provider
+/// I/O returning `Interrupted`.
+#[derive(Debug)]
+struct BridgeClosed;
+
+impl std::fmt::Display for BridgeClosed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("async sample bridge closed")
+    }
+}
+
+impl std::error::Error for BridgeClosed {}
+
+/// Returns whether an I/O error came from closing the internal sample bridge.
+pub(crate) fn is_closed_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<BridgeClosed>())
 }
 
 #[cfg(test)]
@@ -268,7 +311,8 @@ mod tests {
             worker_bridge.read_at(1, &mut bytes).unwrap();
             bytes
         });
-        let request = block_on(bridge.next_request()).expect("worker should publish a read request");
+        let request =
+            block_on(bridge.next_request()).expect("worker should publish a read request");
         assert_eq!((1, 2), (request.offset(), request.len()));
         request.respond(Ok(vec![7, 9]));
         assert_eq!([7, 9], worker.join().unwrap());

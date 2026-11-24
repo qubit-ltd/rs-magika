@@ -15,6 +15,8 @@
 pub(in crate::managed_runtime::request_admission_handoff) enum BodyStartOr<T> {
     /// The child body entered and is waiting for its admission.
     BodyStarted,
+    /// The handoff closed before the child body started.
+    Closed,
     /// The child operation finished before its body-start handshake.
     Outcome(
         /// Outcome returned by the submitted child operation.

@@ -59,7 +59,9 @@ pub(crate) fn read_sync(
         .limits()
         .max_read_range_bytes()
         .maximum()
-        .map_or(usize::MAX, |maximum| usize::try_from(maximum).unwrap_or(usize::MAX));
+        .map_or(usize::MAX, |maximum| {
+            usize::try_from(maximum).unwrap_or(usize::MAX)
+        });
     read_sync_segments(file_system, path, version, buffer, offset, max_segment)
 }
 
@@ -159,7 +161,9 @@ pub(crate) async fn read_async_observed<O: ReadIoObserver>(
         .limits()
         .max_read_range_bytes()
         .maximum()
-        .map_or(usize::MAX, |maximum| usize::try_from(maximum).unwrap_or(usize::MAX));
+        .map_or(usize::MAX, |maximum| {
+            usize::try_from(maximum).unwrap_or(usize::MAX)
+        });
     read_async_segments_observed(
         file_system,
         path,
@@ -230,7 +234,9 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
         let bytes = match outcome {
             Ok(outcome) => outcome.into_bytes(),
             Err(ObservedReadError::Stopped) => {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into());
+                return Err(
+                    io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into(),
+                );
             }
             Err(ObservedReadError::Provider(error)) => return Err(error.into_io_error().into()),
         };
@@ -271,7 +277,11 @@ pub(crate) fn validate_request(
         .checked_add(requested as u64)
         .ok_or_else(|| invalid_input("provider input offset overflow"))?;
     if end > length {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider input read exceeds its length").into());
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "provider input read exceeds its length",
+        )
+        .into());
     }
     budget
         .consume(requested)
@@ -293,7 +303,11 @@ pub(crate) fn validate_request(
 ///
 /// Read options carrying the requested offset, length, and version condition.
 #[inline]
-pub(crate) fn read_options(offset: u64, length: usize, version: Option<&ResourceVersion>) -> ReadOptions {
+pub(crate) fn read_options(
+    offset: u64,
+    length: usize,
+    version: Option<&ResourceVersion>,
+) -> ReadOptions {
     ReadOptions::default()
         .with_offset(Some(offset))
         .with_length(Some(length as u64))
@@ -316,7 +330,11 @@ pub(crate) fn read_options(offset: u64, length: usize, version: Option<&Resource
 /// length.
 pub(crate) fn copy_exact(buffer: &mut [u8], bytes: Vec<u8>) -> MagikaResult<()> {
     if bytes.len() != buffer.len() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "provider returned a short range",
+        )
+        .into());
     }
     buffer.copy_from_slice(&bytes);
     Ok(())
@@ -349,8 +367,12 @@ pub(crate) fn invalid_input(message: &'static str) -> io::Error {
 pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
     match error {
         Error::IOError(error) => {
-            if let Some(MimeError::BufferLimitExceeded { requested, limit }) =
-                error.get_ref().and_then(|source| source.downcast_ref::<MimeError>())
+            if crate::internal::async_sample_bridge::is_closed_error(&error) {
+                return MimeError::detector_backend("magika", "provider inference stopped");
+            }
+            if let Some(MimeError::BufferLimitExceeded { requested, limit }) = error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<MimeError>())
             {
                 return MimeError::BufferLimitExceeded {
                     requested: *requested,
