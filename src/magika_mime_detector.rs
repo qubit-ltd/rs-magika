@@ -1068,6 +1068,7 @@ mod tests {
         assert_eq!(None, content_type_to_mime(ContentType::Undefined));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_filename_backend_preserves_native_basename_separators() {
         let repository = Box::leak(Box::new(
