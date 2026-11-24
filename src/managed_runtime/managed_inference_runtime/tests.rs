@@ -498,7 +498,9 @@ fn assert_scope_admission_rollback(stopped: bool) {
         .try_submit(options, move |scope| async move {
             let _held = if stopped { None } else { Some(scope.manage(()).unwrap()) };
             if stopped {
-                let _ = scope.request_stop(StopReason::UserCancelled);
+                let status = scope.request_stop(StopReason::UserCancelled);
+                assert_eq!(status, qubit_operation::StopRequestStatus::Accepted);
+                scope.context().stop_requested().await;
             }
             let error = request_runtime
                 .reserve_for_provider(Some(&scope), 8)
@@ -1931,6 +1933,104 @@ fn test_worker_panic_rejects_previously_admitted_dispatch() {
     assert!(runtime.admission_gate.lock().unwrap().faulted);
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
+    for phase in ["open", "stat", "read_all"] {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let (engine_started_tx, engine_started_rx) = mpsc::sync_channel(1);
+        let (panic_tx, panic_rx) = mpsc::sync_channel(1);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            manager.clone(),
+            16,
+            Box::new(move |_| {
+                engine_started_tx.send(()).unwrap();
+                panic_rx.recv().unwrap();
+                panic!("injected inference worker panic");
+            }),
+            Box::new(|| {}),
+        ));
+
+        let first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
+        engine_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let (provider_started_tx, provider_started_rx) = mpsc::sync_channel(1);
+        let (provider_result_tx, provider_result_rx) = mpsc::sync_channel(1);
+        let (provider_state_tx, provider_state_rx) = mpsc::sync_channel(1);
+        let provider_runtime = Arc::clone(&runtime);
+        let provider = manager
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let mut admission = provider_runtime.reserve_for_provider(Some(&scope), 1)?;
+                provider_state_tx.send(admission.task_state()).unwrap();
+                let io_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let io_for_future = Arc::clone(&io_in_flight);
+                let pending_io = std::future::poll_fn(move |_| {
+                    io_for_future.store(true, std::sync::atomic::Ordering::Release);
+                    let _ = provider_started_tx.try_send(());
+                    Poll::<()>::Pending
+                });
+                let result = if phase == "read_all" {
+                    admission
+                        .run_provider_operation_with_status(&scope, pending_io, io_in_flight)
+                        .await
+                } else {
+                    admission.run_provider_operation(&scope, pending_io).await
+                };
+                provider_result_tx
+                    .send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+                Ok::<_, MimeError>(())
+            })
+            .unwrap();
+        provider_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let provider_state = provider_state_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        panic_tx.send(()).unwrap();
+        let provider_result = provider_result_rx.recv_timeout(Duration::from_secs(2));
+        let promptly_notified = provider_result.is_ok();
+        if !promptly_notified {
+            // Keep the regression failure bounded while allowing the old
+            // implementation to release its pending request during unwind.
+            provider_state.request_stop();
+        }
+        let provider_result = match provider_result {
+            Ok(result) => result,
+            Err(_) => provider_result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        };
+        let provider_error = provider_result.unwrap_err();
+
+        assert!(
+            promptly_notified,
+            "pending {phase} operation was not notified of worker fault"
+        );
+        assert!(
+            provider_error.contains("after worker fault"),
+            "pending {phase} operation should report the worker fault, got: {provider_error}"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !provider_state.inner.lock().unwrap().unconfirmed_provider_io {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pending {phase} operation did not retain its I/O uncertainty"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            provider_state.inner.lock().unwrap().unconfirmed_provider_io,
+            "pending {phase} operation must retain its unconfirmed I/O fact"
+        );
+        assert_eq!(
+            block_on(first).unwrap_err().to_string(),
+            "MIME detector backend 'magika' failed: inference worker panicked",
+            "the request that triggered the panic must retain its original MIME failure"
+        );
+        let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+        assert!(report.worker_stopped);
+        assert!(!report.worker_panicked);
+        let _ = block_on(provider.wait_settlement());
+    }
 }
 
 #[test]

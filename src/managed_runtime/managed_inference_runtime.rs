@@ -210,6 +210,8 @@ impl ManagedInferenceRuntime {
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let worker_tasks = Arc::clone(&tasks);
         let worker = match std::thread::Builder::new()
             .name("magika-inference".to_owned())
             .spawn(move || {
@@ -227,6 +229,7 @@ impl ManagedInferenceRuntime {
                     receiver,
                     worker_admission_gate,
                     |input| infer_input(&mut session, input),
+                    move |faulted| notify_unqueued_provider_tasks(&worker_tasks, faulted),
                     || {},
                     || {},
                 );
@@ -267,7 +270,7 @@ impl ManagedInferenceRuntime {
             active_requests: Arc::new(AtomicUsize::new(0)),
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
-            tasks: Arc::new(Mutex::new(Vec::new())),
+            tasks,
             admission_gate,
         })
     }
@@ -860,6 +863,7 @@ impl ManagedInferenceRuntime {
         }
         let sent_state = {
             let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());
+            admission.state.mark_dispatched();
             match sender.as_ref() {
                 Some(sender) => admission.dispatch(input, sender)?,
                 None => {
@@ -1004,10 +1008,35 @@ impl ManagedInferenceRuntime {
     }
 }
 
+/// Wakes accepted provider operations whose input has not reached the worker.
+///
+/// # Parameters
+///
+/// * `tasks` - Runtime-local active request registry.
+/// * `faulted` - Request whose inference panic closed worker delivery.
+pub(super) fn notify_unqueued_provider_tasks(tasks: &Mutex<Vec<Arc<TaskState>>>, faulted: &Arc<TaskState>) {
+    let waiting = tasks.lock().unwrap_or_else(|error| error.into_inner()).clone();
+    for task in waiting {
+        if !Arc::ptr_eq(&task, faulted) && !task.was_dispatched() {
+            task.request_stop();
+        }
+    }
+}
+
 /// Observes a published worker result or runtime cancellation, whichever is
 /// observed first. The inference future retains its stop control; dropping it
 /// on cancellation requests worker stop while the worker continues to own its
 /// input and admission resources until access is complete.
+///
+/// # Parameters
+///
+/// * `inference` - Worker result future retained until result or stop is
+///   observed.
+/// * `state` - Request lifecycle state used to observe runtime stop.
+///
+/// # Returns
+///
+/// The MIME result, or a backend error when runtime stop wins.
 async fn await_inference_or_runtime_stop(
     inference: InferenceFuture,
     state: Arc<TaskState>,

@@ -20,8 +20,8 @@ use qubit_operation::ResourceScopeOptions;
 use super::byte_permit::BytePermit;
 use super::job::Job;
 use super::request_resource_cleanup::RequestResourceCleanup;
-use super::request_resource_scope_guard::RequestResourceScopeGuard;
 pub(super) use super::request_resource_owner::RequestResourceOwner;
+use super::request_resource_scope_guard::RequestResourceScopeGuard;
 use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
@@ -310,6 +310,15 @@ impl RequestAdmission {
         if self.state.request_resource_owner().is_some() {
             return Ok(());
         }
+        if scope.context().stop_reason().is_some() {
+            return Err(MimeError::detector_backend(
+                "magika",
+                format!(
+                    "operation scope rejected inference: {:?}",
+                    qubit_operation::ResourceScopeError::Stopped
+                ),
+            ));
+        }
         let resource_scope = scope
             .resource_scope(ResourceScopeOptions { capacity: 1 })
             .map_err(|error| {
@@ -465,7 +474,10 @@ mod tests {
                 );
                 let mut first = first;
                 first.retain_in_scope(&scope).unwrap();
-                first.settle_error(qubit_mime::MimeError::detector_backend("magika", "first request complete"));
+                first.settle_error(qubit_mime::MimeError::detector_backend(
+                    "magika",
+                    "first request complete",
+                ));
 
                 let second = RequestAdmission::new(
                     Arc::new(TaskState::new(710, None)),
@@ -487,7 +499,10 @@ mod tests {
                         Err(error) => panic!("request scope capacity was not reusable: {error}"),
                     }
                 }
-                second.settle_error(qubit_mime::MimeError::detector_backend("magika", "second request complete"));
+                second.settle_error(qubit_mime::MimeError::detector_backend(
+                    "magika",
+                    "second request complete",
+                ));
                 Ok::<_, ()>(())
             })
             .unwrap();

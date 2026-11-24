@@ -84,6 +84,8 @@ impl ManagedInferenceRuntime {
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(super::SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let worker_tasks = Arc::clone(&tasks);
         let worker = std::thread::Builder::new()
             .name("magika-test-inference".to_owned())
             .spawn(move || {
@@ -106,6 +108,7 @@ impl ManagedInferenceRuntime {
                             "test engine only accepts owned bytes",
                         )),
                     },
+                    move |faulted| super::notify_unqueued_provider_tasks(&worker_tasks, faulted),
                     after_business,
                     before_worker_exit,
                 );
@@ -123,7 +126,7 @@ impl ManagedInferenceRuntime {
             active_requests: Arc::new(AtomicUsize::new(0)),
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
-            tasks: Arc::new(Mutex::new(Vec::new())),
+            tasks,
             admission_gate,
         }
     }
@@ -139,6 +142,8 @@ impl ManagedInferenceRuntime {
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(super::SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let worker_tasks = Arc::clone(&tasks);
         let worker = std::thread::Builder::new()
             .name("magika-test-inference".to_owned())
             .spawn(move || {
@@ -153,6 +158,7 @@ impl ManagedInferenceRuntime {
                         )),
                     },
                     before_first_recv,
+                    move |faulted| super::notify_unqueued_provider_tasks(&worker_tasks, faulted),
                     || {},
                     || {},
                 );
@@ -170,7 +176,7 @@ impl ManagedInferenceRuntime {
             active_requests: Arc::new(AtomicUsize::new(0)),
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
-            tasks: Arc::new(Mutex::new(Vec::new())),
+            tasks,
             admission_gate,
         }
     }
