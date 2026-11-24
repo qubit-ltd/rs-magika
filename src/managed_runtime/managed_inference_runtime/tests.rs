@@ -2055,12 +2055,7 @@ fn test_provider_read_error_is_mapped_and_settled() {
     let length_admission = runtime.reserve_for_provider(None, 8192).unwrap();
     let timeout = Duration::from_secs(2);
     let length_result = crate::tests::internal::bridge_wait::poll_before(
-        runtime.detect_async_input_admitted_test(
-            length_admission,
-            FailedLengthInput,
-            8192,
-            map_provider_test_error,
-        ),
+        runtime.detect_async_input_admitted_test(length_admission, FailedLengthInput, 8192, map_provider_test_error),
         "provider length error settlement",
         timeout,
     );
