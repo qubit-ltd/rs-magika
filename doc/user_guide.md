@@ -102,6 +102,14 @@ application lock with Cargo. The local source checker uses this same root
 manifest shape. Registry-only consumers omit all paths and patches and use
 their own lock file.
 
+The published default feature, `bundled-onnxruntime`, is enabled by this root
+manifest. To use the synchronous provider inventory, change the Magika entry
+to `qubit-magika = { path = "../rs-magika", features = ["inventory"] }`.
+The README checker compiles both the default and inventory variants; it runs
+them only when invoked with `--run-example`. The repository's
+[`readme_consumer` fixture](../tests/fixtures/readme_consumer/Cargo.toml) shows
+the locked default application dependency graph.
+
 The registry versions required by the examples were not all available on
 2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
 0.21.1, `qubit-fs` 0.3.3, and `qubit-operation` 0.3.1, while these examples
@@ -354,11 +362,15 @@ managed and custom ONNX dependency blocks use the same procedure.
 
 ```toml
 [dependencies]
-qubit-magika = { version = "0.18", default-features = false }
-qubit-mime = "0.22"
+qubit-magika = { path = "../rs-magika", default-features = false }
+qubit-mime = { path = "../rs-mime" }
+qubit-operation = { path = "../rs-operation" }
+qubit-fs = { path = "../rs-fs", default-features = false, features = ["async"] }
 qubit-spi = "0.14"
-qubit-fs = "0.4"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
+
+[patch.crates-io]
+qubit-operation = { path = "../rs-operation" }
 ```
 
 Initialize the runtime before constructing the detector. Use `onnxruntime.dll`
@@ -385,7 +397,9 @@ execution-provider libraries are discoverable by the dynamic loader. The
 `ort`) API is used; the environment is process-global and can only be
 committed once.
 
-The [`dynamic-loader` job in the repository's Linux CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
+The repository's [`dynamic_loader` fixture](../tests/fixtures/dynamic_loader/Cargo.toml)
+uses the same ONNX Runtime version and feature set. The
+[`dynamic-loader` job in Linux CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
 checks this setup with ONNX Runtime 1.24.2: it initializes the shared library,
 constructs a detector, and verifies that Python content is classified as
 `text/x-python`. The job checks the Cargo feature graph to ensure bundled runtime
