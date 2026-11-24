@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from _local_package_identities import (
     run_self_tests as run_local_package_identity_self_tests,
@@ -168,8 +168,8 @@ def validate_and_rebase_manifest(
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             raise ValueError(f"{guide_name}: {name} must use a fixed sibling path")
         original = _guide_relative_path(entry["path"], guide_name, name)
-        expected_relative = "../rs-" + name.removeprefix("qubit-")
-        if original != expected_relative:
+        expected_relative = PurePosixPath("..") / f"rs-{name.removeprefix('qubit-')}"
+        if PurePosixPath(original) != expected_relative:
             raise ValueError(f"{guide_name}: {name} path {entry['path']!r} does not resolve to expected sibling {virtual_siblings[name]}")
         sibling = actual_siblings[name]
         new_dependencies[name]["path"] = str(sibling.resolve())
@@ -177,7 +177,7 @@ def validate_and_rebase_manifest(
     operation_patch = patch.get("crates-io", {}).get("qubit-operation") if isinstance(patch, dict) else None
     if not isinstance(operation_patch, dict) or not isinstance(operation_patch.get("path"), str):
         raise ValueError(f"{guide_name}: operation patch must use a fixed sibling path")
-    if _guide_relative_path(operation_patch["path"], guide_name, "patch.crates-io.qubit-operation") != "../rs-operation":
+    if PurePosixPath(_guide_relative_path(operation_patch["path"], guide_name, "patch.crates-io.qubit-operation")) != PurePosixPath("..") / "rs-operation":
         raise ValueError(f"{guide_name}: operation patch path does not resolve to expected sibling")
     rebased.setdefault("patch", {}).setdefault("crates-io", {})["qubit-operation"]["path"] = str(actual_siblings["qubit-operation"].resolve())
     if dynamic:
@@ -334,8 +334,9 @@ def inventory_dependency(markdown: str, guide_name: str) -> dict[str, object]:
         raise ValueError(f"{guide_name}: inventory dependency must be an inline table")
     if "inventory" not in dependency.get("features", []):
         raise ValueError(f"{guide_name}: inventory dependency does not enable inventory")
-    if dependency.get("path") != "../rs-magika":
-        raise ValueError(f"{guide_name}: inventory dependency must explicitly use path '../rs-magika'")
+    path = dependency.get("path")
+    if not isinstance(path, str) or PurePosixPath(_guide_relative_path(path, guide_name, "inventory dependency")) != PurePosixPath("..") / "rs-magika":
+        raise ValueError(f"{guide_name}: inventory dependency must explicitly use path to the Magika sibling")
     return dependency
 
 
@@ -458,20 +459,6 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
     )
     assert "patch" not in registry_manifest
     assert "workspace" in registry_manifest
-    sibling_consumer = consumer_manifest(
-        dependencies, Path("layout/rs-magika"), Path("layout/rs-operation")
-    )
-    sibling_manifest = tomllib.loads(sibling_consumer)
-    assert sibling_manifest["dependencies"]["qubit-operation"] == {
-        "version": "0.3.2", "path": "layout/rs-operation"
-    }
-    assert sibling_manifest["patch"]["crates-io"]["qubit-operation"]["path"] == "layout/rs-operation"
-    mime_dependency = {"version": "0.22", "default-features": False, "features": ["inventory"]}
-    mime_consumer = tomllib.loads(consumer_manifest(
-        {"qubit-mime": mime_dependency}, Path("layout/rs-magika"), Path("layout/rs-operation")
-    ))["dependencies"]["qubit-mime"]
-    assert {key: value for key, value in mime_consumer.items() if key != "path"} == mime_dependency
-    assert mime_consumer["path"] == "layout/rs-mime"
     validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
     try:
         validate_current_settlement_names(guide, "released()")
@@ -547,19 +534,20 @@ qubit-operation = { path = "../rs-operation" }
     windows_consumer = tomllib.loads(consumer_manifest(
         generator_dependencies, PureWindowsPath("layout\\rs-magika"), PureWindowsPath("layout\\rs-operation")
     ))
-    posix_deps = posix_consumer["dependencies"]
-    windows_deps = windows_consumer["dependencies"]
-    for key, expected_posix, expected_windows in (
-        ("qubit-operation", Path("layout/rs-operation"), PureWindowsPath("layout\\rs-operation")),
-        ("qubit-mime", Path("layout/rs-mime"), PureWindowsPath("layout\\rs-mime")),
-    ):
-        assert Path(posix_deps[key]["path"]) == expected_posix
-        assert PureWindowsPath(windows_deps[key]["path"]) == expected_windows
-    assert Path(posix_consumer["patch"]["crates-io"]["qubit-operation"]["path"]) == Path("layout/rs-operation")
-    assert PureWindowsPath(windows_consumer["patch"]["crates-io"]["qubit-operation"]["path"]) == PureWindowsPath("layout\\rs-operation")
-    assert posix_deps["qubit-mime"]["version"] == windows_deps["qubit-mime"]["version"] == "0.22"
-    assert posix_deps["qubit-mime"]["default-features"] is windows_deps["qubit-mime"]["default-features"] is False
-    assert posix_deps["qubit-mime"]["features"] == windows_deps["qubit-mime"]["features"] == ["inventory"]
+    def assert_consumer_structure(consumer: dict[str, object], path_type: type[Path] | type[PureWindowsPath]) -> None:
+        deps = consumer["dependencies"]
+        operation_path = path_type("layout") / "rs-operation"
+        mime_path = path_type("layout") / "rs-mime"
+        assert path_type(deps["qubit-operation"]["path"]) == operation_path
+        assert deps["qubit-operation"]["version"] == "0.3.2"
+        assert path_type(consumer["patch"]["crates-io"]["qubit-operation"]["path"]) == operation_path
+        assert path_type(deps["qubit-mime"]["path"]) == mime_path
+        assert deps["qubit-mime"]["version"] == "0.22"
+        assert deps["qubit-mime"]["default-features"] is False
+        assert deps["qubit-mime"]["features"] == ["inventory"]
+
+    assert_consumer_structure(posix_consumer, Path)
+    assert_consumer_structure(windows_consumer, PureWindowsPath)
     for windows_absolute in (r"C:\apps\rs-magika", r"\\server\share\rs-magika"):
         try:
             _guide_relative_path(windows_absolute, guide, "Windows path self-test")
@@ -855,7 +843,8 @@ qubit-operation = { path = "../rs-operation" }
             ),
             public_guide,
         )
-        assert normal_dependency["path"] == "../rs-magika"
+        assert PurePosixPath(normal_dependency["path"]) == PurePosixPath("..") / "rs-magika"
+        assert PureWindowsPath(normal_dependency["path"]) == PureWindowsPath("..\\rs-magika")
         assert normal_dependency["features"] == ["inventory"]
     for declaration, expected_message in (
         ('`qubit-magika = { version = "0.18", features = ["inventory"] }`', "must explicitly use path"),
