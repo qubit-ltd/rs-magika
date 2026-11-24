@@ -27,8 +27,10 @@ Python 内容实际执行一次推理；依赖和启动示例见[用户手册](d
 qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
-qubit-operation = "0.3"
+qubit-operation = "0.3.2"
 ```
+
+此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。发布完成前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并在本源码仓库运行 `python3 .infra/check-readme-examples.py`。`python3 .infra/check-readme-examples.py --registry-only` 是干净 registry 验收门禁；所需版本可解析后即可通过。给该命令增加 `--run-example` 会通过 registry 版本运行当前的 `examples/basic.rs`；此 opt-in 会下载并运行 bundled ONNX Runtime，要求当前原生环境受支持。
 
 ## 快速开始
 

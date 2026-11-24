@@ -22,12 +22,7 @@ PROVIDER_END = "<!-- provider-runtime-example-end -->"
 DEPENDENCIES_START = "<!-- managed-dependencies-start -->"
 DEPENDENCIES_END = "<!-- managed-dependencies-end -->"
 GUIDES = ("doc/user_guide.md", "doc/user_guide.zh_CN.md")
-EXPECTED_VERSIONS = {
-    "qubit-magika": "0.18",
-    "qubit-mime": "0.22",
-    "qubit-operation": "0.3",
-    "qubit-fs": "0.4",
-}
+VERSIONED_DEPENDENCIES = ("qubit-mime", "qubit-operation", "qubit-fs")
 REQUIRED_IMPORTS = (
     "use qubit_magika::MagikaMimeDetector;",
     "use qubit_operation::{GroupOptions, ManagerOptions, OperationManager, OperationOptions, OperationOutcome, ShutdownMode};",
@@ -94,18 +89,36 @@ def dependency_version(entry: object) -> str | None:
     return None
 
 
+def expected_versions(project_root: Path) -> dict[str, str]:
+    manifest = tomllib.loads((project_root / "Cargo.toml").read_text(encoding="utf-8"))
+    package = manifest["package"]
+    expected = {
+        "qubit-magika": ".".join(package["version"].split("+", 1)[0].split(".")[:2])
+    }
+    dependencies = manifest.get("dependencies", {})
+    for name in VERSIONED_DEPENDENCIES:
+        version = dependency_version(dependencies.get(name))
+        if version is None:
+            raise ValueError(f"Cargo.toml has no versioned dependency {name}")
+        expected[name] = version.removeprefix("=").removeprefix("^")
+    return expected
+
+
 def validate_dependencies(
-    guide_name: str, dependencies: dict[str, object], examples: list[str]
+    guide_name: str,
+    dependencies: dict[str, object],
+    examples: list[str],
+    expected_versions: dict[str, str],
 ) -> None:
     used_crates: set[str] = set()
     for example in examples:
         used_crates.update(re.findall(r"\b(qubit_[a-z0-9_]+)::", example))
-    crate_to_package = {name.replace("-", "_"): name for name in EXPECTED_VERSIONS}
+    crate_to_package = {name.replace("-", "_"): name for name in expected_versions}
     required = {crate_to_package[crate] for crate in used_crates if crate in crate_to_package}
     for package in sorted(required):
         if package not in dependencies:
             raise ValueError(f"{guide_name}: managed dependency block is missing {package}")
-    for package, expected in EXPECTED_VERSIONS.items():
+    for package, expected in expected_versions.items():
         if package not in dependencies:
             raise ValueError(f"{guide_name}: managed dependency block is missing {package}")
         actual = dependency_version(dependencies[package])
@@ -132,26 +145,29 @@ def run_self_tests() -> None:
     dependencies = {
         "qubit-magika": "0.18",
         "qubit-mime": "0.22",
-        "qubit-operation": "0.3",
+        "qubit-operation": "0.3.2",
         "qubit-fs": {"version": "0.3", "default-features": False, "features": ["async"]},
     }
     block = """[dependencies]
 qubit-magika = "0.18"
 qubit-mime = "0.22"
-qubit-operation = "0.3"
+qubit-operation = "0.3.2"
 qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 """
     parsed = tomllib.loads(block)["dependencies"]
-    validate_dependencies(guide, parsed, examples)
+    expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-operation": "0.3.2", "qubit-fs": "0.4"}
+    validate_dependencies(guide, parsed, examples, expected)
     registry_consumer = consumer_manifest(dependencies, Path("/project"), None)
-    assert 'qubit-operation = "0.3"' in registry_consumer
+    assert 'qubit-operation = "0.3.2"' in registry_consumer
     assert 'qubit-operation = {' not in registry_consumer
+    assert "path =" not in registry_consumer
+    assert "[patch." not in registry_consumer
     assert "[workspace]" in registry_consumer
     sibling_consumer = consumer_manifest(
         dependencies, Path("layout/rs-magika"), Path("layout/rs-operation")
     )
     assert (
-        'qubit-operation = { version = "0.3", path = "layout/rs-operation" }'
+        'qubit-operation = { version = "0.3.2", path = "layout/rs-operation" }'
         in sibling_consumer
     )
     validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
@@ -165,9 +181,10 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
         ("English missing operation", {k: v for k, v in dependencies.items() if k != "qubit-operation"}, "missing qubit-operation"),
         ("Chinese missing operation", {k: v for k, v in dependencies.items() if k != "qubit-operation"}, "missing qubit-operation"),
         ("wrong Magika version", {**dependencies, "qubit-magika": "9.99"}, "qubit-magika version"),
+        ("operation below manifest minimum", {**dependencies, "qubit-operation": "0.3"}, "qubit-operation version"),
     ):
         try:
-            validate_dependencies(label, mutated, examples)
+            validate_dependencies(label, mutated, examples, expected)
         except ValueError as error:
             if expected_message not in str(error):
                 raise AssertionError(f"{label}: unexpected validation error: {error}") from error
@@ -194,7 +211,7 @@ def consumer_manifest(
 ) -> str:
     entries: list[str] = []
     for package, value in dependencies.items():
-        if package == "qubit-magika":
+        if package == "qubit-magika" and operation_path is not None:
             version = dependency_version(value)
             assert version is not None
             mapped: dict[str, object] = {"version": version}
@@ -202,11 +219,11 @@ def consumer_manifest(
             if isinstance(value, dict):
                 mapped.update({k: v for k, v in value.items() if k != "path"})
             value = mapped
-        elif package == "qubit-mime":
+        elif package == "qubit-mime" and operation_path is not None:
             version = dependency_version(value)
             assert version is not None
             value = {"version": version, "path": str(project_root.parent / "rs-mime")}
-        elif package == "qubit-fs":
+        elif package == "qubit-fs" and operation_path is not None:
             version = dependency_version(value)
             assert version is not None
             mapped = {"version": version, "path": str(project_root.parent / "rs-fs")}
@@ -266,7 +283,7 @@ def main() -> int:
                 extract_provider_example(markdown, guide),
             ]
             _, dependencies = extract_dependencies(markdown, guide)
-            validate_dependencies(guide, dependencies, examples)
+            validate_dependencies(guide, dependencies, examples, expected_versions(project_root))
             consumer = temp_dir / Path(guide).stem
             (consumer / "src").mkdir(parents=True)
             modules = [
