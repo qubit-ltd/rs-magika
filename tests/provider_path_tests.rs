@@ -3023,26 +3023,35 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     let before_release = finished_rx.recv_timeout(Duration::from_secs(5));
     let returned_before_release = before_release.is_ok();
-    let mut settlement_before = Box::pin(observer.wait_settlement());
-    let settlement_before_release = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(settlement_before.as_mut().poll(context))
-    }));
-    drop(settlement_before);
-    if managed
-        && gate_was_entered
-        && matches!(settlement_before_release, Poll::Ready(ref report) if report.all_released())
-    {
-        failures.push(format!(
-            "provider resources were reported Released before the Pending gate opened; managed={managed}, point={point:?}, session={session}, range={range}"
-        ));
+    let settlement_before_release = run_until(observer.wait_settlement(), Duration::from_millis(500));
+    if managed && gate_was_entered {
+        match &settlement_before_release {
+            Ok(report) if !report.all_released() => {
+                if report.recovery_count == 0
+                    && report.recoveries_total == 0
+                    && report.cleanup_failures_total == 0
+                    && report.transferred_count == 0
+                {
+                    failures.push(format!(
+                        "managed Provider settlement before gate release must retain recovery evidence; point={point:?}, session={session}, range={range}, settlement={report:?}"
+                    ));
+                }
+            }
+            Ok(report) => failures.push(format!(
+                "provider resources were reported Released before the Pending gate opened; point={point:?}, session={session}, range={range}, settlement={report:?}"
+            )),
+            Err(()) => failures.push(format!(
+                "managed Provider settlement must reach a terminal report before the gate opens; point={point:?}, session={session}, range={range}"
+            )),
+        }
     }
-    if !managed
-        && gate_was_entered
-        && !matches!(settlement_before_release, Poll::Ready(ref report) if report.all_released())
-    {
-        failures.push(format!(
-            "legacy hook wrapper should report its own resources Released while runtime resources remain held; point={point:?}, session={session}, range={range}, observation={settlement_before_release:?}"
-        ));
+    if !managed && gate_was_entered {
+        match &settlement_before_release {
+            Ok(report) if report.all_released() => {}
+            observation => failures.push(format!(
+                "legacy hook wrapper must report its own resources Released within the bounded wait while the Provider gate remains Pending; point={point:?}, session={session}, range={range}, observation={observation:?}"
+            )),
+        }
     }
     if gate_was_entered {
         let snapshot_before_release = detector.runtime_snapshot();
@@ -3065,41 +3074,71 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
             "managed={managed}, point={point:?}, session={session}, range={range}, gate_entered={gate_was_entered}, returned_before_release={returned_before_release}, report={report:?}, completed_at={finished_at:?}"
         ));
     }
+    // Stat/open and random-access read expose a provider future whose Drop is
+    // observed by AsyncProviderGate. Range and ordinary reads use AsyncInput
+    // polling instead, so their reader is intentionally retained in recovery.
+    if gate_was_entered
+        && (point != AsyncProviderGatePoint::Read || session)
+        && !provider_wait_dropped_after_release
+    {
+        failures.push(format!(
+            "runtime Cancel must drop the pending Provider future; managed={managed}, point={point:?}, session={session}, range={range}"
+        ));
+    }
     let settlement_after = run_until(observer.wait_settlement(), Duration::from_millis(500));
     let settlement_was_published = settlement_after.is_ok();
     let mut contract_failures = Vec::new();
     if gate_was_entered {
         let outcome = run_until(operation.wait_outcome(), Duration::from_secs(5));
+        let outcome_evidence = format!("{outcome:?}");
+        eprintln!(
+            "runtime-only Cancel observed: managed={managed}, point={point:?}, session={session}, range={range}, business={outcome_evidence}, settlement_before_release={settlement_before_release:?}, settlement_after_release={settlement_after:?}"
+        );
         match outcome {
-            Ok(Ok(qubit_operation::OperationOutcome::Failed(_)))
-            | Ok(Ok(qubit_operation::OperationOutcome::Stopped(_))) => {}
+            Ok(Ok(qubit_operation::OperationOutcome::Failed(MimeError::DetectorBackend {
+                backend,
+                reason,
+            })))
+                if backend == "magika"
+                    && reason
+                        == if point == AsyncProviderGatePoint::Read && (session || range) {
+                            "provider inference stopped"
+                        } else {
+                            "provider operation stopped after cancellation"
+                        } => {}
             other => contract_failures.push(format!(
-                "runtime Cancel should produce a stopped or backend-error business outcome; managed={managed}, point={point:?}, session={session}, range={range}, outcome={other:?}"
+                "runtime Cancel should preserve Magika's Provider stop error; managed={managed}, point={point:?}, session={session}, range={range}, outcome={other:?}"
             )),
         }
     }
-    if let Ok(settlement) = settlement_after {
-        if gate_was_entered && managed && settlement.all_released() {
-            contract_failures.push(format!(
-                "Pending Provider access must retain the settlement required by its evidence; managed={managed}, point={point:?}, session={session}, range={range}, future_dropped={provider_wait_dropped_after_release}, settlement={settlement:?}"
-            ));
+    match &settlement_after {
+        Ok(settlement) if gate_was_entered && managed => {
+            if settlement.all_released() {
+                contract_failures.push(format!(
+                    "Pending Provider access must not publish a positive release report; point={point:?}, session={session}, range={range}, settlement={settlement:?}"
+                ));
+            }
+            if settlement.recovery_count == 0
+                && settlement.recoveries_total == 0
+                && settlement.cleanup_failures_total == 0
+                && settlement.transferred_count == 0
+            {
+                contract_failures.push(format!(
+                    "negative settlement must retain recovery evidence; point={point:?}, session={session}, range={range}, settlement={settlement:?}"
+                ));
+            }
         }
-        if gate_was_entered && !managed && !settlement.all_released() {
-            contract_failures.push(format!(
-                "legacy hook wrapper should settle independently of runtime-held Provider resources; point={point:?}, session={session}, range={range}, settlement={settlement:?}"
-            ));
+        Ok(settlement) if gate_was_entered && !managed => {
+            if !settlement.all_released() {
+                contract_failures.push(format!(
+                    "legacy hook wrapper must report its own resources Released; point={point:?}, session={session}, range={range}, settlement={settlement:?}"
+                ));
+            }
         }
-        if gate_was_entered
-            && managed
-            && settlement.recovery_count == 0
-            && settlement.recoveries_total == 0
-            && settlement.cleanup_failures_total == 0
-            && settlement.transferred_count == 0
-        {
-            contract_failures.push(format!(
-                "negative settlement must retain recovery evidence; managed={managed}, point={point:?}, session={session}, range={range}, settlement={settlement:?}"
-            ));
-        }
+        Err(()) if gate_was_entered && managed => contract_failures.push(format!(
+            "managed Provider settlement must reach a terminal report within the bounded wait; point={point:?}, session={session}, range={range}"
+        )),
+        _ => {}
     }
     if gate_was_entered {
         let snapshot = detector.runtime_snapshot();
