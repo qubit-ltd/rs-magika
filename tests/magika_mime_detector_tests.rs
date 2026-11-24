@@ -312,9 +312,7 @@ fn test_magika_detector_builder_uses_application_operation_manager() {
         .media_stream_classifier(None)
         .operation_manager(manager);
     assert!(format!("{builder:?}").contains("MagikaMimeDetectorBuilder"));
-    let detector = builder
-        .build()
-        .expect("configured detector should initialize");
+    let detector = builder.build().expect("configured detector should initialize");
 
     assert!(
         detector
@@ -582,15 +580,12 @@ fn test_magika_reader_detects_real_fixtures_without_consuming_position() {
 /// Verifies empty content remains classifiable after runtime shutdown.
 #[test]
 fn test_magika_detector_empty_content_survives_runtime_shutdown() {
-    let detector =
-        MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
+    let detector = MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize Magika");
     let mime = Some("inode/x-empty".to_owned());
 
     assert_eq!(
         mime,
-        detector
-            .detect_by_content(b"")
-            .expect("empty content should classify")
+        detector.detect_by_content(b"").expect("empty content should classify")
     );
     assert!(
         detector

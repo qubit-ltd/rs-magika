@@ -1190,7 +1190,7 @@ where
                             let pending = guard
                                 .io_in_flight
                                 .as_ref()
-                                .map_or(true, |status| status.load(std::sync::atomic::Ordering::Acquire));
+                                .is_none_or(|status| status.load(std::sync::atomic::Ordering::Acquire));
                             guard
                                 .unconfirmed_io
                                 .store(pending, std::sync::atomic::Ordering::Relaxed);

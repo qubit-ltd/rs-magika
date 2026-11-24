@@ -86,11 +86,7 @@ async fn detect_managed_provider_child(
     };
     let settlement = operation.wait_settlement().await;
     assert!(
-        settlement.all_released()
-            && settlement
-                .children
-                .iter()
-                .all(|child| child.settlement.all_released()),
+        settlement.all_released() && settlement.children.iter().all(|child| child.settlement.all_released()),
         "provider request and nested inference resources must be released before reuse: {settlement:?}"
     );
     result
@@ -2667,9 +2663,11 @@ fn test_parent_resource_and_scope_quotas_are_reused_across_provider_routes() {
         "parent quota reuse across provider routes failed: {outcome:?}"
     );
     assert!(run_ready(parent.wait_settlement()).all_released());
-    assert!(detector
-        .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
-        .worker_stopped);
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
     let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
     let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
 }
@@ -2678,9 +2676,7 @@ fn test_parent_resource_and_scope_quotas_are_reused_across_provider_routes() {
 fn test_managed_provider_retries_after_parent_resource_capacity_is_released() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let config = qubit_mime::MimeConfig::default();
-    let runtime = Arc::new(
-        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap(),
-    );
+    let runtime = Arc::new(ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap());
     let detector = Arc::new(
         qubit_magika::MagikaMimeDetector::builder()
             .mime_config(config)
@@ -2747,9 +2743,11 @@ fn test_managed_provider_retries_after_parent_resource_capacity_is_released() {
         "retry after releasing parent capacity failed: {outcome:?}"
     );
     assert!(run_ready(parent.wait_settlement()).all_released());
-    assert!(detector
-        .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
-        .worker_stopped);
+    assert!(
+        detector
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+            .worker_stopped
+    );
     let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
     let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
 }

@@ -224,9 +224,7 @@ fn test_locked_operation_api_reuses_resource_and_attached_scope_capacity_after_c
                 ..OperationOptions::default()
             },
             move |scope| {
-                let first_scope = scope
-                    .resource_scope(ResourceScopeOptions { capacity: 1 })
-                    .unwrap();
+                let first_scope = scope.resource_scope(ResourceScopeOptions { capacity: 1 }).unwrap();
                 assert!(matches!(
                     scope.resource_scope(ResourceScopeOptions { capacity: 1 }),
                     Err(ResourceScopeError::CapacityExceeded)

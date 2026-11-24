@@ -234,6 +234,11 @@ impl TaskState {
     }
 
     /// Attaches the one-request cleanup scope to this task lifecycle.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Guard that closes the request scope with this task
+    ///   lifecycle.
     pub(super) fn attach_request_scope(&self, scope: RequestResourceScopeGuard) {
         *self.request_scope.lock().unwrap_or_else(|error| error.into_inner()) = Some(scope);
     }

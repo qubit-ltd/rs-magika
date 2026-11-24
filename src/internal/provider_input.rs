@@ -140,6 +140,7 @@ pub(crate) fn read_sync_segments(
 ///
 /// Returns an I/O error when validation, budget reservation, or any provider
 /// range fails or the observer stops the operation.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_async_observed<O: ReadIoObserver>(
     file_system: &qubit_fs::AsyncFileSystem,
     path: &Path,
