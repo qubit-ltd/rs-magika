@@ -51,6 +51,7 @@ use crate::internal::select_provider_path_route;
 use crate::managed_runtime::ManagedInferenceRuntime;
 use crate::managed_runtime::ManagedInferenceShutdownReport;
 use crate::managed_runtime::ManagedInferenceSnapshot;
+use crate::managed_runtime::request_admission_handoff::RequestAdmissionHandoff;
 
 /// MIME detector backed by Google's Magika model.
 ///
@@ -234,10 +235,23 @@ impl MagikaMimeDetector {
             requirement: ChildRequirement::Optional,
             ..OperationOptions::default()
         };
+        let (handoff, mut handoff_guard) = RequestAdmissionHandoff::new(admission);
+        let body_handoff = std::sync::Arc::clone(&handoff);
         let mut operation = scope
             .manager()
             .as_async()
             .try_submit(options, move |child_scope| async move {
+                body_handoff.body_started();
+                let admission = match body_handoff.wait_for_child_admission(&child_scope).await {
+                    Some(Ok(admission)) => admission,
+                    Some(Err(error)) => return Err(error),
+                    None => {
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            "request admission handoff closed before registration",
+                        ));
+                    }
+                };
                 Self::detect_async_provider_admitted(runtime, &child_scope, admission, &file_system, &path, max_bytes)
                     .await
             })
@@ -247,7 +261,15 @@ impl MagikaMimeDetector {
                     format!("operation scope rejected inference: provider operation submission failed: {error:?}"),
                 )
             })?;
-        let outcome = operation.wait_outcome().await.map_err(|error| {
+        let mut outcome = Box::pin(operation.wait_outcome());
+        let outcome = match handoff
+            .register_on_parent(scope, &mut handoff_guard, &mut outcome)
+            .await
+        {
+            Some(outcome) => outcome,
+            None => outcome.await,
+        };
+        let outcome = outcome.map_err(|error| {
             MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
         })?;
         map_operation_outcome(outcome, PROVIDER_OUTCOME)

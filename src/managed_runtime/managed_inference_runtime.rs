@@ -463,9 +463,32 @@ impl ManagedInferenceRuntime {
         let cancellation_won = Arc::new(AtomicBool::new(false));
         let body_cancellation_won = Arc::clone(&cancellation_won);
         let state = Arc::clone(&admission.state);
+        let (request_handoff, mut request_handoff_guard, body_admission) = match parent {
+            Some(_) => {
+                let (handoff, guard) = super::request_admission_handoff::RequestAdmissionHandoff::new(admission);
+                (Some(handoff), Some(guard), None)
+            }
+            None => (None, None, Some(admission)),
+        };
+        let body_handoff = request_handoff.as_ref().map(Arc::clone);
         let body = move |scope| async move {
-            let mut admission = admission;
-            admission.retain_in_scope(&scope)?;
+            let admission = if let Some(handoff) = body_handoff {
+                handoff.body_started();
+                match handoff.wait_for_child_admission(&scope).await {
+                    Some(Ok(admission)) => admission,
+                    Some(Err(error)) => return Err(error),
+                    None => {
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            "request admission handoff closed before registration",
+                        ));
+                    }
+                }
+            } else {
+                let mut admission = body_admission.expect("scope-less request retains its admission");
+                admission.retain_in_scope(&scope)?;
+                admission
+            };
             let mut inference = Box::pin(runtime.dispatch(admission, input)?);
             let mut stop = Box::pin(scope.context().stop_requested());
             let mut request_stop = Box::pin(state.wait_stopped());
@@ -495,7 +518,19 @@ impl ManagedInferenceRuntime {
             None => self.service_group.as_async().try_submit(options, body),
         }
         .map_err(|error| MimeError::detector_backend("magika", format!("operation submission failed: {error:?}")))?;
-        let outcome = operation.wait_outcome().await.map_err(|error| {
+        let outcome_result = {
+            let mut outcome = Box::pin(operation.wait_outcome());
+            match (parent, request_handoff.as_ref(), request_handoff_guard.as_mut()) {
+                (Some(parent), Some(handoff), Some(guard)) => {
+                    match handoff.register_on_parent(parent, guard, &mut outcome).await {
+                        Some(outcome) => outcome,
+                        None => outcome.await,
+                    }
+                }
+                _ => outcome.await,
+            }
+        };
+        let outcome = outcome_result.map_err(|error| {
             MimeError::detector_backend("magika", format!("operation outcome unavailable: {error:?}"))
         })?;
         if parent.is_none() && !cancellation_won.load(std::sync::atomic::Ordering::Acquire) {
