@@ -57,6 +57,7 @@ use qubit_fs::spi::RandomAccessReadSession;
 use qubit_fs::spi::SpiFuture;
 use qubit_fs::spi::StatRequest;
 use qubit_fs::spi::StatResponse;
+use qubit_io::AsyncInput as AsyncStreamInput;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
 use qubit_operation::GroupOptions;
@@ -81,6 +82,10 @@ pub(crate) struct Fixture {
     stop_on_interrupt: Option<Arc<qubit_operation::OperationContext>>,
     attempts: Arc<AtomicUsize>,
     async_read_gate: Option<Arc<TestAsyncReadGate>>,
+    async_open_gate: Option<Arc<TestAsyncReadGate>>,
+    async_stat_gate: Option<Arc<TestAsyncReadGate>>,
+    async_stream_read_gate: Option<Arc<TestAsyncReadGate>>,
+    async_random_access_unsupported: bool,
 }
 
 impl Fixture {
@@ -99,10 +104,30 @@ impl Fixture {
             stop_on_interrupt: None,
             attempts: Arc::new(AtomicUsize::new(0)),
             async_read_gate: None,
+            async_open_gate: None,
+            async_stat_gate: None,
+            async_stream_read_gate: None,
+            async_random_access_unsupported: false,
         }
     }
     pub(crate) fn with_async_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
         self.async_read_gate = Some(gate);
+        self
+    }
+    pub(crate) fn with_async_open_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+        self.async_open_gate = Some(gate);
+        self
+    }
+    pub(crate) fn with_async_stat_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+        self.async_stat_gate = Some(gate);
+        self
+    }
+    pub(crate) fn with_async_stream_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+        self.async_stream_read_gate = Some(gate);
+        self
+    }
+    pub(crate) fn without_async_random_access(mut self) -> Self {
+        self.async_random_access_unsupported = true;
         self
     }
     fn interrupt_once(mut self, effect: Option<FsEffectState>) -> Self {
@@ -189,14 +214,35 @@ impl AsyncFileSystemSpi for Fixture {
         Fixture::properties(self)
     }
     fn stat<'a>(&'a self, request: StatRequest<'a>) -> SpiFuture<'a, FsResult<StatResponse>> {
-        Box::pin(async move { FileSystemSpi::stat(self, request) })
+        let gate = self.async_stat_gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            FileSystemSpi::stat(self, request)
+        })
     }
-    fn open_reader<'a>(&'a self, _request: OpenReaderRequest<'a>) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
-        Box::pin(async {
-            Err(FsError::new(
-                FsErrorKind::UnsupportedOperation,
-                FsOperation::OpenReader,
-                "legacy reader unused",
+    fn open_reader<'a>(&'a self, request: OpenReaderRequest<'a>) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
+        let Some(gate) = self.async_stream_read_gate.clone() else {
+            return Box::pin(async {
+                Err(FsError::new(
+                    FsErrorKind::UnsupportedOperation,
+                    FsOperation::OpenReader,
+                    "legacy reader unused",
+                ))
+            });
+        };
+        let info = self.info(request.path());
+        let bytes = self.bytes.read().unwrap().clone();
+        Box::pin(async move {
+            Ok(OpenedAsyncReader::new(
+                info,
+                Box::new(AsyncFixtureStream {
+                    bytes,
+                    position: 0,
+                    gate: Some(gate),
+                    gate_wait: None,
+                }),
             ))
         })
     }
@@ -204,12 +250,64 @@ impl AsyncFileSystemSpi for Fixture {
         &'a self,
         request: OpenReaderRequest<'a>,
     ) -> SpiFuture<'a, FsResult<OpenedAsyncRandomAccessReader>> {
+        if self.async_random_access_unsupported {
+            return Box::pin(async move {
+                Err(FsError::new(
+                    FsErrorKind::UnsupportedOperation,
+                    FsOperation::OpenReader,
+                    "random access is disabled by the fixture",
+                ))
+            });
+        }
+        let gate = self.async_open_gate.clone();
         Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
             Ok(OpenedAsyncRandomAccessReader::new(
                 self.info(request.path()),
                 Box::new(self.session()),
             ))
         })
+    }
+}
+
+struct AsyncFixtureStream {
+    bytes: Arc<[u8]>,
+    position: usize,
+    gate: Option<Arc<TestAsyncReadGate>>,
+    gate_wait: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
+impl AsyncStreamInput for AsyncFixtureStream {
+    type Item = u8;
+
+    unsafe fn poll_read_unchecked(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        output: &mut [u8],
+        index: usize,
+        count: usize,
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.as_mut().get_mut();
+        if count == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        if this.gate_wait.is_none()
+            && let Some(gate) = this.gate.take()
+        {
+            this.gate_wait = Some(Box::pin(async move { gate.wait().await }));
+        }
+        if let Some(gate_wait) = &mut this.gate_wait {
+            if gate_wait.as_mut().poll(context).is_pending() {
+                return Poll::Pending;
+            }
+            this.gate_wait.take();
+        }
+        let read = count.min(this.bytes.len().saturating_sub(this.position));
+        output[index..index + read].copy_from_slice(&this.bytes[this.position..this.position + read]);
+        this.position += read;
+        Poll::Ready(Ok(read))
     }
 }
 

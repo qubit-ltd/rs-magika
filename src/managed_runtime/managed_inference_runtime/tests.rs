@@ -2034,6 +2034,118 @@ fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
 }
 
 #[test]
+fn test_worker_panic_wakes_real_pending_provider_path_stages() {
+    use crate::tests::internal::random_access_session_tests::Fixture;
+    use crate::tests::internal::random_access_session_tests::TestAsyncReadGate;
+
+    struct ReleaseOnDrop(Arc<TestAsyncReadGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    for phase in ["open", "stat", "read_all"] {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let service = manager.group(GroupOptions { capacity: 2 }).unwrap();
+        let (engine_started_tx, engine_started_rx) = mpsc::sync_channel(1);
+        let (panic_tx, panic_rx) = mpsc::sync_channel(1);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            manager.clone(),
+            qubit_mime::MimeConfig::default().max_buffer_size(),
+            Box::new(move |_| {
+                engine_started_tx.send(()).unwrap();
+                panic_rx.recv().unwrap();
+                panic!("injected inference worker panic");
+            }),
+            Box::new(|| {}),
+        ));
+        let first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
+        engine_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let gate = Arc::new(TestAsyncReadGate::new());
+        let _release_gate = ReleaseOnDrop(Arc::clone(&gate));
+        let fixture = match phase {
+            "open" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
+                .with_async_open_gate(Arc::clone(&gate)),
+            "stat" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
+                .without_async_random_access()
+                .with_async_stat_gate(Arc::clone(&gate)),
+            "read_all" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
+                .without_async_random_access()
+                .with_async_stream_read_gate(Arc::clone(&gate)),
+            _ => unreachable!("test stage is enumerated above"),
+        };
+        let file_system = qubit_fs::AsyncFileSystem::from_spi(fixture).unwrap();
+        let detector = Arc::new(
+            crate::MagikaMimeDetector::builder()
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .unwrap(),
+        );
+        let (provider_result_tx, provider_result_rx) = mpsc::sync_channel(1);
+        let provider_detector = Arc::clone(&detector);
+        let mut provider = service
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let result = provider_detector
+                    .detect_async_provider_path_managed(
+                        &scope,
+                        &file_system,
+                        &qubit_fs::Path::parse("/worker-fault/pending-stage").unwrap(),
+                        6,
+                    )
+                    .await;
+                provider_result_tx
+                    .send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+                Ok::<_, MimeError>(())
+            })
+            .unwrap();
+
+        gate.wait_until_started(Duration::from_secs(2));
+        let provider_state = runtime
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|state| !state.was_dispatched())
+            .cloned()
+            .expect("pending provider request is registered before dispatch");
+        panic_tx.send(()).unwrap();
+        let provider_error = provider_result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker fault must promptly wake provider I/O")
+            .unwrap_err();
+        assert!(
+            provider_error.contains("after worker fault"),
+            "pending {phase} path should expose the worker fault, got: {provider_error}"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !provider_state.inner.lock().unwrap().unconfirmed_provider_io {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pending {phase} provider I/O did not retain its uncertain state"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            block_on(first).unwrap_err().to_string(),
+            "MIME detector backend 'magika' failed: inference worker panicked",
+            "the worker panic request keeps its original MIME error"
+        );
+        let outcome = block_on(provider.wait_outcome()).unwrap();
+        assert!(matches!(outcome, OperationOutcome::Succeeded(())));
+        let settlement = block_on(provider.wait_settlement());
+        assert!(
+            !settlement.all_released(),
+            "pending {phase} I/O must remain visible as a negative settlement"
+        );
+        assert!(runtime.snapshot().faulted);
+    }
+}
+
+#[test]
 fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
     let (started_tx, started_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
