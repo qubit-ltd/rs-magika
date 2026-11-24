@@ -147,6 +147,13 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
     assert 'qubit-operation = "0.3"' in registry_consumer
     assert 'qubit-operation = {' not in registry_consumer
     assert "[workspace]" in registry_consumer
+    sibling_consumer = consumer_manifest(
+        dependencies, Path("layout/rs-magika"), Path("layout/rs-operation")
+    )
+    assert (
+        'qubit-operation = { version = "0.3", path = "layout/rs-operation" }'
+        in sibling_consumer
+    )
     validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
     try:
         validate_current_settlement_names(guide, "released()")

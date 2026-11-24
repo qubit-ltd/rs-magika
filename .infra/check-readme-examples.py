@@ -117,6 +117,7 @@ def consumer_manifest(
     local_paths = {
         "qubit-magika": project_root,
         "qubit-mime": project_root.parent / "rs-mime",
+        "qubit-operation": project_root.parent / "rs-operation",
     }
     for package, original in dependencies.items():
         value = original
@@ -144,8 +145,8 @@ def consumer_manifest(
 def run_self_tests() -> None:
     expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-spi": "0.14"}
     fixtures = {
-        "README.md": """## Installation\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\n```\n## Quick Start\n```rust\nfn main() {}\n```\n""",
-        "README.zh_CN.md": """## 安装\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\n```\n## 快速开始\n```rust\nfn main() {}\n```\n""",
+        "README.md": """## Installation\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3\"\n```\n## Quick Start\n```rust\nfn main() {}\n```\n""",
+        "README.zh_CN.md": """## 安装\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3\"\n```\n## 快速开始\n```rust\nfn main() {}\n```\n""",
     }
     for filename, fixture in fixtures.items():
         _, quick_start_title = READMES[filename]
@@ -155,6 +156,13 @@ def run_self_tests() -> None:
         manifest = consumer_manifest(dependencies, Path("/project"), filename)
         assert 'version = "0.22"' in manifest
         assert "[workspace]" in manifest
+        relative_manifest = consumer_manifest(
+            dependencies, Path("layout/rs-magika"), filename
+        )
+        assert (
+            'qubit-operation = { version = "0.3", path = "layout/rs-operation" }'
+            in relative_manifest
+        )
         installation_end = fixture.index(f"## {quick_start_title}")
         duplicate_toml = (
             fixture[:installation_end]
