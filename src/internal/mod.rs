@@ -17,6 +17,7 @@ mod provider_path_route;
 pub(crate) mod read_budget;
 mod read_seek_input;
 mod reader_scope;
+pub(crate) mod regular_file_media_stream_classifier;
 mod session_read;
 mod stop_watcher;
 mod sync_provider_input;
