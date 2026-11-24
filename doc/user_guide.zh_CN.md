@@ -320,11 +320,10 @@ runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由
 payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
 分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
 
-正常完成时，旧的 `guess_from_content_async` hook 会等内部操作结算后再返回。若 runtime 以
-`Cancel` 关闭，业务 future 可能先收到错误并结束等待，但 worker 仍可能持有输入和字节容量；该
-hook 没有 parent scope observer 可供调用方确认释放。旧的 async provider-path hook 只返回内部子操作
-的业务结果，不提供结算观察器。runtime `Cancel` 可能先返回停止错误，但 Provider 的 native 或远端
-I/O 仍无法确认结束。需要区分业务结果和资源释放时，应使用显式 managed API。
+旧的 `guess_from_content_async` hook 在正常完成时会等待内部操作结算。runtime `Cancel` 可能先返回停止错误，
+worker 仍持有输入和字节容量。旧的 async provider-path hook 只返回内部子操作的业务结果；runtime `Cancel`
+也可能在 Provider native 或远端 I/O 尚未确认结束时返回停止结果。两个旧 hook 都没有 parent scope，
+也不提供 settlement observer。若需区分业务结果与资源释放，应使用显式 managed API。
 
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
 选择或媒体细化。输入受理后会按 owned payload 计入共享 runtime 聚合字节预算；即使仓库规则原本
@@ -444,10 +443,11 @@ fn shutdown_application(
 `wait_settlement_until(deadline)` 返回
 `Result<SettlementWait, ObservationError>`。`SettlementWait::Pending(snapshot)` 只表示
 本次有界观察结束，不能证明资源已释放。截止时间必须来自 operation 使用的 clock domain。
-示例显式匹配 Ready 和 Pending，并在 Ready 时检查 `all_released()`；返回 tuple 时仍保留
-outcome、observer 和原始 settlement 观察结果。调用方可根据负面报告执行恢复处理，也可在 Pending 后继续观察。
-清理失败会保留未确认资源，后续重试
-须通过已登记的 recovery policy/handle 观察或恢复，不能靠重提推理请求完成。关闭函数返回
+示例显式匹配 Ready 和 Pending，并在 Ready 时检查 `all_released()`。`Ready(report)` 表示本次结算已终结，
+但报告仍可能包含资源未释放等负面证据；应保留报告以便恢复。`Pending(snapshot)` 只表示等待到达截止时间，
+调用方可继续观察。Provider I/O 无法确认时，可能得到仍保留资源的 Ready 负面报告。内置清理策略会继续保留
+容量；如果没有新的完成证据，重试清理仍会失败。恢复时应使用已登记的 recovery policy/handle，重新提交推理
+请求不会释放先前请求的资源。关闭函数返回
 `DetectorPending` 时应先保留报告并重试 detector shutdown，不要继续关闭 manager；`ManagerPending`
 保留 snapshot 和 handle，可再次 `wait_for`；`Completed` 携带最终 manager report。`shutdown_application`
 应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
@@ -465,9 +465,9 @@ runtime 关闭后，可调用 `detector.runtime_snapshot()` 查看共享运行�
 它只约束逻辑采样和由请求持有的 payload 记账，不代表进程总内存或 Provider/网络流量上限。
 runtime 会先预留容量和字节预算，再提交可选的 scope 子操作，然后才调用 Provider 的
 `open`、`stat`、`read_all`、`length` 或范围读取。runtime 已关闭、容量已满或 scope
-已取消时，会在 Provider 调用前拒绝请求。`read_all` 回退会把已读缓冲区直接交给 worker，
-不会主动再克隆一份完整数据。worker 会将拥有数据的 `Vec` 转为 `Box<[u8]>`；若需要收缩未使用容量，
-`into_boxed_slice` 仍可能重新分配，因此不能据此承诺零分配。运行时构造时会创建 session-owning
+已取消时，会在 Provider 调用前拒绝请求。`read_all` 回退会把已读缓冲区交给 async dispatch 路径，
+不会主动再克隆一份完整数据。该路径在将输入派发给 worker 前，把拥有数据的 `Vec` 转为 `Box<[u8]>`；
+若需收缩未使用容量，`into_boxed_slice` 仍可能重新分配，因此不能据此承诺零分配。运行时构造时会创建 session-owning
 worker 并等待 Magika Session 初始化完成，因此
 当前没有额外的 `prepare()` API；builder 的 `build()` 就是准备阶段。采样工作在 worker
 上运行，async operation future 负责服务范围读取，不会阻塞执行器线程。

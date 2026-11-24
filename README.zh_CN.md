@@ -111,13 +111,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 `MagikaMimeDetector::detect_async_provider_path_managed` 或 `detect_bytes_managed` 传入
 `OperationScope`。受管调用会将工作关联到该 scope，使其报告能独立跟踪资源释放和业务结果。
 应用启动时创建 runtime 和 detector，每个受管请求传入 scope，并在应用关闭时 drain runtime。
+检测 future 返回的是业务结果；scope observer 会单独报告资源结算。`Pending(snapshot)` 只表示本次有界等待结束，
+`Ready(report)` 也可能包含未释放资源的负面证据。Provider I/O 完成情况未知时，容量会继续保留；内置清理策略
+不会在没有新完成证据时通过重试释放容量。shutdown report 中的 `worker_stopped` 只记录 worker join，与这两项观察相互独立。
 
 Inventory 只提交同步 `MimeDetectorSpec` factory，不会向 `qubit-mime` 独立的 async provider
 registry 添加 Provider，也不会附加应用 scope。通过支持 scope 的 async `MimeRuntime` 路由
 选择这个仅支持同步的 `magika` Provider 时，会返回 `AsyncUnsupported`，不会回退到同步推理。
-若需 scope 跟踪，可直接调用 Magika 的 managed API。旧版 content hook 通常等待推理结算；但
-runtime 的 `Cancel` 结果可能先返回，worker 仍会保留输入和许可直至访问结束。旧版 provider-path
-hook 等待业务结果，不暴露结算状态或 parent-scope 观察。区别见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
+若需 scope 跟踪，可直接调用 Magika 的 managed API。旧版 content hook 在正常完成时等待内部操作结算；
+runtime `Cancel` 可能先返回停止错误，worker 仍会保留输入和许可。旧版 provider-path hook 只观察子操作业务结果，
+`Cancel` 可在 Provider I/O 尚未确认结束时返回停止结果。两个旧 hook 都没有 parent-scope 或 settlement observer。
+区别见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
 
 启用 inventory 时，`MimeDetectorRegistry::builtin()` 会发现未配置的同步 Provider；默认选择仍是
 `repository`，因此需显式选择 `magika`。独立的 `MimeDetectorRegistry::default()` 初始为空，适合
