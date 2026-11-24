@@ -75,12 +75,23 @@ fn run_ready<F: Future>(future: F) -> F::Output {
 #[derive(Default)]
 struct CountingReadObserver {
     ready_events: Arc<std::sync::atomic::AtomicUsize>,
+    pending_read_events: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl ReadIoObserver for CountingReadObserver {
     fn on_io_event(&mut self, event: ReadIoEvent) {
-        if matches!(event, ReadIoEvent::Ready { .. }) {
-            self.ready_events.fetch_add(1, Ordering::SeqCst);
+        match event {
+            ReadIoEvent::Ready { .. } => {
+                self.ready_events.fetch_add(1, Ordering::SeqCst);
+            }
+            ReadIoEvent::Pending {
+                phase: ReadIoPhase::Read,
+            } => {
+                if let Some(pending_read_events) = &self.pending_read_events {
+                    pending_read_events.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -121,6 +132,7 @@ fn test_legacy_async_provider_yields_within_completed_io_budget_for_short_reads(
     let event_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut observer = CountingReadObserver {
         ready_events: Arc::clone(&event_count),
+        pending_read_events: None,
     };
     let mut future = Box::pin(read_async_segments_observed(
         &file_system,
@@ -175,6 +187,81 @@ fn test_legacy_async_provider_yields_within_completed_io_budget_for_short_reads(
         4096,
         observations.read_bytes.load(std::sync::atomic::Ordering::SeqCst)
     );
+    drop(future);
+    assert_eq!(content, output);
+}
+
+#[test]
+fn test_legacy_io_budget_survives_real_provider_pending() {
+    let content: Vec<u8> = (0..126).map(|index| (index % 251) as u8).collect();
+    let provider_pending_observed = Arc::new(AtomicBool::new(false));
+    let provider = ProviderFileSystemSpi::new(content.clone())
+        .with_range()
+        .with_max_read_range_bytes(63)
+        .one_byte_reads()
+        .with_pending_first_async_read(Arc::clone(&provider_pending_observed));
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let path = Path::parse("/pending-legacy-budget").unwrap();
+    let mut output = vec![0; content.len()];
+    let ready_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pending_read_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut observer = CountingReadObserver {
+        ready_events: Arc::clone(&ready_events),
+        pending_read_events: Some(Arc::clone(&pending_read_events)),
+    };
+    let mut future = Box::pin(read_async_segments_observed(
+        &file_system,
+        &path,
+        None,
+        &mut output,
+        0,
+        63,
+        &mut observer,
+    ));
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(Arc::clone(&wake));
+    let mut context = Context::from_waker(&waker);
+    let mut ready_events_per_poll = Vec::new();
+    let mut poll_count = 0;
+
+    loop {
+        poll_count += 1;
+        assert!(poll_count <= 4, "provider read exceeded its expected poll count");
+        let before = ready_events.load(Ordering::SeqCst);
+        let poll = future.as_mut().poll(&mut context);
+        let completed_this_poll = ready_events.load(Ordering::SeqCst) - before;
+        assert!(
+            completed_this_poll <= 128,
+            "one poll completed {completed_this_poll} provider operations; maximum is 128"
+        );
+        ready_events_per_poll.push(completed_this_poll);
+        match poll {
+            Poll::Ready(result) => {
+                result.expect("read should complete after the provider resumes");
+                break;
+            }
+            Poll::Pending => {
+                // This fixture deliberately leaves wake-up control to the test:
+                // the next poll resumes the real provider read or yield.
+                if !wake.notified.swap(false, Ordering::AcqRel) {
+                    waker.wake_by_ref();
+                    assert!(wake.notified.swap(false, Ordering::AcqRel));
+                }
+            }
+        }
+    }
+
+    assert!(provider_pending_observed.load(Ordering::SeqCst));
+    assert_eq!(4, poll_count);
+    assert_eq!(2, pending_read_events.load(Ordering::SeqCst));
+    assert_eq!(vec![1, 63, 1, 63], ready_events_per_poll);
+    assert_eq!(128, ready_events.load(Ordering::SeqCst));
+    assert_eq!(2, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(126, observations.read_bytes.load(Ordering::SeqCst));
     drop(future);
     assert_eq!(content, output);
 }
