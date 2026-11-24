@@ -270,6 +270,42 @@ mod tests {
     use super::RequestAdmissionHandoff;
 
     #[test]
+    fn test_child_outcome_before_body_start_releases_admission() {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let active_requests_for_parent = Arc::clone(&active_requests);
+        let byte_budget_for_parent = Arc::clone(&byte_budget);
+        let mut operation = manager
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let admission = RequestAdmission::new(
+                    Arc::new(TaskState::new(800, None)),
+                    ServicePermit::try_acquire(&active_requests_for_parent, 1).unwrap(),
+                    byte_budget_for_parent.try_acquire(8).unwrap(),
+                );
+                let (handoff, mut guard) = RequestAdmissionHandoff::new(admission);
+                let mut outcome = std::future::ready(());
+                assert!(
+                    handoff
+                        .register_on_parent(&scope, &mut guard, &mut outcome)
+                        .await
+                        .is_some()
+                );
+                assert_eq!(active_requests_for_parent.load(Ordering::SeqCst), 0);
+                assert!(byte_budget_for_parent.try_acquire(8).is_some());
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        assert!(matches!(
+            block_on(operation.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
+        assert!(block_on(operation.wait_settlement()).all_released());
+    }
+
+    #[test]
     fn test_dropping_caller_closes_waiting_child_and_releases_admission() {
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
         let active_requests = Arc::new(AtomicUsize::new(0));
