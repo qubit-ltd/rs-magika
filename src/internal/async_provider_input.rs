@@ -43,7 +43,7 @@ pub(crate) struct AsyncProviderInput {
     /// Scope stop state read directly between aggregate provider I/Os.
     stop_watcher: Option<Arc<StopWatcher>>,
     /// Tracks actual provider futures, excluding aggregate scheduling yields.
-    io_in_flight: Option<Arc<AtomicBool>>,
+    io_in_flight: Arc<AtomicBool>,
 }
 
 impl AsyncProviderInput {
@@ -71,7 +71,7 @@ impl AsyncProviderInput {
             budget: ReadBudget::new(limit),
             stop_state: None,
             stop_watcher: None,
-            io_in_flight: Some(Arc::new(AtomicBool::new(false))),
+            io_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -96,7 +96,7 @@ impl AsyncProviderInput {
             budget: ReadBudget::new(limit),
             stop_state: None,
             stop_watcher: None,
-            io_in_flight: Some(Arc::new(AtomicBool::new(false))),
+            io_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -129,13 +129,13 @@ impl AsyncProviderInput {
         self
     }
 
-    /// Clones the actual-I/O marker for an owned legacy route.
+    /// Clones the actual-I/O marker shared with the managed driver.
     ///
     /// # Returns
     ///
-    /// `Some` for an owned legacy route and `None` for a session route.
-    pub(crate) fn io_in_flight(&self) -> Option<Arc<AtomicBool>> {
-        self.io_in_flight.as_ref().map(Arc::clone)
+    /// A shared marker that is true only while provider I/O is being polled.
+    pub(crate) fn io_in_flight(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.io_in_flight)
     }
 }
 
@@ -167,60 +167,42 @@ impl AsyncInput for AsyncProviderInput {
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         let stop_state = self.stop_state.as_ref().map(Arc::clone);
         let stop_watcher = self.stop_watcher.as_ref().map(Arc::clone);
-        let io_in_flight = self.io_in_flight.as_ref().map(Arc::clone);
+        let io_in_flight = Arc::clone(&self.io_in_flight);
         match &mut self.route {
             AsyncRoute::OwnedLegacy { file_system, path } => {
-                if let Some(io_in_flight) = &self.io_in_flight {
-                    let mut observer = ManagedReadObserver::new(stop_state, Arc::clone(io_in_flight), stop_watcher);
-                    read_async_observed(
-                        file_system,
-                        path,
-                        self.length,
-                        read_options(offset, buffer.len(), self.version.as_ref()),
-                        &mut self.budget,
-                        buffer,
-                        &mut observer,
-                    )
-                    .await
-                } else {
-                    unreachable!("owned async provider inputs track observed I/O")
-                }
+                let mut observer = ManagedReadObserver::new(stop_state, io_in_flight, stop_watcher);
+                read_async_observed(
+                    file_system,
+                    path,
+                    self.length,
+                    read_options(offset, buffer.len(), self.version.as_ref()),
+                    &mut self.budget,
+                    buffer,
+                    &mut observer,
+                )
+                .await
             }
             AsyncRoute::Session { reader, max_segment } => {
-                if stop_state.is_some() || stop_watcher.is_some() {
-                    read_async_session_with_stop(
-                        reader,
-                        self.length,
-                        &mut self.budget,
-                        buffer,
-                        offset,
-                        AsyncSessionReadOptions {
-                            max_segment: *max_segment,
-                            should_stop: move || {
-                                stop_state
+                read_async_session_with_stop(
+                    reader,
+                    self.length,
+                    &mut self.budget,
+                    buffer,
+                    offset,
+                    AsyncSessionReadOptions {
+                        max_segment: *max_segment,
+                        should_stop: move || {
+                            stop_state
+                                .as_ref()
+                                .is_some_and(|state| !state.try_start_provider_operation())
+                                || stop_watcher
                                     .as_ref()
-                                    .is_some_and(|state| !state.try_start_provider_operation())
-                                    || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
-                            },
-                            io_in_flight: io_in_flight.as_deref(),
+                                    .is_some_and(|watcher| watcher.is_stopped())
                         },
-                    )
-                    .await
-                } else {
-                    read_async_session_with_stop(
-                        reader,
-                        self.length,
-                        &mut self.budget,
-                        buffer,
-                        offset,
-                        AsyncSessionReadOptions {
-                            max_segment: *max_segment,
-                            should_stop: || false,
-                            io_in_flight: io_in_flight.as_deref(),
-                        },
-                    )
-                    .await
-                }
+                        io_in_flight: Some(io_in_flight.as_ref()),
+                    },
+                )
+                .await
             }
         }
     }
