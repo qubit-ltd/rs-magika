@@ -61,6 +61,50 @@ impl std::task::Wake for SignalWake {
     }
 }
 
+struct AsyncTestGate {
+    state: Mutex<(bool, Option<Waker>)>,
+}
+
+impl AsyncTestGate {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new((false, None)),
+        }
+    }
+
+    fn release(&self) {
+        let waker = {
+            let mut state = self.state.lock().unwrap();
+            state.0 = true;
+            state.1.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    async fn wait(&self) {
+        std::future::poll_fn(|context| {
+            let mut state = self.state.lock().unwrap();
+            if state.0 {
+                Poll::Ready(())
+            } else {
+                state.1 = Some(context.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
+struct ReleaseAsyncTestGateOnDrop(Arc<AsyncTestGate>);
+
+impl Drop for ReleaseAsyncTestGateOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 fn map_provider_test_error(_: magika::Error) -> MimeError {
     MimeError::detector_backend("magika", "test input failed")
 }
@@ -1092,7 +1136,9 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
 
     for provider_entry in [false, true] {
         for worker_fault in [false, true] {
-            let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+            let mut manager_options = ManagerOptions::default();
+            manager_options.async_executor.worker_count = 1;
+            let supervisor = OperationManager::new(manager_options).unwrap();
             let max_bytes = qubit_mime::MimeConfig::default().max_buffer_size();
             let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
                 supervisor.clone(),
@@ -1119,10 +1165,12 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             let file_system = provider.async_file_system();
             let path = qubit_fs::Path::parse("/managed-handoff.py").unwrap();
             let (started_tx, started_rx) = mpsc::sync_channel(1);
-            let (release_tx, release_rx) = mpsc::sync_channel(1);
+            let task_gate = Arc::new(AsyncTestGate::new());
+            let _release_task_gate = ReleaseAsyncTestGateOnDrop(Arc::clone(&task_gate));
             let request_detector = Arc::clone(&detector);
             let request_file_system = file_system.clone();
             let request_path = path.clone();
+            let operation_gate = Arc::clone(&task_gate);
             let mut operation = supervisor
                 .as_async()
                 .try_submit(OperationOptions::default(), move |scope| async move {
@@ -1137,11 +1185,13 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
                     } else {
                         Box::pin(request_detector.detect_bytes_managed(&scope, b"managed bytes".to_vec()))
                     };
-                    let waker = Waker::from(Arc::new(SignalWake(started_tx)));
-                    let mut context = Context::from_waker(&waker);
-                    assert!(detection.as_mut().poll(&mut context).is_pending());
+                    {
+                        let waker = Waker::from(Arc::new(SignalWake(started_tx)));
+                        let mut context = Context::from_waker(&waker);
+                        assert!(detection.as_mut().poll(&mut context).is_pending());
+                    }
                     // Keep the public caller future alive but do not poll it again.
-                    release_rx.recv_timeout(Duration::from_secs(8)).unwrap();
+                    operation_gate.wait().await;
                     drop(detection);
                     Ok::<_, MimeError>(())
                 })
@@ -1190,7 +1240,7 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             );
             assert_eq!(0, observations.opens.load(Ordering::SeqCst));
             assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
-            release_tx.send(()).unwrap();
+            task_gate.release();
             let _ = block_on(operation.wait_outcome()).unwrap();
             if worker_fault {
                 let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
