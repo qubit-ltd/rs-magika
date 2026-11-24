@@ -2190,6 +2190,83 @@ fn test_provider_path_async_session_read_error_does_not_fall_back_to_path() {
     assert_eq!(0, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
 }
 
+fn provider_read_error_kind(error: &MimeError) -> qubit_fs::error::FsErrorKind {
+    match error {
+        MimeError::FileSystem(error) => error.kind(),
+        MimeError::Io(error) => error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<qubit_fs::FsError>())
+            .expect("provider FsError should remain in the read error source chain")
+            .kind(),
+        other => panic!("provider read should preserve an I/O or filesystem error: {other:?}"),
+    }
+}
+
+#[test]
+fn test_provider_read_error_sources_cover_all_path_entrances() {
+    for asynchronous in [false, true] {
+        for session in [false, true] {
+            let mut provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_read_error(
+                qubit_fs::error::FsErrorKind::Cancelled,
+            );
+            if session {
+                provider = provider.with_random_access();
+            } else {
+                provider = provider.with_range();
+            }
+            let observations = provider.observations();
+            let error = if asynchronous {
+                run_ready(detector().detect_async_path(
+                    &provider.async_file_system(),
+                    &path("/provider-cancelled.py"),
+                    8192,
+                    MimeDetectionPolicy::VerifyContent,
+                ))
+                .expect_err("provider cancellation should remain a failed MIME read")
+            } else {
+                detector()
+                    .detect_path(
+                        &provider.file_system(),
+                        &path("/provider-cancelled.py"),
+                        8192,
+                        MimeDetectionPolicy::VerifyContent,
+                    )
+                    .expect_err("provider cancellation should remain a failed MIME read")
+            };
+            assert_eq!(
+                qubit_fs::error::FsErrorKind::Cancelled,
+                provider_read_error_kind(&error),
+                "async={asynchronous}, session={session}, error={error:?}"
+            );
+            if session {
+                assert_eq!(1, observations.random_opens.load(Ordering::SeqCst));
+                assert_eq!(1, observations.session_read_ranges.lock().unwrap().len());
+                assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+                assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+            } else {
+                assert!(observations.opens.load(Ordering::SeqCst) > 0);
+                assert_eq!(1, observations.range_reads.load(Ordering::SeqCst));
+            }
+        }
+    }
+
+    let read_all = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_read_error(qubit_fs::error::FsErrorKind::Cancelled);
+    let error = detector()
+        .detect_path(
+            &read_all.file_system(),
+            &path("/provider-cancelled-read-all.py"),
+            8192,
+            MimeDetectionPolicy::VerifyContent,
+        )
+        .expect_err("read-all provider cancellation should remain a failed MIME read");
+    assert_eq!(
+        qubit_fs::error::FsErrorKind::Cancelled,
+        provider_read_error_kind(&error),
+        "read-all source chain is the control for the ranged entrances"
+    );
+}
+
 #[test]
 fn test_provider_path_without_range_rejects_known_oversize() {
     let provider = large_provider(false);
@@ -2761,10 +2838,29 @@ fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
             completion_gate.release();
 
             if let Some(mut operation) = managed_operation.take() {
-                let _ = run_ready(operation.wait_outcome());
+                let outcome = run_ready(operation.wait_outcome())
+                    .expect("managed ready-read cancellation should publish a business outcome");
+                assert!(
+                    matches!(
+                        &outcome,
+                        qubit_operation::OperationOutcome::Failed(MimeError::DetectorBackend {
+                            backend,
+                            reason,
+                        }) if backend == "magika" && reason == "provider inference stopped"
+                    ),
+                    "managed runtime cancellation should preserve the provider stop error: {outcome:?}"
+                );
             }
             if let Some(hook) = legacy_hook {
-                let _ = hook.join().unwrap();
+                let error = hook
+                    .join()
+                    .unwrap()
+                    .expect_err("legacy hook must report runtime cancellation after the ready read");
+                assert!(
+                    matches!(error, MimeError::DetectorBackend { ref backend, ref reason }
+                        if backend == "magika" && reason == "provider inference stopped"),
+                    "legacy hook should expose the provider stop error: {error:?}"
+                );
             }
             let report = shutdown.join().unwrap();
             assert!(report.worker_stopped);
@@ -2810,6 +2906,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     } else {
         provider = provider.without_range();
     }
+    let observations = provider.observations();
     let file_system = provider.async_file_system();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
     let request_detector = Arc::clone(&detector);
@@ -2839,6 +2936,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     }
     let gate_was_entered = gate.is_entered();
     let observer = operation.observer();
+    let mut failures = Vec::new();
     let shutdown_detector = Arc::clone(&detector);
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (finished_tx, finished_rx) = std::sync::mpsc::channel();
@@ -2855,6 +2953,30 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
         Poll::Ready(settlement_before.as_mut().poll(context))
     }));
     drop(settlement_before);
+    if managed
+        && gate_was_entered
+        && matches!(settlement_before_release, Poll::Ready(ref report) if report.all_released())
+    {
+        failures.push(format!(
+            "provider resources were reported Released before the Pending gate opened; managed={managed}, point={point:?}, session={session}, range={range}"
+        ));
+    }
+    if !managed
+        && gate_was_entered
+        && !matches!(settlement_before_release, Poll::Ready(ref report) if report.all_released())
+    {
+        failures.push(format!(
+            "legacy hook wrapper should report its own resources Released while runtime resources remain held; point={point:?}, session={session}, range={range}, observation={settlement_before_release:?}"
+        ));
+    }
+    if gate_was_entered {
+        let snapshot_before_release = detector.runtime_snapshot();
+        if snapshot_before_release.unconfirmed_provider_io == 0 || snapshot_before_release.reserved_bytes == 0 {
+            failures.push(format!(
+                "runtime should retain the pending Provider reservation before gate release; managed={managed}, point={point:?}, session={session}, range={range}, snapshot={snapshot_before_release:?}"
+            ));
+        }
+    }
     gate.release();
     let completed = match before_release {
         Ok(completed) => Ok(completed),
@@ -2862,26 +2984,76 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     };
     shutdown.join().unwrap();
     let (finished_at, report) = completed.expect("runtime Cancel should finish after the gate is released");
-    let mut failures = Vec::new();
+    let provider_wait_dropped_after_release = gate.is_wait_dropped();
     if !gate_was_entered || !returned_before_release || !report.worker_stopped {
         failures.push(format!(
             "managed={managed}, point={point:?}, session={session}, range={range}, gate_entered={gate_was_entered}, returned_before_release={returned_before_release}, report={report:?}, completed_at={finished_at:?}"
         ));
     }
-    let _ = run_ready(operation.wait_outcome());
-    let mut settlement_after = Box::pin(observer.wait_settlement());
-    let settlement_poll = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(settlement_after.as_mut().poll(context))
-    }));
-    if managed && gate_was_entered && matches!(settlement_before_release, Poll::Ready(report) if report.all_released())
-    {
-        failures.push(format!(
-            "managed scope reported Released while Provider future remained Pending; point={point:?}, session={session}, range={range}"
-        ));
+    let settlement_after = run_until(observer.wait_settlement(), Duration::from_millis(500));
+    let settlement_was_published = settlement_after.is_ok();
+    let mut contract_failures = Vec::new();
+    if gate_was_entered {
+        let outcome = run_until(operation.wait_outcome(), Duration::from_secs(5));
+        match outcome {
+            Ok(Ok(qubit_operation::OperationOutcome::Failed(_)))
+            | Ok(Ok(qubit_operation::OperationOutcome::Stopped(_))) => {}
+            other => contract_failures.push(format!(
+                "runtime Cancel should produce a stopped or backend-error business outcome; managed={managed}, point={point:?}, session={session}, range={range}, outcome={other:?}"
+            )),
+        }
     }
-    let _settlement_after_release = settlement_poll;
+    match settlement_after {
+        Ok(settlement) => {
+            if gate_was_entered && managed && settlement.all_released() {
+                contract_failures.push(format!(
+                    "Pending Provider access must retain the settlement required by its evidence; managed={managed}, point={point:?}, session={session}, range={range}, future_dropped={provider_wait_dropped_after_release}, settlement={settlement:?}"
+                ));
+            }
+            if gate_was_entered && !managed && !settlement.all_released() {
+                contract_failures.push(format!(
+                    "legacy hook wrapper should settle independently of runtime-held Provider resources; point={point:?}, session={session}, range={range}, settlement={settlement:?}"
+                ));
+            }
+            if gate_was_entered
+                && managed
+                && settlement.recovery_count == 0
+                && settlement.recoveries_total == 0
+                && settlement.cleanup_failures_total == 0
+                && settlement.transferred_count == 0
+            {
+                contract_failures.push(format!(
+                    "negative settlement must retain recovery evidence; managed={managed}, point={point:?}, session={session}, range={range}, settlement={settlement:?}"
+                ));
+            }
+        }
+        Err(()) => {}
+    }
+    if gate_was_entered {
+        let snapshot = detector.runtime_snapshot();
+        let observed_reads = observations
+            .read_bytes
+            .load(Ordering::SeqCst)
+            .saturating_add(observations.random_reads.load(Ordering::SeqCst));
+        if observed_reads != 0 {
+            contract_failures.push(format!(
+                "provider read began while the selected entry boundary was gated; managed={managed}, point={point:?}, session={session}, range={range}, read_bytes={observed_reads}"
+            ));
+        }
+        if snapshot.unconfirmed_provider_io == 0 || snapshot.reserved_bytes == 0 {
+            contract_failures.push(format!(
+                "cancelled Pending I/O must retain its reservation evidence when settlement_published={settlement_was_published}; managed={managed}, point={point:?}, session={session}, range={range}, future_dropped={provider_wait_dropped_after_release}, snapshot={snapshot:?}"
+            ));
+        }
+        if report.admission.snapshot.service_resources == 0 {
+            contract_failures.push(format!(
+                "shutdown must retain service capacity for Pending I/O recovery; managed={managed}, point={point:?}, session={session}, range={range}, report={report:?}"
+            ));
+        }
+    }
     let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
     let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    failures.extend(contract_failures);
     (!failures.is_empty()).then(|| failures.join("; "))
 }
 

@@ -60,6 +60,7 @@ pub(crate) struct ProviderFileSystemSpi {
     stat_supported: bool,
     short_read: bool,
     fail_reads: bool,
+    read_error: Option<FsErrorKind>,
     interrupt_session_once: bool,
     random_access: bool,
     random_open_error: Option<FsErrorKind>,
@@ -232,6 +233,13 @@ impl AsyncProviderGate {
             }
         }
     }
+
+    pub(crate) fn is_wait_dropped(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .wait_dropped
+    }
     pub(crate) fn release(&self) {
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.released = true;
@@ -274,6 +282,7 @@ pub(crate) struct ProviderObservations {
     pub(crate) session_read_ranges: Mutex<Vec<(u64, usize)>>,
     pub(crate) session_drops: AtomicUsize,
     pub(crate) read_bytes: AtomicUsize,
+    pub(crate) range_reads: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
 }
 
@@ -287,6 +296,7 @@ impl ProviderFileSystemSpi {
             stat_supported: true,
             short_read: false,
             fail_reads: false,
+            read_error: None,
             interrupt_session_once: false,
             random_access: false,
             random_open_error: None,
@@ -341,6 +351,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn fail_reads(mut self) -> Self {
         self.fail_reads = true;
+        self
+    }
+
+    pub(crate) fn with_read_error(mut self, kind: FsErrorKind) -> Self {
+        self.read_error = Some(kind);
         self
     }
 
@@ -479,6 +494,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 bytes,
                 position: 0,
                 fail_reads: self.fail_reads,
+                read_error: self.read_error,
                 short_read: self.short_read,
                 observations: Arc::clone(&self.observations),
                 async_gate: self.async_gate.clone(),
@@ -505,6 +521,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 length: self.length.unwrap_or(self.content.len() as u64),
                 short_read: self.short_read,
                 fail_reads: self.fail_reads,
+                read_error: self.read_error,
                 interrupt_pending: self.interrupt_session_once,
                 observations: Arc::clone(&self.observations),
                 async_gate: self.async_gate.clone(),
@@ -549,6 +566,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     bytes,
                     position: 0,
                     fail_reads: self.fail_reads,
+                    read_error: self.read_error,
                     short_read: self.short_read,
                     observations: Arc::clone(&self.observations),
                     async_gate: self.async_gate.clone(),
@@ -587,6 +605,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     length: self.length.unwrap_or(self.content.len() as u64),
                     short_read: self.short_read,
                     fail_reads: self.fail_reads,
+                    read_error: self.read_error,
                     interrupt_pending: self.interrupt_session_once,
                     observations: Arc::clone(&self.observations),
                     async_gate: self.async_gate.clone(),
@@ -603,6 +622,7 @@ struct ProviderSession {
     length: u64,
     short_read: bool,
     fail_reads: bool,
+    read_error: Option<FsErrorKind>,
     interrupt_pending: bool,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
@@ -633,6 +653,9 @@ impl RandomAccessReadSession for ProviderSession {
                 io::Error::other("configured provider read failure"),
                 FsOperation::Read,
             ));
+        }
+        if let Some(kind) = self.read_error.take() {
+            return Err(FsError::new(kind, FsOperation::Read, "configured provider read error"));
         }
         if self.interrupt_pending {
             self.interrupt_pending = false;
@@ -688,6 +711,7 @@ struct ProviderReader {
     bytes: Vec<u8>,
     position: usize,
     fail_reads: bool,
+    read_error: Option<FsErrorKind>,
     short_read: bool,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
@@ -696,6 +720,10 @@ struct ProviderReader {
 
 impl ProviderReader {
     fn read_bytes(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.observations.range_reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(kind) = self.read_error.take() {
+            return Err(FsError::new(kind, FsOperation::Read, "configured provider read error").into_io_error());
+        }
         if self.fail_reads {
             return Err(io::Error::other("configured provider read failure"));
         }
