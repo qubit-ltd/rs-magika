@@ -459,6 +459,7 @@ mod tests {
     use crate::internal::ManagedReadObserver;
     use crate::internal::StopWatcher;
     use crate::internal::provider_input::read_async_observed;
+    use crate::internal::provider_input::read_options;
     use crate::internal::read_budget::ReadBudget;
     use crate::managed_runtime::byte_budget::ByteBudget;
     use crate::managed_runtime::task_state::TaskState;
@@ -701,10 +702,9 @@ mod tests {
                             &file_system,
                             &path,
                             128,
-                            None,
+                            read_options(0, bytes.len(), None),
                             &mut read_budget,
                             &mut bytes,
-                            0,
                             &mut observer,
                         ))
                     };
