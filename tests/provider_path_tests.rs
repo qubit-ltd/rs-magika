@@ -3104,8 +3104,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
     // Stat/open and random-access read expose a provider future whose Drop is
     // observed by AsyncProviderGate. Ordinary and legacy range reads are
     // checked through cancellation and settlement evidence below.
-    let observes_wait_drop = matches!(point, AsyncProviderGatePoint::Stat | AsyncProviderGatePoint::Open)
-        || session;
+    let observes_wait_drop = matches!(point, AsyncProviderGatePoint::Stat | AsyncProviderGatePoint::Open) || session;
     let provider_wait_dropped_before_release = if gate_was_entered && observes_wait_drop {
         let deadline = Instant::now() + Duration::from_millis(500);
         while !gate.is_wait_dropped() && Instant::now() < deadline {

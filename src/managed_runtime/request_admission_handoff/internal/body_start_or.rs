@@ -20,8 +20,8 @@ use super::handoff_close_reason::HandoffCloseReason;
 ///
 /// # Type Parameters
 ///
-/// * `T` - Outcome returned when polling observes operation completion
-///   before body start.
+/// * `T` - Outcome returned when polling observes operation completion before
+///   body start.
 pub(crate) enum BodyStartOr<T> {
     /// The child body's start signal was observed. Higher-level caller
     /// methods may perform registration or payload transfer before returning

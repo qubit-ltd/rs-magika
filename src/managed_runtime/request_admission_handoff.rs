@@ -203,7 +203,8 @@ impl RequestAdmissionHandoff {
     /// An observed outcome closes the handoff and releases any unclaimed
     /// payload. A body claim disarms the caller guard; `BodyStarted` means the
     /// root child claimed its payload. A prior close is returned with its
-    /// recorded reason. Poll order does not establish physical completion order.
+    /// recorded reason. Poll order does not establish physical completion
+    /// order.
     ///
     /// # Type Parameters
     ///
@@ -287,7 +288,8 @@ impl RequestAdmissionHandoff {
     /// handoff is closed. The outcome is polled first, so it wins when both
     /// outcome and start are ready in one poll; this says nothing about which
     /// event physically completed first. The underlying poll uses
-    /// `Some(true)`, `Some(false)`, and `None` for started, closed, and pending.
+    /// `Some(true)`, `Some(false)`, and `None` for started, closed, and
+    /// pending.
     pub(crate) async fn wait_for_body_start_or<F, T>(&self, outcome: &mut F) -> BodyStartOr<T>
     where
         F: Future<Output = T> + Unpin,
