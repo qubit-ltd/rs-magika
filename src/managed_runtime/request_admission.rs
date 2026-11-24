@@ -4,6 +4,7 @@
 //    SPDX-License-Identifier: Apache-2.0
 //
 //    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 //! Resources reserved before any provider operation starts.
 
 use std::future::Future;
@@ -20,8 +21,8 @@ use qubit_operation::ResourceScopeOptions;
 use super::byte_permit::BytePermit;
 use super::job::Job;
 use super::request_resource_cleanup::RequestResourceCleanup;
-use super::request_resource_scope_guard::RequestResourceScopeGuard;
 pub(super) use super::request_resource_owner::RequestResourceOwner;
+use super::request_resource_scope_guard::RequestResourceScopeGuard;
 use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
@@ -98,8 +99,29 @@ impl RequestAdmission {
         self.run_provider_operation_inner(scope, operation, None).await
     }
 
-    /// Polls an aggregate provider operation while using actual-I/O observer
-    /// state to distinguish provider Pending from cooperative yields.
+    /// Polls an aggregate provider operation while observing actual-I/O state.
+    ///
+    /// The observer distinguishes provider I/O that remains pending from an
+    /// aggregate future that yielded cooperatively between completed reads.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Aggregate provider operation future.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Parent operation scope whose stop signal is observed.
+    /// * `operation` - Aggregate provider future polled while this admission
+    ///   remains active.
+    /// * `io_in_flight` - Shared flag set only while provider I/O is pending.
+    ///
+    /// # Returns
+    ///
+    /// The provider output, or a MIME error if the operation is stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the operation scope or request is stopped.
     pub(crate) async fn run_provider_operation_with_status<F>(
         &mut self,
         scope: &OperationScope,
@@ -113,6 +135,29 @@ impl RequestAdmission {
             .await
     }
 
+    /// Polls provider I/O while tracking whether a pending poll is actual I/O.
+    ///
+    /// A stop before the first provider poll settles the admission cleanly. A
+    /// stop after an I/O poll remains unconfirmed until the provider future
+    /// reports completion.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Provider operation future.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Parent operation scope whose stop signal is observed.
+    /// * `operation` - Provider future polled while admission is active.
+    /// * `io_in_flight` - Optional state tracking actual provider I/O.
+    ///
+    /// # Returns
+    ///
+    /// The provider output if it completes, or a MIME error if stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error when the operation scope or request is stopped.
     async fn run_provider_operation_inner<F>(
         &mut self,
         scope: &OperationScope,
@@ -465,7 +510,10 @@ mod tests {
                 );
                 let mut first = first;
                 first.retain_in_scope(&scope).unwrap();
-                first.settle_error(qubit_mime::MimeError::detector_backend("magika", "first request complete"));
+                first.settle_error(qubit_mime::MimeError::detector_backend(
+                    "magika",
+                    "first request complete",
+                ));
 
                 let second = RequestAdmission::new(
                     Arc::new(TaskState::new(710, None)),
@@ -487,7 +535,10 @@ mod tests {
                         Err(error) => panic!("request scope capacity was not reusable: {error}"),
                     }
                 }
-                second.settle_error(qubit_mime::MimeError::detector_backend("magika", "second request complete"));
+                second.settle_error(qubit_mime::MimeError::detector_backend(
+                    "magika",
+                    "second request complete",
+                ));
                 Ok::<_, ()>(())
             })
             .unwrap();

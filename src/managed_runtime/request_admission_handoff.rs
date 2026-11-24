@@ -20,47 +20,35 @@ use qubit_mime::MimeError;
 use qubit_operation::OperationScope;
 
 use super::request_admission::RequestAdmission;
+mod internal;
 
-/// Shared admission state between the caller and a submitted child body.
+use internal::BodyStartOr;
+use internal::HandoffState;
+pub(crate) use internal::RequestAdmissionHandoffGuard;
+
+/// Coordinates request admission between a caller and a submitted child body.
+///
+/// The caller registers the request against its parent scope after the child
+/// body starts, then transfers the resulting admission to the waiting child.
+/// If either side stops waiting, the handoff closes and releases any admission
+/// that has not been transferred.
 pub(crate) struct RequestAdmissionHandoff {
     /// Admission transfer and body-start notifications.
     state: Mutex<HandoffState>,
 }
 
-/// Mutable state guarded while admissions and wakers are exchanged.
-struct HandoffState {
-    /// Request whose scope registration is still owned by the caller.
-    caller_admission: Option<RequestAdmission>,
-    /// Admission or registration failure handed to the child body.
-    child_admission: Option<Result<RequestAdmission, MimeError>>,
-    /// Whether the submitted child body has entered its closure.
-    body_started: bool,
-    /// Whether either party abandoned the handoff.
-    closed: bool,
-    /// Caller future waiting for the child body to start.
-    caller_waker: Option<Waker>,
-    /// Child future waiting for the caller to finish registration.
-    child_waker: Option<Waker>,
-}
-
-/// Closes an unfinished handoff when its caller future is dropped.
-pub(crate) struct RequestAdmissionHandoffGuard {
-    /// Shared state closed unless registration is handed to the child.
-    handoff: Arc<RequestAdmissionHandoff>,
-    /// Whether dropping this guard should close the shared handoff.
-    active: bool,
-}
-
-/// Result of racing body start against the submitted operation outcome.
-pub(crate) enum BodyStartOr<T> {
-    /// The child body entered and is waiting for its admission.
-    BodyStarted,
-    /// The child operation finished before its body-start handshake.
-    Outcome(T),
-}
-
 impl RequestAdmissionHandoff {
     /// Creates a handoff and the caller guard that owns its unfinished state.
+    ///
+    /// # Parameters
+    ///
+    /// * `admission` - Request admission retained until it can be registered
+    ///   with the parent scope.
+    ///
+    /// # Returns
+    ///
+    /// The shared handoff and a guard that closes it if the caller abandons
+    /// the registration step.
     pub(crate) fn new(admission: RequestAdmission) -> (Arc<Self>, RequestAdmissionHandoffGuard) {
         let handoff = Arc::new(Self {
             state: Mutex::new(HandoffState {
@@ -99,6 +87,22 @@ impl RequestAdmissionHandoff {
     ///
     /// Returns `Some(outcome)` when the operation finishes before entering its
     /// body. Returns `None` after handing the registered admission to the body.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Future that observes the submitted operation's outcome.
+    /// * `T` - Submitted operation outcome type.
+    ///
+    /// # Parameters
+    ///
+    /// * `parent` - Parent scope that owns the request resource registration.
+    /// * `guard` - Caller-owned guard that closes an unfinished handoff.
+    /// * `outcome` - Future polled while waiting for the child body to start.
+    ///
+    /// # Returns
+    ///
+    /// The operation outcome if the body never starts; otherwise `None` after
+    /// the registered admission has been handed to the child.
     pub(crate) async fn register_on_parent<F, T>(
         self: &Arc<Self>,
         parent: &OperationScope,
@@ -128,6 +132,20 @@ impl RequestAdmissionHandoff {
     }
 
     /// Waits for body start or polls the operation outcome, without blocking.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Future that observes the submitted operation's outcome.
+    /// * `T` - Submitted operation outcome type.
+    ///
+    /// # Parameters
+    ///
+    /// * `outcome` - Future polled until the child body starts or the operation
+    ///   completes.
+    ///
+    /// # Returns
+    ///
+    /// Whether the body started or the operation completed first.
     async fn wait_for_body_start_or<F, T>(&self, outcome: &mut F) -> BodyStartOr<T>
     where
         F: Future<Output = T> + Unpin,
@@ -143,6 +161,15 @@ impl RequestAdmissionHandoff {
 
     /// Polls body start and registers the caller waker while holding the state
     /// lock.
+    ///
+    /// # Parameters
+    ///
+    /// * `context` - Poll context whose waker is notified when body start is
+    ///   reported.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the child body has started, or `false` otherwise.
     fn poll_body_started(&self, context: &mut Context<'_>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.body_started {
@@ -155,6 +182,15 @@ impl RequestAdmissionHandoff {
     }
 
     /// Waits for the parent to register this request, or for the child to stop.
+    ///
+    /// # Parameters
+    ///
+    /// * `child_scope` - Child scope whose stop signal cancels this wait.
+    ///
+    /// # Returns
+    ///
+    /// The registered admission or registration error, or `None` if the
+    /// handoff closes before the child receives it.
     pub(crate) async fn wait_for_child_admission(
         &self,
         child_scope: &OperationScope,
@@ -179,6 +215,10 @@ impl RequestAdmissionHandoff {
     }
 
     /// Takes the unregistered request admission for the parent registrar.
+    ///
+    /// # Returns
+    ///
+    /// The admission if the caller still owns it.
     fn take_caller_admission(&self) -> Option<RequestAdmission> {
         self.state
             .lock()
@@ -188,6 +228,15 @@ impl RequestAdmissionHandoff {
     }
 
     /// Provides the registered admission or its failure to the waiting child.
+    ///
+    /// # Parameters
+    ///
+    /// * `admission` - Parent-registered admission or the registration error.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the child received the value, or `false` if the handoff was
+    /// already closed.
     fn provide_to_child(&self, admission: Result<RequestAdmission, MimeError>) -> bool {
         let (accepted, child_waker, rejected) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -228,23 +277,13 @@ impl RequestAdmissionHandoff {
     }
 }
 
-impl RequestAdmissionHandoffGuard {
-    /// Disarms caller-drop closure after the child owns the admission.
-    fn finish(&mut self) {
-        self.active = false;
-    }
-}
-
-impl Drop for RequestAdmissionHandoffGuard {
-    /// Closes an abandoned handoff and wakes its child outside the mutex.
-    fn drop(&mut self) {
-        if self.active {
-            self.handoff.close();
-        }
-    }
-}
-
 /// Keeps the latest task waker without storing duplicate registrations.
+///
+/// # Parameters
+///
+/// * `slot` - Stored waker slot updated for the current task.
+/// * `waker` - Current task waker to store when it differs from the existing
+///   registration.
 fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
     if slot.as_ref().is_none_or(|registered| !registered.will_wake(waker)) {
         *slot = Some(waker.clone());

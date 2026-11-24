@@ -17,6 +17,14 @@ pub(super) struct RequestResourceScopeGuard {
 
 impl RequestResourceScopeGuard {
     /// Creates a guard for an attached request scope.
+    ///
+    /// # Parameters
+    ///
+    /// * `scope` - Resource scope whose admission this guard owns.
+    ///
+    /// # Returns
+    ///
+    /// A guard that ends the scope if it is not ended explicitly.
     pub(super) fn new(scope: ResourceScope) -> Self {
         Self { scope: Some(scope) }
     }
