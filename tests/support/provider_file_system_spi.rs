@@ -65,6 +65,7 @@ pub(crate) struct ProviderFileSystemSpi {
     max_read_range_bytes: Option<u64>,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
+    completion_gate: Option<Arc<ProviderReadCompletionGate>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +73,58 @@ pub(crate) enum AsyncProviderGatePoint {
     Stat,
     Open,
     Read,
+}
+
+/// Pauses after the selected byte count is read but before the async provider
+/// poll returns `Ready` to the filesystem reader.
+pub(crate) struct ProviderReadCompletionGate {
+    threshold: usize,
+    entered: std::sync::atomic::AtomicBool,
+    released: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl ProviderReadCompletionGate {
+    pub(crate) fn new(threshold: usize) -> Arc<Self> {
+        Arc::new(Self {
+            threshold,
+            entered: std::sync::atomic::AtomicBool::new(false),
+            released: Mutex::new(false),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn pause_if_reached(&self, count: usize) {
+        if count != self.threshold {
+            return;
+        }
+        self.entered.store(true, Ordering::Release);
+        self.changed.notify_all();
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.changed.wait(released).unwrap();
+        }
+    }
+
+    pub(crate) fn wait_until_entered(&self, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut released = self.released.lock().unwrap();
+        while !self.entered.load(Ordering::Acquire) {
+            let now = std::time::Instant::now();
+            assert!(now < deadline, "provider read did not reach completion gate");
+            let (next, result) = self
+                .changed
+                .wait_timeout(released, deadline.saturating_duration_since(now))
+                .unwrap();
+            released = next;
+            assert!(!result.timed_out() || self.entered.load(Ordering::Acquire));
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
 }
 
 pub(crate) struct AsyncProviderGate {
@@ -199,6 +252,7 @@ impl ProviderFileSystemSpi {
             max_read_range_bytes: None,
             observations: Arc::new(ProviderObservations::default()),
             async_gate: None,
+            completion_gate: None,
         }
     }
 
@@ -255,6 +309,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn with_async_gate(mut self, gate: Arc<AsyncProviderGate>) -> Self {
         self.async_gate = Some(gate);
+        self
+    }
+
+    pub(crate) fn with_read_completion_gate(mut self, gate: Arc<ProviderReadCompletionGate>) -> Self {
+        self.completion_gate = Some(gate);
         self
     }
 
@@ -371,6 +430,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 short_read: self.short_read,
                 observations: Arc::clone(&self.observations),
                 async_gate: self.async_gate.clone(),
+                completion_gate: self.completion_gate.clone(),
             }),
         ))
     }
@@ -395,6 +455,7 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 fail_reads: self.fail_reads,
                 observations: Arc::clone(&self.observations),
                 async_gate: self.async_gate.clone(),
+                completion_gate: self.completion_gate.clone(),
             }),
         ))
     }
@@ -437,6 +498,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     short_read: self.short_read,
                     observations: Arc::clone(&self.observations),
                     async_gate: self.async_gate.clone(),
+                    completion_gate: self.completion_gate.clone(),
                 }),
             ))
         })
@@ -473,6 +535,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     fail_reads: self.fail_reads,
                     observations: Arc::clone(&self.observations),
                     async_gate: self.async_gate.clone(),
+                    completion_gate: self.completion_gate.clone(),
                 }),
             ))
         })
@@ -486,6 +549,7 @@ struct ProviderSession {
     fail_reads: bool,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
+    completion_gate: Option<Arc<ProviderReadCompletionGate>>,
 }
 
 impl Drop for ProviderSession {
@@ -517,6 +581,9 @@ impl RandomAccessReadSession for ProviderSession {
             *byte = self.content[start.saturating_add(index) % self.content.len()];
         }
         self.observations.random_reads.fetch_add(count, Ordering::SeqCst);
+        if let Some(gate) = &self.completion_gate {
+            gate.pause_if_reached(self.observations.random_reads.load(Ordering::SeqCst));
+        }
         Ok(count)
     }
 }
@@ -549,6 +616,7 @@ struct ProviderReader {
     short_read: bool,
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
+    completion_gate: Option<Arc<ProviderReadCompletionGate>>,
 }
 
 impl ProviderReader {
@@ -562,7 +630,10 @@ impl ProviderReader {
             .min(if self.short_read { 1 } else { usize::MAX });
         output[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
         self.position += count;
-        self.observations.read_bytes.fetch_add(count, Ordering::SeqCst);
+        let total = self.observations.read_bytes.fetch_add(count, Ordering::SeqCst) + count;
+        if let Some(gate) = &self.completion_gate {
+            gate.pause_if_reached(total);
+        }
         Ok(count)
     }
 }

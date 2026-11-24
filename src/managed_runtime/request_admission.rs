@@ -4,7 +4,6 @@
 //    SPDX-License-Identifier: Apache-2.0
 //
 //    Licensed under the Apache License, Version 2.0.
-// =============================================================================
 //! Resources reserved before any provider operation starts.
 
 use std::future::Future;
@@ -373,11 +372,13 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
     use std::task::Context;
     use std::task::Poll;
     use std::task::Waker;
 
+    use qubit_fs::Path;
     use qubit_operation::ManagerOptions;
     use qubit_operation::OperationManager;
     use qubit_operation::OperationOptions;
@@ -387,8 +388,13 @@ mod tests {
     use super::super::service_permit::ServicePermit;
     use super::RequestAdmission;
     use super::RequestResourceOwner;
+    use crate::internal::ManagedReadObserver;
+    use crate::internal::StopWatcher;
+    use crate::internal::provider_input::read_async_observed;
+    use crate::internal::read_budget::ReadBudget;
     use crate::managed_runtime::byte_budget::ByteBudget;
     use crate::managed_runtime::task_state::TaskState;
+    use crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi;
 
     fn service_resource() -> ServicePermit {
         ServicePermit::try_acquire(&Arc::new(std::sync::atomic::AtomicUsize::new(0)), 1).unwrap()
@@ -511,6 +517,95 @@ mod tests {
         assert!(!settlement.all_released());
         assert!(settlement.recovery_count > 0);
         assert!(settlement.cleanup_failures_total > 0);
+    }
+
+    #[test]
+    fn test_observed_prefix_and_full_read_yields_cancel_without_next_io() {
+        for full_read in [false, true] {
+            let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+            let mut outer = manager
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
+                    let budget = Arc::new(ByteBudget::new(128));
+                    let mut admission = RequestAdmission::new(
+                        Arc::new(TaskState::new(708, None)),
+                        service_resource(),
+                        budget.try_acquire(128).unwrap(),
+                    );
+                    admission.retain_in_scope(&scope).unwrap();
+                    let provider = ProviderFileSystemSpi::new(vec![0x41; 128])
+                        .with_range()
+                        .one_byte_reads();
+                    let observations = provider.observations();
+                    let file_system = provider.async_file_system();
+                    let io_in_flight = Arc::new(AtomicBool::new(false));
+                    let mut observer = ManagedReadObserver::new(
+                        Some(admission.task_state()),
+                        Arc::clone(&io_in_flight),
+                        Some(StopWatcher::new(scope.context())),
+                    );
+                    let mut read_budget = ReadBudget::new(128);
+                    let mut bytes = [0; 128];
+                    let path = Path::parse("/prefix-yield").unwrap();
+                    let read: Pin<Box<dyn Future<Output = magika::Result<()>>>> = if full_read {
+                        Box::pin(async {
+                            file_system
+                                .read_all_observed(&path, Default::default(), 128, &mut observer)
+                                .await
+                                .map(|_| ())
+                                .map_err(|error| match error {
+                                    qubit_fs::read::ObservedReadError::Stopped => magika::Error::IOError(
+                                        std::io::Error::new(std::io::ErrorKind::Interrupted, "read stopped"),
+                                    ),
+                                    qubit_fs::read::ObservedReadError::Provider(error) => {
+                                        magika::Error::IOError(error.into_io_error())
+                                    }
+                                })
+                        })
+                    } else {
+                        Box::pin(read_async_observed(
+                            &file_system,
+                            &path,
+                            128,
+                            None,
+                            &mut read_budget,
+                            &mut bytes,
+                            0,
+                            &mut observer,
+                        ))
+                    };
+                    let state_for_cancel = admission.task_state();
+                    let mut operation =
+                        Box::pin(admission.run_provider_operation_with_status(&scope, read, Arc::clone(&io_in_flight)));
+                    let waker = Waker::noop();
+                    let mut context = Context::from_waker(waker);
+
+                    let first_poll = operation.as_mut().poll(&mut context);
+                    assert!(
+                        first_poll.is_pending(),
+                        "expected the {full_read} 64-read cooperative yield, got {first_poll:?} after {} bytes",
+                        observations.read_bytes.load(Ordering::SeqCst)
+                    );
+                    assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+                    assert!(
+                        !io_in_flight.load(Ordering::Acquire),
+                        "64 Ready reads followed by aggregate Pending must clear actual-I/O state"
+                    );
+                    state_for_cancel.request_stop();
+                    assert!(matches!(operation.as_mut().poll(&mut context), Poll::Ready(Err(_))));
+                    drop(operation);
+                    drop(admission);
+                    assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+
+            assert!(matches!(
+                block_on(outer.wait_outcome()).unwrap(),
+                OperationOutcome::Succeeded(())
+            ));
+            assert!(block_on(outer.wait_settlement()).all_released());
+        }
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

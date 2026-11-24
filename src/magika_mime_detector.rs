@@ -42,6 +42,7 @@ use crate::internal::PROVIDER_OUTCOME;
 use crate::internal::ProviderPathRoute;
 use crate::internal::ReadSeekInput;
 use crate::internal::ReaderScope;
+use crate::internal::StopWatcher;
 use crate::internal::SyncProviderInput;
 use crate::internal::is_unsupported_provider_error;
 use crate::internal::map_operation_outcome;
@@ -296,7 +297,8 @@ impl MagikaMimeDetector {
                     .maximum()
                     .and_then(|value| usize::try_from(value).ok());
                 let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment)
-                    .with_stop_state(admission.task_state());
+                    .with_stop_state(admission.task_state())
+                    .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
@@ -323,7 +325,8 @@ impl MagikaMimeDetector {
             ProviderPathRoute::Range { length, version } => {
                 let input =
                     AsyncProviderInput::new_owned(file_system.clone(), path.clone(), length, version, max_bytes)
-                        .with_stop_state(admission.task_state());
+                        .with_stop_state(admission.task_state())
+                        .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
@@ -337,7 +340,11 @@ impl MagikaMimeDetector {
             ProviderPathRoute::ReadAll => {}
         }
         let io_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut observer = ManagedReadObserver::new(Some(admission.task_state()), std::sync::Arc::clone(&io_in_flight));
+        let mut observer = ManagedReadObserver::new(
+            Some(admission.task_state()),
+            std::sync::Arc::clone(&io_in_flight),
+            Some(StopWatcher::new(scope.context())),
+        );
         let read_result = admission
             .run_provider_operation_with_status(
                 scope,

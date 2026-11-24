@@ -78,6 +78,7 @@ pub(crate) struct Fixture {
     interrupt_effect: Option<Option<FsEffectState>>,
     interrupt_kind: FsErrorKind,
     interrupt_pattern: Option<Vec<bool>>,
+    stop_on_interrupt: Option<Arc<qubit_operation::OperationContext>>,
     attempts: Arc<AtomicUsize>,
     async_read_gate: Option<Arc<TestAsyncReadGate>>,
 }
@@ -95,6 +96,7 @@ impl Fixture {
             interrupt_effect: None,
             interrupt_kind: FsErrorKind::Interrupted,
             interrupt_pattern: None,
+            stop_on_interrupt: None,
             attempts: Arc::new(AtomicUsize::new(0)),
             async_read_gate: None,
         }
@@ -105,6 +107,10 @@ impl Fixture {
     }
     fn interrupt_once(mut self, effect: Option<FsEffectState>) -> Self {
         self.interrupt_effect = Some(effect);
+        self
+    }
+    fn stop_after_interruption(mut self, stop: Arc<qubit_operation::OperationContext>) -> Self {
+        self.stop_on_interrupt = Some(stop);
         self
     }
     fn fail_once(mut self, kind: FsErrorKind, effect: Option<FsEffectState>) -> Self {
@@ -144,6 +150,7 @@ impl Fixture {
             interrupt_effect: self.interrupt_effect,
             interrupt_kind: self.interrupt_kind,
             interrupt_pattern: self.interrupt_pattern.clone(),
+            stop_on_interrupt: self.stop_on_interrupt.clone(),
             attempts: self.attempts.clone(),
             async_read_gate: self.async_read_gate.clone(),
         }
@@ -213,6 +220,7 @@ struct Session {
     interrupt_effect: Option<Option<FsEffectState>>,
     interrupt_kind: FsErrorKind,
     interrupt_pattern: Option<Vec<bool>>,
+    stop_on_interrupt: Option<Arc<qubit_operation::OperationContext>>,
     attempts: Arc<AtomicUsize>,
     async_read_gate: Option<Arc<TestAsyncReadGate>>,
 }
@@ -289,6 +297,9 @@ impl RandomAccessReadSession for Session {
             .copied()
             .unwrap_or(attempt == 0 && self.interrupt_effect.is_some());
         if should_interrupt {
+            if let Some(stop) = &self.stop_on_interrupt {
+                stop.request_stop(qubit_operation::StopReason::UserCancelled);
+            }
             let effect = self.interrupt_effect.unwrap_or(None);
             let error = FsError::new(self.interrupt_kind, FsOperation::Read, "fixture interruption");
             return Err(match effect {
@@ -813,6 +824,36 @@ fn test_async_session_resets_retry_count_after_short_read_progress() {
 #[test]
 fn test_async_session_retries_unchanged_interruption_at_same_range() {
     assert_async_session_retries_safe_interruption(Some(FsEffectState::Unchanged));
+}
+
+#[test]
+fn test_async_session_cancelled_interruption_does_not_retry() {
+    let stop = Arc::new(qubit_operation::OperationContext::new(qubit_operation::ContextOptions::default()).unwrap());
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown)
+        .interrupt_once(Some(FsEffectState::Unchanged))
+        .stop_after_interruption(Arc::clone(&stop));
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let mut reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(6);
+    let watcher = crate::internal::StopWatcher::new(stop.as_ref().clone());
+    let error = block_on(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        6,
+        &mut budget,
+        &mut [0; 1],
+        3,
+        None,
+        || watcher.is_stopped(),
+    ))
+    .expect_err("stop after interruption must prevent a retry");
+
+    let magika::Error::IOError(error) = error else {
+        panic!("expected I/O cancellation error")
+    };
+    assert_eq!(std::io::ErrorKind::Interrupted, error.kind());
+    assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 1)], *fixture.reads.lock().unwrap());
 }
 
 fn assert_async_session_retries_safe_interruption(effect: Option<FsEffectState>) {
