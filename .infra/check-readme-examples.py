@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ READMES = {
     "README.zh_CN.md": ("安装", "快速开始"),
 }
 REQUIRED_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-spi", "qubit-operation")
+CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 
 
 def section(markdown: str, title: str, filename: str) -> str:
@@ -154,12 +156,114 @@ def validate_registry_manifest(manifest_text: str) -> None:
         raise ValueError("registry consumer must not declare workspace members")
 
 
+def validate_registry_metadata(
+    metadata: dict[str, object], consumer_root: Path
+) -> list[dict[str, object]]:
+    packages = metadata.get("packages")
+    resolved = metadata.get("resolve")
+    root_id = resolved.get("root") if isinstance(resolved, dict) else None
+    if not isinstance(packages, list) or not isinstance(root_id, str):
+        raise ValueError("cargo metadata did not identify the isolated consumer root")
+    roots = [
+        package
+        for package in packages
+        if isinstance(package, dict) and package.get("id") == root_id
+    ]
+    if len(roots) != 1:
+        raise ValueError("cargo metadata must contain exactly one isolated consumer root")
+    root = roots[0]
+    if root.get("source") is not None:
+        raise ValueError("registry consumer root unexpectedly resolved from a package source")
+    expected_manifest = (consumer_root / "Cargo.toml").resolve()
+    if Path(str(root.get("manifest_path", ""))).resolve() != expected_manifest:
+        raise ValueError("cargo metadata root manifest is outside the isolated consumer")
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ValueError("cargo metadata returned a malformed package entry")
+        if package is root:
+            continue
+        source = package.get("source")
+        if source != CRATES_IO_SOURCE:
+            raise ValueError(
+                f"registry consumer dependency {package.get('name', '<unknown>')} "
+                f"resolved from non-crates.io source {source!r}"
+            )
+    return sorted(
+        packages,
+        key=lambda package: (str(package.get("name")), str(package.get("version"))),
+    )
+
+
+def example_dependencies(
+    dependencies: dict[str, object], project_root: Path
+) -> dict[str, object]:
+    result = dict(dependencies)
+    manifest = tomllib.loads((project_root / "Cargo.toml").read_text(encoding="utf-8"))
+    declaration = manifest.get("dependencies", {}).get("qubit-fs")
+    if not isinstance(declaration, dict) or dependency_version(declaration) is None:
+        raise ValueError("Cargo.toml has no versioned qubit-fs dependency for the current example")
+    result["qubit-fs"] = {key: value for key, value in declaration.items() if key != "path"}
+    return result
+
+
 def run_self_tests() -> None:
     expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-spi": "0.14", "qubit-operation": "0.3.2"}
     fixtures = {
         "README.md": """## Installation\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3.2\"\n```\n## Quick Start\n```rust\nfn main() {}\n```\n""",
         "README.zh_CN.md": """## 安装\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3.2\"\n```\n## 快速开始\n```rust\nfn main() {}\n```\n""",
     }
+    consumer_root = Path("/tmp/isolated-consumer")
+    root_id = "path+file:///tmp/isolated-consumer#magika-readme-example-en@0.0.0"
+    crates_io = "registry+https://github.com/rust-lang/crates.io-index"
+    valid_metadata = {
+        "resolve": {"root": root_id},
+        "packages": [
+            {
+                "id": root_id,
+                "name": "magika-readme-example-en",
+                "version": "0.0.0",
+                "source": None,
+                "manifest_path": str(consumer_root / "Cargo.toml"),
+            },
+            {
+                "id": "registry+https://github.com/rust-lang/crates.io-index#qubit-mime@0.22.0",
+                "name": "qubit-mime",
+                "version": "0.22.0",
+                "source": crates_io,
+                "manifest_path": "/cargo/registry/qubit-mime-0.22.0/Cargo.toml",
+            },
+        ],
+    }
+    validate_registry_metadata(valid_metadata, consumer_root)
+    for non_registry_source in (
+        None,
+        "git+https://github.com/qubit-ltd/rs-mime.git#revision",
+        "registry+https://example.invalid/index",
+    ):
+        invalid_metadata = json.loads(json.dumps(valid_metadata))
+        invalid_metadata["packages"][1]["source"] = non_registry_source
+        try:
+            validate_registry_metadata(invalid_metadata, consumer_root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted non-crates.io dependency source {non_registry_source!r}")
+    invalid_root_metadata = json.loads(json.dumps(valid_metadata))
+    invalid_root_metadata["packages"][0]["source"] = crates_io
+    try:
+        validate_registry_metadata(invalid_root_metadata, consumer_root)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted registry source for the local consumer root")
+    invalid_root_metadata = json.loads(json.dumps(valid_metadata))
+    invalid_root_metadata["packages"][0]["manifest_path"] = "/repository/Cargo.toml"
+    try:
+        validate_registry_metadata(invalid_root_metadata, consumer_root)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted consumer metadata rooted in the repository")
     for filename, fixture in fixtures.items():
         _, quick_start_title = READMES[filename]
         dependencies, example = extract_readme(fixture, filename)
@@ -240,7 +344,14 @@ def main() -> int:
         action="store_true",
         help="check README examples using a clean registry consumer with no local path overrides",
     )
+    parser.add_argument(
+        "--run-example",
+        action="store_true",
+        help="run the current examples/basic.rs against resolved registry releases (requires native ONNX Runtime support)",
+    )
     args = parser.parse_args()
+    if args.run_example and not args.registry_only:
+        parser.error("--run-example requires --registry-only")
     if args.self_test:
         run_self_tests()
         print("README extraction and dependency self-tests passed.")
@@ -259,6 +370,8 @@ def main() -> int:
             for filename in READMES:
                 readme_path = project_root / filename
                 dependencies, example = extract_readme(readme_path.read_text(encoding="utf-8"), filename)
+                if args.run_example:
+                    dependencies = example_dependencies(dependencies, project_root)
                 validate_dependencies(dependencies, expected, filename)
                 consumer_root = Path(temporary) / filename.replace(".md", "")
                 consumer_root.mkdir(parents=True, exist_ok=True)
@@ -280,19 +393,51 @@ def main() -> int:
                 mode = "registry-only" if args.registry_only else "fixed-source"
                 print(f"Checking {filename} ({mode}) with the README dependency requirements...", flush=True)
                 if args.registry_only:
-                    metadata = subprocess.run(
+                    metadata_result = subprocess.run(
                         ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest_path)],
+                        cwd=consumer_root,
                         env=cargo_env,
+                        capture_output=True,
+                        text=True,
                         check=False,
                     )
-                    if metadata.returncode:
-                        print(f"{filename}: registry-only cargo metadata exited with {metadata.returncode}", file=sys.stderr)
-                        return metadata.returncode if metadata.returncode > 0 else 1
-                command = ["cargo", "check", "--manifest-path", str(manifest_path)]
-                result = subprocess.run(command, env=cargo_env, check=False)
+                    if metadata_result.returncode:
+                        print(metadata_result.stderr, file=sys.stderr, end="")
+                        print(f"{filename}: registry-only cargo metadata exited with {metadata_result.returncode}", file=sys.stderr)
+                        return metadata_result.returncode if metadata_result.returncode > 0 else 1
+                    resolved_metadata = json.loads(metadata_result.stdout)
+                    resolved_packages = validate_registry_metadata(resolved_metadata, consumer_root)
+                    for package in resolved_packages:
+                        source = package.get("source") or "local consumer root"
+                        print(f"Resolved {package['name']} {package['version']} source={source}", flush=True)
+                if args.registry_only:
+                    command = [
+                        "cargo", "check", "--locked", "--manifest-path", str(manifest_path)
+                    ]
+                else:
+                    command = ["cargo", "check", "--manifest-path", str(manifest_path)]
+                result = subprocess.run(command, cwd=consumer_root, env=cargo_env, check=False)
                 if result.returncode:
                     print(f"{filename}: cargo check exited with {result.returncode}", file=sys.stderr)
                     return result.returncode if result.returncode > 0 else 1
+                if args.run_example and filename == "README.md":
+                    example_path = consumer_root / "examples" / "basic.rs"
+                    example_path.parent.mkdir(parents=True)
+                    shutil.copy2(project_root / "examples/basic.rs", example_path)
+                    print(
+                        "Running current examples/basic.rs with crates.io dependencies "
+                        "and bundled ONNX Runtime...",
+                        flush=True,
+                    )
+                    result = subprocess.run(
+                        ["cargo", "run", "--locked", "--example", "basic", "--manifest-path", str(manifest_path)],
+                        cwd=consumer_root,
+                        env=cargo_env,
+                        check=False,
+                    )
+                    if result.returncode:
+                        print(f"examples/basic.rs: cargo run exited with {result.returncode}", file=sys.stderr)
+                        return result.returncode if result.returncode > 0 else 1
         print("Both README consumer examples compiled successfully.")
     except (OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
         print(f"README example check failed: {error}", file=sys.stderr)
