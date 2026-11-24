@@ -285,8 +285,19 @@ mod tests {
         });
         let request = block_on(bridge.next_request()).expect("worker should publish a read request");
         assert_eq!((1, 2), (request.offset(), request.len()));
+        assert!(
+            bridge.wait_for_test_waiters(0, 1, std::time::Duration::from_secs(2)),
+            "poison-recovery worker should await its response"
+        );
         request.respond(Ok(vec![7, 9]));
-        assert_eq!([7, 9], worker.join().unwrap());
+        assert_eq!(
+            [7, 9],
+            crate::tests::internal::bridge_wait::join_before(
+                worker,
+                "poisoned bridge response",
+                std::time::Duration::from_secs(2),
+            )
+        );
     }
 
     #[test]
@@ -310,10 +321,15 @@ mod tests {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
         let mut future = std::pin::pin!(future);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if let Poll::Ready(output) = Future::poll(future.as_mut(), &mut context) {
                 return output;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for poisoned bridge next_request"
+            );
             std::thread::yield_now();
         }
     }

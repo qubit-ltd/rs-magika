@@ -1045,18 +1045,15 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         reads: usize,
         cancellation_observed: bool,
     ) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !worker.is_finished() && std::time::Instant::now() < deadline {
-            std::thread::park_timeout(Duration::from_millis(1));
-        }
-        if !worker.is_finished() {
-            drop(worker);
-            panic!(
-                "timed out waiting for worker completion; stage={stage}; reads={reads}; cancellation_observed={cancellation_observed}"
-            );
-        }
         assert!(
-            worker.join().unwrap().is_err(),
+            crate::tests::internal::bridge_wait::join_before(
+                worker,
+                &format!(
+                    "{stage}; reads={reads}; cancellation_observed={cancellation_observed}"
+                ),
+                Duration::from_secs(2),
+            )
+            .is_err(),
             "worker should stop with an error after {stage}"
         );
     }
@@ -3372,6 +3369,10 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
         waiting_bridge.read_at(0, &mut [0; 1])
     });
     read_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        bridge.wait_for_test_waiters(0, 1, Duration::from_secs(2)),
+        "queued bridge worker should enter response wait after its start notification"
+    );
     let states = runtime.tasks.lock().unwrap().clone();
     assert_eq!(states.len(), 2);
 
@@ -3402,7 +3403,12 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
         "MIME detector backend 'magika' failed: inference session discarded after worker panic"
     );
     assert!(
-        bridge_waiter.join().unwrap().is_err(),
+        crate::tests::internal::bridge_wait::join_before(
+            bridge_waiter,
+            "worker panic closes queued bridge",
+            Duration::from_secs(2)
+        )
+        .is_err(),
         "queued bridge waiter is woken by closure"
     );
     assert!(runtime.reserve_for_provider(None, 1).is_err());
