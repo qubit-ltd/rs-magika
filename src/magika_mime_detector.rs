@@ -889,6 +889,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
             }
             let runtime = std::sync::Arc::clone(&self.runtime);
             let admission = runtime.reserve_for_provider(None, max_bytes)?;
+            let (handoff, mut handoff_guard) =
+                crate::managed_runtime::request_admission_handoff::RequestAdmissionHandoff::new(admission);
+            let body_handoff = std::sync::Arc::clone(&handoff);
             let group = runtime.service_group();
             let owned_runtime = std::sync::Arc::clone(&runtime);
             let owned_file_system = file_system.clone();
@@ -900,6 +903,12 @@ impl MimeDetectorBackend for MagikaMimeDetector {
             let mut operation = group
                 .as_async()
                 .try_submit(options, move |scope| async move {
+                    let Some((admission, None)) = body_handoff.take_for_root() else {
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            body_handoff.closed_reason().as_str(),
+                        ));
+                    };
                     Self::detect_async_provider_admitted(
                         owned_runtime,
                         &scope,
@@ -913,7 +922,17 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 .map_err(|error| {
                     MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
                 })?;
-            let outcome = operation.wait_outcome().await.map_err(|error| {
+            let mut outcome = Box::pin(operation.wait_outcome());
+            let operation_outcome = match handoff.wait_for_root_or(&mut handoff_guard, &mut outcome).await {
+                crate::managed_runtime::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
+                crate::managed_runtime::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
+                crate::managed_runtime::request_admission_handoff::BodyStartOr::Closed(reason) => {
+                    drop(outcome);
+                    let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                    return Err(MimeError::detector_backend("magika", reason.as_str()));
+                }
+            };
+            let outcome = operation_outcome.map_err(|error| {
                 MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
             })?;
             let result = map_operation_outcome(outcome, PROVIDER_OUTCOME)?;

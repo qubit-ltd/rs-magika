@@ -32,10 +32,11 @@ use internal::RequestAdmissionPayload;
 
 /// Coordinates request admission between a caller and a submitted child body.
 ///
-/// The caller registers the request against its parent scope after the child
-/// body starts, then transfers the resulting admission to the waiting child.
-/// If either side stops waiting, the handoff closes and releases any admission
-/// that has not been transferred.
+/// For a managed child, the caller registers the request against its parent
+/// scope after the child body starts, then transfers the admission or
+/// registration error to the waiting child. A root child claims its pending
+/// payload under the same lock used to observe closure. If either side stops
+/// waiting, the handoff closes and releases any payload it still owns.
 pub(crate) struct RequestAdmissionHandoff {
     /// Admission transfer and body-start notifications.
     state: Mutex<HandoffState>,
@@ -132,8 +133,9 @@ impl RequestAdmissionHandoff {
     /// Registers the request against the borrowed parent after child body
     /// start.
     ///
-    /// Returns `Some(outcome)` when the operation finishes before entering its
-    /// body. Returns `None` after handing the registered admission to the body.
+    /// An already-ready operation outcome takes priority. Otherwise this waits
+    /// for the body-start signal, then registers the request and transfers the
+    /// admission or its registration error to the waiting child.
     ///
     /// # Type Parameters
     ///
@@ -148,8 +150,10 @@ impl RequestAdmissionHandoff {
     ///
     /// # Returns
     ///
-    /// The operation outcome if the body never starts; otherwise `None` after
-    /// the registered admission has been handed to the child.
+    /// `Outcome(T)` if the operation finishes first, `BodyStarted` after the
+    /// admission or registration error is handed to the child, or
+    /// `Closed(reason)` if closure wins. `BodyStarted` does not imply that
+    /// parent registration succeeded.
     pub(crate) async fn register_on_parent<F, T>(
         self: &Arc<Self>,
         parent: &OperationScope,
@@ -192,6 +196,54 @@ impl RequestAdmissionHandoff {
         }
     }
 
+    /// Waits for an unmanaged child to claim its payload or finish first.
+    ///
+    /// An outcome that wins closes the handoff and releases any unclaimed
+    /// payload. A body claim disarms the caller guard; a prior close is
+    /// returned with its recorded reason.
+    pub(crate) async fn wait_for_root_or<F, T>(
+        self: &Arc<Self>,
+        guard: &mut RequestAdmissionHandoffGuard,
+        outcome: &mut F,
+    ) -> BodyStartOr<T>
+    where
+        F: Future<Output = T> + Unpin,
+    {
+        let result = self.wait_for_body_start_or(outcome).await;
+        if matches!(result, BodyStartOr::Outcome(_)) {
+            self.close();
+        }
+        guard.finish();
+        result
+    }
+
+    /// Claims an unmanaged request payload before the submitted body starts
+    /// doing request work, or observes that cancellation closed the handoff.
+    ///
+    /// The payload claim and close check share the handoff lock, so a stop
+    /// cannot release capacity while the body is beginning to use it.
+    pub(crate) fn take_for_root(
+        self: &Arc<Self>,
+    ) -> Option<(RequestAdmission, Option<WorkerInput>)> {
+        let (payload, caller_waker) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.closed {
+                return None;
+            }
+            let mut payload = state.caller_payload.take()?;
+            state.body_started = true;
+            (
+                (payload.admission, payload.input.take()),
+                state.caller_waker.take(),
+            )
+        };
+        if let Some(waker) = caller_waker {
+            waker.wake();
+        }
+        self.detach_task_state_notification();
+        Some(payload)
+    }
+
     /// Waits for body start or polls the operation outcome, without blocking.
     ///
     /// # Type Parameters
@@ -206,8 +258,15 @@ impl RequestAdmissionHandoff {
     ///
     /// # Returns
     ///
-    /// Whether the body started or the operation completed first.
-    async fn wait_for_body_start_or<F, T>(&self, outcome: &mut F) -> BodyStartOr<T>
+    /// `Outcome(T)` when the outcome is ready, `BodyStarted` when the child
+    /// crossed the start/claim boundary, or `Closed(reason)` when the handoff
+    /// closed first. The outcome is polled first, so a ready outcome wins over
+    /// a simultaneous start or close. The underlying poll uses `Some(true)`,
+    /// `Some(false)`, and `None` for started, closed, and pending respectively.
+    pub(crate) async fn wait_for_body_start_or<F, T>(
+        &self,
+        outcome: &mut F,
+    ) -> BodyStartOr<T>
     where
         F: Future<Output = T> + Unpin,
     {
@@ -234,7 +293,9 @@ impl RequestAdmissionHandoff {
     ///
     /// # Returns
     ///
-    /// `true` when the child body has started, or `false` otherwise.
+    /// `Some(true)` when the child body has started or claimed the root
+    /// payload, `Some(false)` when the handoff is closed, and `None` while it
+    /// remains pending.
     fn poll_body_started(&self, context: &mut Context<'_>) -> Option<bool> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.body_started {
@@ -312,7 +373,7 @@ impl RequestAdmissionHandoff {
     /// # Returns
     ///
     /// The first close reason, or `Abandoned` when no reason has been set.
-    fn closed_reason(&self) -> HandoffCloseReason {
+    pub(crate) fn closed_reason(&self) -> HandoffCloseReason {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())

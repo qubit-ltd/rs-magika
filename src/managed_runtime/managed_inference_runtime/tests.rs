@@ -1640,6 +1640,128 @@ fn test_single_executor_blocked_handoff_returns_stop_without_provider_io() {
 }
 
 #[test]
+fn test_scope_less_bytes_cancel_releases_blocked_handoff_before_executor_resumes() {
+    let mut options = ManagerOptions::default();
+    options.async_executor.worker_count = 1;
+    let supervisor = OperationManager::new(options).unwrap();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        64,
+        Box::new(|_| panic!("cancelled queued inference must not run")),
+        Box::new(|| {}),
+    ));
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let mut blocker = supervisor
+        .as_async()
+        .try_submit(OperationOptions::default(), move |_| async move {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let mut detection = Box::pin(runtime.detect_content_unmanaged(b"queued bytes"));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(detection.as_mut().poll(&mut context).is_pending());
+    assert_eq!(1, runtime.snapshot().admitted_not_started);
+
+    let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+    assert!(report.worker_stopped);
+    assert_eq!(1, report.admission.snapshot.active_operations);
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::Acquire));
+    assert!(matches!(detection.as_mut().poll(&mut context), Poll::Ready(Err(_))));
+    drop(detection);
+
+    release_tx.send(()).unwrap();
+    assert!(matches!(
+        block_on(blocker.wait_outcome()).unwrap(),
+        OperationOutcome::Succeeded(())
+    ));
+    let retirement_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while runtime.service_group().snapshot().active_operations != 0 {
+        assert!(std::time::Instant::now() < retirement_deadline, "queued request did not retire");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn test_scope_less_provider_cancel_releases_blocked_handoff_before_provider_io() {
+    use std::sync::atomic::Ordering;
+
+    let mut options = ManagerOptions::default();
+    options.async_executor.worker_count = 1;
+    let supervisor = OperationManager::new(options).unwrap();
+    let infer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let infer_calls_for_engine = Arc::clone(&infer_calls);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        qubit_mime::MimeConfig::default().max_buffer_size(),
+        Box::new(move |_| {
+            infer_calls_for_engine.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("application/x-never".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let detector = crate::MagikaMimeDetector::builder()
+        .managed_runtime(Arc::clone(&runtime))
+        .build()
+        .unwrap();
+    let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(b"provider data".to_vec())
+        .with_range();
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let path = qubit_fs::Path::parse("/scope-less-blocked.py").unwrap();
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let mut blocker = supervisor
+        .as_async()
+        .try_submit(OperationOptions::default(), move |_| async move {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let mut detection = Box::pin(qubit_mime::MimeDetectorBackend::guess_from_async_provider_path(
+        &detector,
+        &file_system,
+        &path,
+        32,
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(detection.as_mut().poll(&mut context).is_pending());
+    assert_eq!(1, runtime.snapshot().admitted_not_started);
+
+    let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+    assert!(report.worker_stopped);
+    assert_eq!(1, report.admission.snapshot.active_operations);
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    assert_eq!(0, runtime.active_requests.load(Ordering::Acquire));
+    assert!(matches!(detection.as_mut().poll(&mut context), Poll::Ready(Err(_))));
+    assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    assert_eq!(0, infer_calls.load(Ordering::SeqCst));
+    drop(detection);
+
+    release_tx.send(()).unwrap();
+    assert!(matches!(
+        block_on(blocker.wait_outcome()).unwrap(),
+        OperationOutcome::Succeeded(())
+    ));
+    let retirement_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while runtime.service_group().snapshot().active_operations != 0 {
+        assert!(std::time::Instant::now() < retirement_deadline, "queued provider request did not retire");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
 fn test_worker_fault_closes_an_unsubmitted_request_handoff() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(

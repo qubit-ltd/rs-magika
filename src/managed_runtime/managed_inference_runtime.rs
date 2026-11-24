@@ -62,19 +62,6 @@ mod worker_state;
 
 use self::worker_state::WorkerState;
 
-/// Keeps undispatched input destruction ahead of admission release.
-struct UndispatchedRequest {
-    admission: Option<RequestAdmission>,
-    input: Option<WorkerInput>,
-}
-
-impl Drop for UndispatchedRequest {
-    fn drop(&mut self) {
-        drop(self.input.take());
-        drop(self.admission.take());
-    }
-}
-
 #[path = "internal/worker_loop.rs"]
 mod worker_loop;
 
@@ -481,27 +468,16 @@ impl ManagedInferenceRuntime {
         let cancellation_won = Arc::new(AtomicBool::new(false));
         let body_cancellation_won = Arc::clone(&cancellation_won);
         let state = Arc::clone(&admission.state);
-        let (request_handoff, mut request_handoff_guard, body_payload) = match parent {
-            Some(_) => {
-                let (handoff, guard) =
-                    super::request_admission_handoff::RequestAdmissionHandoff::new_with_input(admission, Some(input));
-                (Some(handoff), Some(guard), None)
-            }
-            None => (
-                None,
-                None,
-                Some(UndispatchedRequest {
-                    admission: Some(admission),
-                    input: Some(input),
-                }),
-            ),
-        };
-        let body_handoff = request_handoff.as_ref().map(Arc::clone);
+        let (handoff, mut handoff_guard) =
+            super::request_admission_handoff::RequestAdmissionHandoff::new_with_input(admission, Some(input));
+        let request_handoff = Some(Arc::clone(&handoff));
+        let managed_handoff = parent.is_some();
+        let body_handoff = Arc::clone(&handoff);
         let mut before_retain = Some(before_retain);
         let body = move |scope| async move {
-            let (admission, input) = if let Some(handoff) = body_handoff {
-                handoff.body_started();
-                match handoff.wait_for_child_admission(&scope).await {
+            let (admission, input) = if managed_handoff {
+                body_handoff.body_started();
+                match body_handoff.wait_for_child_admission(&scope).await {
                     Some(Ok((admission, Some(input)))) => (admission, input),
                     Some(Ok((admission, None))) => {
                         drop(admission);
@@ -519,9 +495,13 @@ impl ManagedInferenceRuntime {
                     }
                 }
             } else {
-                let mut payload = body_payload.expect("scope-less request retains its payload");
-                let mut admission = payload.admission.take().expect("payload retains its admission");
-                let input = payload.input.take().expect("payload retains its worker input");
+                let Some((mut admission, input)) = body_handoff.take_for_root() else {
+                    return Err(MimeError::detector_backend(
+                        "magika",
+                        body_handoff.closed_reason().as_str(),
+                    ));
+                };
+                let input = input.expect("root request retains its worker input");
                 if let Some(hook) = before_retain.take() {
                     hook(&scope);
                 }
@@ -563,9 +543,20 @@ impl ManagedInferenceRuntime {
         .map_err(|error| MimeError::detector_backend("magika", format!("operation submission failed: {error:?}")))?;
         let outcome_result = {
             let mut outcome = Box::pin(operation.wait_outcome());
-            match (parent, request_handoff.as_ref(), request_handoff_guard.as_mut()) {
+            match (parent, request_handoff.as_ref(), Some(&mut handoff_guard)) {
                 (Some(parent), Some(handoff), Some(guard)) => {
                     match handoff.register_on_parent(parent, guard, &mut outcome).await {
+                        super::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
+                        super::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
+                        super::request_admission_handoff::BodyStartOr::Closed(reason) => {
+                            drop(outcome);
+                            let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                            return Err(MimeError::detector_backend("magika", reason.as_str()));
+                        }
+                    }
+                }
+                (None, Some(handoff), Some(guard)) => {
+                    match handoff.wait_for_root_or(guard, &mut outcome).await {
                         super::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
                         super::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
                         super::request_admission_handoff::BodyStartOr::Closed(reason) => {
@@ -949,13 +940,16 @@ impl ManagedInferenceRuntime {
     ///
     /// # Returns
     ///
-    /// Admission and worker termination facts. `worker_stopped` reports the
-    /// join only and can be true while an unconfirmed provider request still
-    /// retains capacity. False means shutdown has not observed a completed
-    /// join; the worker handle remains available for a later call to continue
-    /// observing and reap. One deadline covers service admission/settlement
-    /// and worker exit. Shutdown does not forcibly interrupt native inference
-    /// or provider I/O. A caught inference panic marks
+    /// Drain waits for accepted service operations to settle. Cancel waits for
+    /// local provider access to finish before closing the worker sender and
+    /// joining; an operation still queued on the executor may remain in the
+    /// returned group snapshot until that executor retires it. `worker_stopped`
+    /// reports the join only and can be true while an unconfirmed provider
+    /// request still retains capacity. False means shutdown has not observed a
+    /// completed join; the worker handle remains available for a later call to
+    /// continue observing and reap. One deadline covers the mode-specific
+    /// wait and worker exit attempt. Shutdown does not forcibly interrupt
+    /// native inference or provider I/O. A caught inference panic marks
     /// [`ManagedInferenceSnapshot::faulted`]; only an uncaught panic
     /// observed while joining sets
     /// [`ManagedInferenceShutdownReport::worker_panicked`].
@@ -969,8 +963,8 @@ impl ManagedInferenceRuntime {
 
     /// Shuts down admission with an optional hook after the cancellation scan.
     ///
-    /// The hook is used by lifecycle tests to observe the boundary between
-    /// scanning active tasks and waiting for service settlement.
+    /// The hook is used by lifecycle tests to observe the boundary after
+    /// scanning active tasks and before the mode-specific wait.
     ///
     /// # Parameters
     ///
@@ -1005,7 +999,9 @@ impl ManagedInferenceRuntime {
             let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
             let local_access_complete = tasks.iter().all(|task| task.access_complete());
             drop(tasks);
-            if admission.snapshot.active_operations == 0 && local_access_complete {
+            let operations_settled =
+                mode == ShutdownMode::Cancel || admission.snapshot.active_operations == 0;
+            if operations_settled && local_access_complete {
                 break;
             }
             if remaining_timeout(deadline).is_zero() {
