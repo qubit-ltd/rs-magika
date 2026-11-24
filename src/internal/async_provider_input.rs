@@ -8,7 +8,10 @@
 //! Asynchronous provider-backed input for Magika feature extraction.
 
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use magika::AsyncInput;
 use magika::Result as MagikaResult;
@@ -18,11 +21,44 @@ use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::AsyncRandomAccessReader;
 
 use super::async_route::AsyncRoute;
-use super::provider_input::read_async;
+use super::provider_input::read_async_observed;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
 use super::session_read::read_async_session_with_stop;
 use crate::managed_runtime::task_state::TaskState;
+use qubit_fs::read::ReadIoEvent;
+use qubit_fs::read::ReadIoObserver;
+use qubit_fs::read::ReadIoPhase;
+
+/// Tracks real provider reads while allowing stop between aggregate-read I/Os.
+pub(crate) struct ManagedReadObserver {
+    state: Option<Arc<TaskState>>,
+    in_flight: Arc<AtomicBool>,
+}
+
+impl ManagedReadObserver {
+    pub(crate) fn new(state: Option<Arc<TaskState>>, in_flight: Arc<AtomicBool>) -> Self {
+        Self { state, in_flight }
+    }
+}
+
+impl ReadIoObserver for ManagedReadObserver {
+    fn before_io(&mut self, _phase: ReadIoPhase) -> ControlFlow<()> {
+        if self.state.as_ref().is_some_and(|state| state.stop_requested()) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn on_io_event(&mut self, event: ReadIoEvent) {
+        match event {
+            ReadIoEvent::Started { .. } => self.in_flight.store(true, Ordering::Release),
+            ReadIoEvent::Pending { .. } => self.in_flight.store(true, Ordering::Release),
+            ReadIoEvent::Ready { .. } => self.in_flight.store(false, Ordering::Release),
+        }
+    }
+}
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput {
@@ -36,6 +72,8 @@ pub(crate) struct AsyncProviderInput {
     budget: ReadBudget,
     /// Managed request state used to stop between confirmed session I/Os.
     stop_state: Option<Arc<TaskState>>,
+    /// Tracks actual provider futures, excluding aggregate scheduling yields.
+    io_in_flight: Option<Arc<AtomicBool>>,
 }
 
 impl AsyncProviderInput {
@@ -62,6 +100,7 @@ impl AsyncProviderInput {
             version,
             budget: ReadBudget::new(limit),
             stop_state: None,
+            io_in_flight: Some(Arc::new(AtomicBool::new(false))),
         }
     }
 
@@ -85,6 +124,7 @@ impl AsyncProviderInput {
             version: None,
             budget: ReadBudget::new(limit),
             stop_state: None,
+            io_in_flight: None,
         }
     }
 
@@ -92,6 +132,10 @@ impl AsyncProviderInput {
     pub(crate) fn with_stop_state(mut self, state: Arc<TaskState>) -> Self {
         self.stop_state = Some(state);
         self
+    }
+
+    pub(crate) fn io_in_flight(&self) -> Option<Arc<AtomicBool>> {
+        self.io_in_flight.as_ref().map(Arc::clone)
     }
 }
 
@@ -123,16 +167,23 @@ impl AsyncInput for AsyncProviderInput {
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         match &mut self.route {
             AsyncRoute::OwnedLegacy { file_system, path } => {
-                read_async(
-                    file_system,
-                    path,
-                    self.length,
-                    self.version.as_ref(),
-                    &mut self.budget,
-                    buffer,
-                    offset,
-                )
-                .await
+                if let Some(io_in_flight) = &self.io_in_flight {
+                    let mut observer =
+                        ManagedReadObserver::new(self.stop_state.as_ref().map(Arc::clone), Arc::clone(io_in_flight));
+                    read_async_observed(
+                        file_system,
+                        path,
+                        self.length,
+                        self.version.as_ref(),
+                        &mut self.budget,
+                        buffer,
+                        offset,
+                        &mut observer,
+                    )
+                    .await
+                } else {
+                    unreachable!("owned async provider inputs track observed I/O")
+                }
             }
             AsyncRoute::Session { reader, max_segment } => {
                 if let Some(state) = &self.stop_state {

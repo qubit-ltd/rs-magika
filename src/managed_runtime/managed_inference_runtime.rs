@@ -49,6 +49,7 @@ use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 use super::worker_input::worker_bytes;
+use crate::internal::AsyncProviderInput;
 use crate::internal::INFERENCE_OUTCOME;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 use crate::internal::map_operation_outcome;
@@ -553,17 +554,14 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns provider, admission, Magika, or worker errors.
-    pub(crate) async fn detect_async_input_admitted<I>(
+    pub(crate) async fn detect_async_input_admitted(
         &self,
         scope: &OperationScope,
         mut admission: RequestAdmission,
-        input: I,
+        input: AsyncProviderInput,
         max_bytes: usize,
         map_error: fn(MagikaError) -> MimeError,
-    ) -> MimeResult<Option<String>>
-    where
-        I: AsyncInput + Send + 'static,
-    {
+    ) -> MimeResult<Option<String>> {
         let state = Arc::clone(&admission.state);
         let state_for_stop = Arc::clone(&state);
         let worker = async move {
@@ -580,7 +578,8 @@ impl ManagedInferenceRuntime {
             let bridge = AsyncSampleBridge::new(length);
             let driver = bridge.driver();
             let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-            let guard = ProviderDriverGuard::new(input, driver, state);
+            let io_in_flight = input.io_in_flight();
+            let guard = ProviderDriverGuard::new_with_io_status(input, driver, state, io_in_flight);
             drive_async_input(guard, inference).await
         };
         let mut worker = Box::pin(worker);
@@ -1111,12 +1110,25 @@ where
                     if stopped.as_mut().poll(cx).is_ready() || closed.as_mut().poll(cx).is_ready() {
                         return Poll::Ready(None);
                     }
-                    guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
-                    if let Poll::Ready(result) = read.as_mut().poll(cx) {
-                        guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
-                        return Poll::Ready(Some(result));
+                    if guard.io_in_flight.is_none() {
+                        guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
-                    Poll::Pending
+                    match read.as_mut().poll(cx) {
+                        Poll::Ready(result) => {
+                            guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
+                            Poll::Ready(Some(result))
+                        }
+                        Poll::Pending => {
+                            let pending = guard
+                                .io_in_flight
+                                .as_ref()
+                                .map_or(true, |status| status.load(std::sync::atomic::Ordering::Acquire));
+                            guard
+                                .unconfirmed_io
+                                .store(pending, std::sync::atomic::Ordering::Relaxed);
+                            Poll::Pending
+                        }
+                    }
                 })
                 .await;
                 let Some(read_result) = read_result else {

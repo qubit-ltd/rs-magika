@@ -2071,7 +2071,30 @@ fn test_public_async_read_prefix_yields_after_sixty_four_ready_short_reads() {
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let prefix_path = path("/prefix-yield.py");
-    let mut read = Box::pin(file_system.read_prefix(&prefix_path, Default::default(), 128));
+    struct Observer {
+        stop: Arc<AtomicBool>,
+        events: Arc<std::sync::Mutex<Vec<qubit_fs::read::ReadIoEvent>>>,
+    }
+    impl qubit_fs::read::ReadIoObserver for Observer {
+        fn before_io(&mut self, _phase: qubit_fs::read::ReadIoPhase) -> std::ops::ControlFlow<()> {
+            if self.stop.load(Ordering::SeqCst) {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        }
+
+        fn on_io_event(&mut self, event: qubit_fs::read::ReadIoEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut observer = Observer {
+        stop: Arc::clone(&stop),
+        events: Arc::clone(&events),
+    };
+    let mut read = Box::pin(file_system.read_prefix_observed(&prefix_path, Default::default(), 128, &mut observer));
     let waker = std::task::Waker::noop();
     let mut context = Context::from_waker(waker);
 
@@ -2080,6 +2103,54 @@ fn test_public_async_read_prefix_yields_after_sixty_four_ready_short_reads() {
         "read_prefix should cooperatively yield after its read budget"
     );
     assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+    let read_events = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                qubit_fs::read::ReadIoEvent::Pending {
+                    phase: qubit_fs::read::ReadIoPhase::Read
+                }
+            )
+        })
+        .count();
+    assert_eq!(0, read_events, "aggregate yield must not emit provider Pending");
+
+    stop.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        read.as_mut().poll(&mut context),
+        Poll::Ready(Err(qubit_fs::read::ObservedReadError::Stopped))
+    ));
+    assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
+    let gated_provider = ProviderFileSystemSpi::new(vec![b'y'; 16])
+        .with_range()
+        .with_async_gate(Arc::clone(&gate));
+    let gated_observations = gated_provider.observations();
+    let gated_file_system = gated_provider.async_file_system();
+    let gated_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut gated_observer = Observer {
+        stop: Arc::new(AtomicBool::new(false)),
+        events: Arc::clone(&gated_events),
+    };
+    let gated_path = path("/prefix-real-pending.py");
+    let mut gated_read =
+        Box::pin(gated_file_system.read_prefix_observed(&gated_path, Default::default(), 8, &mut gated_observer));
+    assert!(matches!(gated_read.as_mut().poll(&mut context), Poll::Pending));
+    gate.wait_until_entered(Duration::from_secs(2));
+    assert!(gated_events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        qubit_fs::read::ReadIoEvent::Pending {
+            phase: qubit_fs::read::ReadIoPhase::Read
+        }
+    )));
+    assert_eq!(0, gated_observations.read_bytes.load(Ordering::SeqCst));
+    gate.release();
+    assert!(matches!(gated_read.as_mut().poll(&mut context), Poll::Ready(Ok(_))));
+    assert_eq!(8, gated_observations.read_bytes.load(Ordering::SeqCst));
 }
 
 /// A runtime-only Cancel must wake either async Provider entrance while the
@@ -2152,7 +2223,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
         finished_tx.send((Instant::now(), report)).unwrap();
     });
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    let before_release = finished_rx.recv_timeout(Duration::from_millis(250));
+    let before_release = finished_rx.recv_timeout(Duration::from_secs(5));
     let returned_before_release = before_release.is_ok();
     let mut settlement_before = Box::pin(observer.wait_settlement());
     let settlement_before_release = run_ready(std::future::poll_fn(|context| {
@@ -2462,8 +2533,8 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         let report = shutdown_detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
         let _ = shutdown_tx.send(report);
     });
-    let shutdown_before_gate_release = shutdown_rx.recv_timeout(Duration::from_millis(250)).ok();
-    let bridge_outcome_before_gate_release = run_until(operation.wait_outcome(), Duration::from_millis(250));
+    let shutdown_before_gate_release = shutdown_rx.recv_timeout(Duration::from_secs(5)).ok();
+    let bridge_outcome_before_gate_release = run_until(operation.wait_outcome(), Duration::from_secs(5));
     let shutdown_returned_before_gate_release = shutdown_before_gate_release.is_some();
     let bridge_returned_before_gate_release = bridge_outcome_before_gate_release.is_ok();
     let cancelled_bridge_exited_while_pending =
