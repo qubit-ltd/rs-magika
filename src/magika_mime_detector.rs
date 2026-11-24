@@ -193,12 +193,13 @@ impl MagikaMimeDetector {
     /// child settlement remain pending, potentially indefinitely; future
     /// cancellation does not prove that underlying I/O was interrupted.
     /// The returned future reports the child business outcome; the parent
-    /// scope observer separately reports settlement. `Pending(snapshot)` is a
-    /// bounded observation, while `Ready(report)` may still report unreleased
-    /// resources. Unknown provider completion retains runtime and byte
-    /// capacity. The built-in cleanup policy does not release it on retry
-    /// without new completion evidence; recovery must use the registered
-    /// recovery policy or handle.
+    /// scope observer separately reports settlement. A bounded observation
+    /// can return `Pending(snapshot)` or terminal `Ready(report)` with
+    /// `all_released() == false`; in the latter case capacity remains reserved.
+    /// Built-in cleanup has no input for completion evidence from discarded
+    /// provider I/O, so retrying its current policy cannot release that
+    /// capacity. A `RecoveryHandle` can inspect the state, retry the policy, or
+    /// transfer responsibility.
     ///
     /// A Rust panic caught during session inference makes this future return
     /// `MimeError::DetectorBackend`; the public child `OperationOutcome` is
@@ -414,7 +415,7 @@ impl MagikaMimeDetector {
         runtime.detect_bytes_admitted(admission, bytes).await
     }
 
-    /// Stops managed inference admission and observes pending worker jobs.
+    /// Stops managed inference admission and observes accepted worker jobs.
     ///
     /// The timeout is one deadline shared by service admission/settlement and
     /// worker exit. If it expires before the worker exits,
@@ -430,11 +431,14 @@ impl MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// Reports admission and worker termination facts. `worker_stopped` only
-    /// confirms that the worker joined; it can be true while an unconfirmed
-    /// provider request still retains capacity. `false` means the worker has
-    /// not been confirmed joined, and a later call can continue observing it.
-    /// Inspect the admission report separately for request resource settlement.
+    /// `Drain` waits for accepted service operations to settle. `Cancel` waits
+    /// for local provider access to finish, then closes the worker sender and
+    /// attempts join; queued operations can remain in the service-group
+    /// snapshot until their executor retires them. `worker_stopped` confirms
+    /// join only, and can be true while an unconfirmed provider request still
+    /// retains capacity. `false` means join is unconfirmed; a later call can
+    /// continue observing the retained worker handle. Inspect the admission
+    /// report separately for request resource settlement.
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,
@@ -694,9 +698,6 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// not bound all process memory, provider buffers, or transient
     /// allocations. Successful return reports the hook's MIME result; the
     /// hook has no public operation handle or separate settlement result.
-    /// Ordinary completion waits for the internal operation to settle, but
-    /// runtime cancellation may return its stop error before the worker
-    /// releases its input and byte capacity.
     ///
     /// # Parameters
     ///

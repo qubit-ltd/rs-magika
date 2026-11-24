@@ -83,9 +83,10 @@ struct ProviderSetupOwner {
 /// Maximum number of admitted requests retained by the runtime.
 const SERVICE_CAPACITY: usize = 2;
 
-/// Shareable managed execution runtime. One worker owns its Magika session and
-/// one queued request; the supervisor service group admits at most one running
-/// and one queued request.
+/// Shareable managed execution runtime. One worker owns its Magika session.
+/// Scope-less service-group capacity, runtime request slots, and the shared
+/// aggregate owned-payload byte budget are separate admission limits; none of
+/// them proves that provider I/O completed or that operation resources released.
 ///
 /// # Examples
 ///
@@ -116,15 +117,15 @@ const SERVICE_CAPACITY: usize = 2;
 pub struct ManagedInferenceRuntime {
     /// Admission queue whose capacity is shared with the supervisor group.
     sender: Mutex<Option<SyncSender<Job>>>,
-    /// Session-owning worker, joined after service group settlement.
+    /// Session-owning worker; join completion is independent of resource release.
     worker: Mutex<WorkerState>,
-    /// Finite managed child admission for active and queued jobs.
+    /// Finite operation-group capacity used by scope-less service admission.
     service_group: OperationGroup,
-    /// Runtime request slots remain occupied until worker and provider release.
+    /// Runtime request slots remain occupied until worker and provider access release.
     active_requests: Arc<AtomicUsize>,
-    /// Upper bound for bytes retained by one detector configuration.
+    /// Per-detector upper bound used when reserving shared aggregate byte capacity.
     max_in_flight_bytes: usize,
-    /// Aggregate bytes reserved by the active and queued jobs.
+    /// Shared aggregate owned-payload bytes reserved by active and queued jobs.
     byte_budget: Arc<ByteBudget>,
     /// Strong active tasks retained until aggregate resource release.
     tasks: Arc<Mutex<Vec<Arc<TaskState>>>>,
