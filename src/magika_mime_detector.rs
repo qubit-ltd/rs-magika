@@ -624,8 +624,8 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Parameters
     ///
-    /// * basename - Native basename to match without splitting path
-    ///   separators that may be ordinary filename characters.
+    /// * basename - Native basename to match without splitting path separators
+    ///   that may be ordinary filename characters.
     ///
     /// # Returns
     ///
