@@ -26,10 +26,13 @@ pub struct ManagedInferenceSnapshot {
     /// This is separate from the shutdown report's `worker_panicked`, which
     /// records an uncaught panic observed while joining the worker.
     pub faulted: bool,
-    /// Unreleased requests not yet started by the worker, including provider
-    /// setup and admission queue time; this is not an exact queue length.
+    /// Admitted, unreleased requests whose worker has not started processing
+    /// them, including provider setup and admission queue time; this is not an
+    /// exact queue length.
     pub admitted_not_started: usize,
-    /// Unreleased requests whose worker participant has not completed.
+    /// Unreleased requests whose worker participant has started but not
+    /// completed. This can include time while the worker waits for a Provider
+    /// sample read to be serviced by the caller's future.
     pub worker_running: usize,
     /// Requests whose worker completed but whose resources remain retained.
     pub awaiting_release: usize,

@@ -111,6 +111,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 `MagikaMimeDetector::detect_async_provider_path_managed` 或 `detect_bytes_managed` 传入
 `OperationScope`。受管调用会将工作关联到该 scope，使其报告能独立跟踪资源释放和业务结果。
 应用启动时创建 runtime 和 detector，每个受管请求传入 scope，并在应用关闭时 drain runtime。
+Provider path 的 session 和旧范围读取路由由 worker 发出采样请求，并等待调用方 future 执行读取；
+`read_all` 回退则先读取完整内容，再把拥有的缓冲区提交给 worker。
 检测 future 返回的是业务结果；scope observer 会单独报告资源结算。有界等待可能返回 `Pending(snapshot)`，
 也可能返回终态 `Ready(report)`，但 `all_released()` 仍为 false；负面报告也可能来自 scope 中其他资源，不能据此推断 Magika 仍占用容量。
 本次请求的 Provider I/O 完成状态未确认，或 worker 仍在访问请求资源时，Magika 会继续保留自己的容量。停止请求会析构本地 future、reader

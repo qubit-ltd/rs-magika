@@ -116,6 +116,9 @@ sampling can call `MagikaMimeDetector::detect_async_provider_path_managed` or
 work to that scope so its report can track release separately from the
 business result. Create the runtime and detector at startup, pass the scope to
 each managed request, and drain the runtime during application shutdown.
+For provider paths, session and legacy-range routes have the worker issue sample
+requests while the caller's future performs the reads. The `read_all` fallback
+reads the content first, then submits the owned buffer to the worker.
 The returned detection result is the business outcome. The scope observer
 reports settlement separately: a bounded wait may return `Pending(snapshot)`;
 it may also return terminal `Ready(report)` while `all_released()` is false.

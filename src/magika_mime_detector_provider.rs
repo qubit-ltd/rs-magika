@@ -74,7 +74,9 @@ impl MagikaMimeDetectorProvider {
     ///
     /// # Returns
     ///
-    /// A provider that uses default MIME stream refinement behavior.
+    /// A provider with no media-stream classifier configured; `create_configured`
+    /// builds detectors with the supplied [`MimeConfig`] and without media
+    /// refinement unless a classifier is explicitly registered on the provider.
     #[inline]
     pub fn new() -> Self {
         Self::default()
@@ -142,11 +144,14 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderFailure`] when Magika or ONNX Runtime cannot
-    /// initialize. The error preserves the underlying [`MimeError`] source and
-    /// is classified as initialization failure because Magika's upstream error
-    /// does not reliably distinguish a missing runtime from an invalid model or
-    /// configuration. `OnAbsence` fallback therefore does not suppress it.
+    /// Returns [`ProviderFailure`] if `config` sets a MIME buffer limit larger
+    /// than the byte budget of this provider's managed runtime. Also returns
+    /// an initialization failure if Magika or ONNX Runtime cannot initialize.
+    /// The failure preserves the underlying [`MimeError`] source; Magika's
+    /// upstream error does not reliably distinguish a missing runtime from an
+    /// invalid model or configuration, so `OnAbsence` fallback does not
+    /// suppress initialization failures.
+    ///
     fn create_configured(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
         let mut builder = MagikaMimeDetector::builder()
             .mime_config(config.clone())

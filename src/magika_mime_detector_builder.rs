@@ -36,10 +36,14 @@ use crate::managed_runtime::ManagedInferenceRuntime;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```
 /// use qubit_magika::MagikaMimeDetectorBuilder;
+/// use qubit_mime::MimeDetector;
 ///
 /// let detector = MagikaMimeDetectorBuilder::default().build()?;
+/// let content = include_bytes!("../tests/fixtures/real_files/script.sh");
+/// let mime = detector.detect_by_content(content)?;
+/// assert_eq!(mime.as_deref(), Some("text/x-shellscript"));
 /// # Ok::<(), qubit_mime::MimeError>(())
 /// ```
 #[derive(Default)]
@@ -173,8 +177,9 @@ impl MagikaMimeDetectorBuilder {
     /// # Errors
     ///
     /// Returns an error if a supplied runtime's byte budget is smaller than
-    /// the MIME buffer limit, or if a new runtime or Magika session cannot be
-    /// initialized.
+    /// the MIME buffer limit. When creating a runtime, errors from the
+    /// application-owned or default [`OperationManager`] group creation are
+    /// propagated, as are errors initializing the runtime or Magika session.
     pub fn build(self) -> MimeResult<MagikaMimeDetector> {
         let max_buffer_size = self.mime_config.max_buffer_size();
         let runtime = match self.runtime {
