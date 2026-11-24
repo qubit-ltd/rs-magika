@@ -14,13 +14,17 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from _local_package_identities import (
     run_self_tests as run_local_package_identity_self_tests,
     validate_local_package_identities,
 )
-from _dynamic_loader_feature_policy import violations as dynamic_ort_feature_violations
+from _dynamic_loader_feature_policy import (
+    dynamic_ort_feature_violations,
+    ort_link_graph_violations,
+    run_self_tests as run_ort_graph_self_tests,
+)
 
 
 
@@ -182,7 +186,7 @@ def validate_and_rebase_manifest(
 
 def _guide_relative_path(value: str, guide_name: str, key: str) -> str:
     path = Path(value)
-    windows_absolute = re.match(r"^[A-Za-z]:[/\\]", value) or value.startswith("\\\\")
+    windows_absolute = PureWindowsPath(value).is_absolute()
     if path.is_absolute() or windows_absolute:
         raise ValueError(f"{guide_name}: {key} must use a relative guide path, got {value!r}")
     return posixpath.normpath(value)
@@ -244,6 +248,11 @@ def manifest_text(
 
 
 def validate_feature_graph(metadata: dict[str, object], variant: str, guide: str) -> None:
+    mode = "bundled" if variant in ("default", "inventory") else "dynamic" if variant == "dynamic" else None
+    if mode is not None:
+        link_errors = ort_link_graph_violations(metadata, mode)
+        if link_errors:
+            raise ValueError(f"{guide}: {variant} variant actual features: {'; '.join(link_errors)}")
     packages = metadata.get("packages", [])
     nodes = metadata.get("resolve", {}).get("nodes", [])
     by_name: dict[str, list[tuple[str, set[str]]]] = {}
@@ -284,9 +293,9 @@ def validate_feature_graph(metadata: dict[str, object], variant: str, guide: str
     if variant == "inventory":
         require("inventory", magika, "qubit-magika")
     if variant == "dynamic":
-        policy_violations = dynamic_ort_feature_violations(ort)
-        if policy_violations:
-            raise ValueError(f"{guide}: dynamic variant ort actual features {sorted(ort)}: {'; '.join(policy_violations)}")
+        policy_errors = dynamic_ort_feature_violations(ort)
+        if policy_errors:
+            raise ValueError(f"{guide}: dynamic variant ort actual features {sorted(ort)}: {'; '.join(policy_errors)}")
         exclude("bundled-onnxruntime", magika, "qubit-magika")
 
 
@@ -389,6 +398,27 @@ def validate_current_settlement_names(guide_name: str, markdown: str) -> None:
 
 def run_self_tests() -> None:
     run_local_package_identity_self_tests()
+    run_ort_graph_self_tests()
+
+    def rooted_fixture(graph: dict[str, object], variant: str) -> dict[str, object]:
+        rooted = json.loads(json.dumps(graph))
+        root_id = "path+guide-test#0.0.0"
+        sys_id = "registry+ort-sys#2.0.0"
+        rooted["packages"].append({"id": root_id, "name": "guide-test"})
+        rooted["packages"].append({"id": sys_id, "name": "ort-sys"})
+        nodes = rooted["resolve"]["nodes"]
+        rooted["resolve"]["root"] = root_id
+        for node in nodes:
+            if next(package for package in rooted["packages"] if package["id"] == node["id"])["name"] == "ort":
+                node.setdefault("deps", []).append({"name": "ort_sys", "pkg": sys_id, "dep_kinds": [{"kind": None, "target": None}]})
+        rooted["resolve"]["nodes"].append({"id": root_id, "features": [], "deps": [
+            {"name": package["name"].replace("-", "_"), "pkg": package["id"], "dep_kinds": [{"kind": None, "target": None}]}
+            for package in rooted["packages"] if package["id"] != root_id
+        ]})
+        sys_features = ["download-binaries"] if variant in ("default", "inventory") else ["disable-linking"]
+        rooted["resolve"]["nodes"].append({"id": sys_id, "features": sys_features, "deps": []})
+        return rooted
+
     guide = "English fixture"
     examples = ["use qubit_magika::MagikaMimeDetector;", "use qubit_operation::OperationManager;"]
     dependencies = {
@@ -474,10 +504,24 @@ qubit-operation = { path = "../rs-operation" }
 """
     marked = f"{APPLICATION_START}\n```toml\n{application}```\n{APPLICATION_END}"
     parsed_application = extract_manifest(marked, guide, APPLICATION_START, APPLICATION_END)
-    rebased = validate_and_rebase_manifest(parsed_application, guide, Path("/layout/rs-magika"))
-    assert rebased["dependencies"]["qubit-magika"]["path"] == "/layout/rs-magika"
-    assert rebased["dependencies"]["qubit-operation"]["path"] == "/layout/rs-operation"
-    assert rebased["patch"]["crates-io"]["qubit-operation"]["path"] == "/layout/rs-operation"
+    fixture_root = Path("/layout/rs-magika")
+    expected_fixture_paths = {
+        "qubit-magika": fixture_root.resolve(),
+        "qubit-mime": (fixture_root.parent / "rs-mime").resolve(),
+        "qubit-fs": (fixture_root.parent / "rs-fs").resolve(),
+        "qubit-operation": (fixture_root.parent / "rs-operation").resolve(),
+    }
+    rebased = validate_and_rebase_manifest(parsed_application, guide, fixture_root)
+    assert Path(rebased["dependencies"]["qubit-magika"]["path"]).resolve() == expected_fixture_paths["qubit-magika"]
+    assert Path(rebased["dependencies"]["qubit-operation"]["path"]).resolve() == expected_fixture_paths["qubit-operation"]
+    assert Path(rebased["patch"]["crates-io"]["qubit-operation"]["path"]).resolve() == expected_fixture_paths["qubit-operation"]
+    for windows_absolute in (r"C:\apps\rs-magika", r"\\server\share\rs-magika"):
+        try:
+            _guide_relative_path(windows_absolute, guide, "Windows path self-test")
+        except ValueError as error:
+            assert "relative guide path" in str(error)
+        else:
+            raise AssertionError(f"accepted absolute Windows path: {windows_absolute}")
     serialized = tomllib.loads(
         manifest_text(parsed_application, add_package=False, add_workspace=False)
     )
@@ -625,14 +669,21 @@ qubit-operation = { path = "../rs-operation" }
                 {"id": "registry+ort#2.0.0", "features": ort_features},
             ]},
         }
-        validate_feature_graph(graph, variant, guide)
+        validate_feature_graph(rooted_fixture(graph, variant), variant, guide)
+        if variant == "dynamic":
+            try:
+                validate_feature_graph(graph, variant, guide)
+            except ValueError as error:
+                assert "no root package" in str(error)
+            else:
+                raise AssertionError("accepted feature graph without a Cargo resolve root")
         if variant in ("default", "inventory"):
             unbundled = json.loads(json.dumps(graph))
             unbundled["resolve"]["nodes"][0]["features"] = (
                 ["inventory"] if variant == "inventory" else []
             )
             try:
-                validate_feature_graph(unbundled, variant, guide)
+                validate_feature_graph(rooted_fixture(unbundled, variant), variant, guide)
             except ValueError as error:
                 assert guide in str(error) and variant in str(error)
                 assert "actual features" in str(error) and "missing bundled-onnxruntime" in str(error)
@@ -654,7 +705,7 @@ qubit-operation = { path = "../rs-operation" }
             ]},
         }
         try:
-            validate_feature_graph(graph, variant, guide)
+            validate_feature_graph(rooted_fixture(graph, variant), variant, guide)
         except ValueError as error:
             assert guide in str(error) and variant in str(error) and expected_message in str(error), str(error)
             assert "actual features" in str(error), str(error)
@@ -671,7 +722,7 @@ qubit-operation = { path = "../rs-operation" }
         ]},
     }))
     try:
-        validate_feature_graph(inventory_without_feature, "inventory", guide)
+        validate_feature_graph(rooted_fixture(inventory_without_feature, "inventory"), "inventory", guide)
     except ValueError as error:
         assert guide in str(error) and "inventory" in str(error)
         assert "actual features" in str(error) and "missing inventory" in str(error)
@@ -689,7 +740,7 @@ qubit-operation = { path = "../rs-operation" }
             ]},
         }
         try:
-            validate_feature_graph(dynamic_forbidden, "dynamic", guide)
+            validate_feature_graph(rooted_fixture(dynamic_forbidden, "dynamic"), "dynamic", guide)
         except ValueError as error:
             assert guide in str(error) and "dynamic" in str(error)
             assert forbidden in str(error) and "actual features" in str(error)
@@ -708,7 +759,7 @@ qubit-operation = { path = "../rs-operation" }
         ]},
     }
     try:
-        validate_feature_graph(duplicate_graph, "default", guide)
+        validate_feature_graph(rooted_fixture(duplicate_graph, "default"), "default", guide)
     except ValueError as error:
         assert "path+magika#0.18.0" in str(error)
         assert "registry+magika#0.18.0" in str(error)
