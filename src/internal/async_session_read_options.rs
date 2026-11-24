@@ -19,7 +19,9 @@ pub(crate) struct AsyncSessionReadOptions<'a, Stop> {
     pub(crate) max_segment: Option<usize>,
     /// Checks whether the owning request stopped before another provider read.
     pub(crate) should_stop: Stop,
-    /// Marks actual provider polling as in flight, excluding cooperative
-    /// yields.
+    /// Marks the provider future while it is polled and remains set when a
+    /// poll returns `Pending`; it is cleared when a poll returns `Ready`.
+    /// Cooperative yields leave the marker clear. Generic callers may omit
+    /// the marker.
     pub(crate) io_in_flight: Option<&'a std::sync::atomic::AtomicBool>,
 }

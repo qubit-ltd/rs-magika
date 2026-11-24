@@ -687,10 +687,16 @@ impl ManagedInferenceRuntime {
                 let driver = bridge.driver();
                 let io_in_flight = owner.input.io_in_flight();
                 owner.admission.require_provider_driver();
-                let guard =
-                    ProviderDriverGuard::new_with_io_status(owner.input, driver, Arc::clone(&state), io_in_flight);
-                let inference =
-                    setup_runtime.dispatch(owner.admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
+                let guard = ProviderDriverGuard::new_with_io_status(
+                    owner.input,
+                    driver,
+                    Arc::clone(&state),
+                    Some(io_in_flight),
+                );
+                let inference = setup_runtime.dispatch(
+                    owner.admission,
+                    WorkerInput::Bridge(bridge, max_bytes, map_error),
+                )?;
                 Ok::<_, MimeError>((guard, inference))
             };
             let mut setup = Box::pin(setup);

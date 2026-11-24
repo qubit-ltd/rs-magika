@@ -580,6 +580,54 @@ fn test_async_session_yields_after_sixty_four_ready_short_reads() {
 }
 
 #[test]
+fn test_async_session_io_marker_tracks_pending_and_ready_provider_poll() {
+    let gate = Arc::new(TestAsyncReadGate::new());
+    let fixture =
+        Fixture::new(b"x", FileSystemLimit::Maximum(1)).with_async_read_gate(Arc::clone(&gate));
+    let filesystem = AsyncFileSystem::from_spi(fixture).unwrap();
+    let mut reader = block_on(filesystem.open_random_access_reader(
+        &Path::parse("/session-io-marker").unwrap(),
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(1);
+    let mut output = [0; 1];
+    let io_in_flight = Arc::new(AtomicBool::new(false));
+    let mut future = Box::pin(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        1,
+        &mut budget,
+        &mut output,
+        0,
+        AsyncSessionReadOptions {
+            max_segment: None,
+            should_stop: || false,
+            io_in_flight: Some(&io_in_flight),
+        },
+    ));
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(wake);
+    let mut context = Context::from_waker(&waker);
+
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert!(gate.started(), "provider read must reach its real Pending gate");
+    assert!(
+        io_in_flight.load(Ordering::Acquire),
+        "Pending provider poll must be marked in flight"
+    );
+    gate.release();
+    block_on(future).expect("released provider read should complete");
+    assert_eq!(*b"x", output);
+    assert!(
+        !io_in_flight.load(Ordering::Acquire),
+        "Ready provider poll must clear the marker"
+    );
+}
+
+#[test]
 fn test_async_session_stop_after_cooperative_yield_does_not_start_next_read() {
     let fixture = Fixture::new(b"", FileSystemLimit::Unknown);
     let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();

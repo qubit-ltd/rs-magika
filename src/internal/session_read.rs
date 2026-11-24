@@ -10,7 +10,6 @@
 
 use std::future::Future;
 use std::io;
-use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
@@ -121,6 +120,10 @@ fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut
 /// * `offset` - Fixed resource offset used for every attempt.
 /// * `output` - Buffer filled by a successful attempt.
 /// * `should_stop` - Predicate checked before each provider attempt.
+/// * `completed_steps` - Number of provider futures that returned `Ready`
+///   since the last cooperative yield.
+/// * `io_in_flight` - Optional marker set only while polling the provider
+///   future; it remains false during cooperative yields.
 ///
 /// # Returns
 ///
@@ -144,12 +147,12 @@ async fn read_async_at_retry(
         if should_stop() {
             return Err(session_read_stopped_io_error());
         }
-        let mut read = Box::pin(reader.read_at(offset, output));
+        let mut read = std::pin::pin!(reader.read_at(offset, output));
         let result = std::future::poll_fn(|context| {
             if let Some(io_in_flight) = io_in_flight {
                 io_in_flight.store(true, Ordering::Release);
             }
-            match Pin::as_mut(&mut read).poll(context) {
+            match read.as_mut().poll(context) {
                 Poll::Ready(result) => {
                     if let Some(io_in_flight) = io_in_flight {
                         io_in_flight.store(false, Ordering::Release);
