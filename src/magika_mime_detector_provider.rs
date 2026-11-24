@@ -74,9 +74,10 @@ impl MagikaMimeDetectorProvider {
     ///
     /// # Returns
     ///
-    /// A provider with no media-stream classifier configured; `create_configured`
-    /// builds detectors with the supplied [`MimeConfig`] and without media
-    /// refinement unless a classifier is explicitly registered on the provider.
+    /// A provider with no media-stream classifier configured;
+    /// `create_configured` builds detectors with the supplied
+    /// [`MimeConfig`] and without media refinement unless a classifier is
+    /// explicitly registered on the provider.
     #[inline]
     pub fn new() -> Self {
         Self::default()
@@ -151,7 +152,6 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     /// upstream error does not reliably distinguish a missing runtime from an
     /// invalid model or configuration, so `OnAbsence` fallback does not
     /// suppress initialization failures.
-    ///
     fn create_configured(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
         let mut builder = MagikaMimeDetector::builder()
             .mime_config(config.clone())

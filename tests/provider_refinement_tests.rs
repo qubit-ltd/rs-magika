@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 
 use qubit_config::Config;
 use qubit_fs::Path as FsPath;
+use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::CONFIG_MIME_AMBIGUOUS_MIME_MAPPING;
 use qubit_mime::CONFIG_MIME_DETECTOR_DEFAULT;
 use qubit_mime::CONFIG_MIME_ENABLE_PRECISE_DETECTION;
@@ -28,7 +29,6 @@ use qubit_mime::MimeDetectionPolicy;
 use qubit_mime::MimeDetector;
 use qubit_mime::MimeDetectorRegistry;
 use qubit_mime::MimeResult;
-use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_spi::ProviderSelection;
 use tempfile::tempdir;
 
@@ -222,12 +222,12 @@ fn test_registry_configured_classifier_refines_content() {
     let calls = Arc::new(AtomicUsize::new(0));
     let registry = MimeDetectorRegistry::default();
     registry
-        .register(MagikaMimeDetectorProvider::with_media_stream_classifier(
-            Arc::new(OverrideClassifier {
+        .register(MagikaMimeDetectorProvider::with_media_stream_classifier(Arc::new(
+            OverrideClassifier {
                 content_calls: Arc::clone(&calls),
                 reader_calls: Arc::new(AtomicUsize::new(0)),
-            }),
-        ))
+            },
+        )))
         .expect("configured Magika provider should register");
     let selection = ProviderSelection::named("magika").expect("canonical selection should parse");
     let provider = registry
@@ -243,11 +243,7 @@ fn test_registry_configured_classifier_refines_content() {
             .detect_by_content(SHELL_SCRIPT)
             .expect("registry detector should refine content"),
     );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        1,
-        "registry path must pass classifier"
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "registry path must pass classifier");
 
     // With precise detection disabled, the initial candidate stays at the
     // other shell-script mapping, so a missing classifier cannot pass unnoticed.
@@ -267,8 +263,7 @@ fn test_registry_configured_classifier_refines_content() {
             "sh:application/x-shellscript,text/x-shellscript",
         )
         .expect("ambiguous mapping should be configurable");
-    let control_config =
-        MimeConfig::from_config(&control_raw_config).expect("control config should parse");
+    let control_config = MimeConfig::from_config(&control_raw_config).expect("control config should parse");
     let initial_detector = qubit_magika::MagikaMimeDetector::builder()
         .mime_config(control_config)
         .build()
