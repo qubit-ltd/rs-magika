@@ -277,21 +277,16 @@ def run_self_tests() -> None:
         relative_manifest = consumer_manifest(
             dependencies, Path("layout/rs-magika"), filename
         )
-        assert (
-            'qubit-operation = { version = "0.3.2", path = "layout/rs-operation" }'
-            in relative_manifest
-        )
-        assert '[patch.crates-io]' in relative_manifest
-        assert 'qubit-operation = { path = "layout/rs-operation" }' in relative_manifest
+        relative_root = Path("layout/rs-magika")
+        relative_manifest = consumer_manifest(dependencies, relative_root, filename)
+        relative_parsed = tomllib.loads(relative_manifest)
+        expected_operation_path = str(relative_root.parent / "rs-operation")
+        assert relative_parsed["dependencies"]["qubit-operation"]["path"] == expected_operation_path
+        assert relative_parsed["patch"]["crates-io"]["qubit-operation"]["path"] == expected_operation_path
         registry_manifest = consumer_manifest(dependencies, Path("/project"), None)
         validate_registry_manifest(registry_manifest)
         assert "path =" not in registry_manifest
         assert "[patch." not in registry_manifest
-        local_manifest = tomllib.loads(relative_manifest)
-        assert (
-            local_manifest["patch"]["crates-io"]["qubit-operation"]["path"]
-            == "layout/rs-operation"
-        )
         for root in (
             Path('/tmp/quoted"directory/rs-magika'),
             PureWindowsPath("C:/Users/example/rs-magika"),
@@ -309,9 +304,9 @@ def run_self_tests() -> None:
                 generated = tomllib.loads(consumer_manifest(local_dependencies, root, filename))
                 dependency_path = generated["dependencies"]["qubit-operation"]["path"]
                 patch_path = generated["patch"]["crates-io"]["qubit-operation"]["path"]
-                expected_operation_path = str(root.parent / "rs-operation")
-                assert dependency_path == expected_operation_path
-                assert patch_path == expected_operation_path
+                native_expected_path = str(root.parent / "rs-operation")
+                assert dependency_path == native_expected_path
+                assert patch_path == native_expected_path
         for invalid_registry_manifest in (
             registry_manifest.replace('qubit-magika = "0.18"', 'qubit-magika = { version = "0.18", path = "../rs-magika" }'),
             registry_manifest + "\n[patch.crates-io]\nqubit-magika = { path = \"../rs-magika\" }\n",
@@ -354,8 +349,8 @@ def run_self_tests() -> None:
             assert "qubit-mime" in str(error)
         else:
             raise AssertionError(f"{filename}: accepted old qubit-mime version")
-        old_manifest = consumer_manifest(old_mime, Path("/project"), filename)
-        assert 'qubit-mime = { version = "0.21", path = "/rs-mime" }' in old_manifest
+        old_manifest = tomllib.loads(consumer_manifest(old_mime, Path("/project"), filename))
+        assert old_manifest["dependencies"]["qubit-mime"]["path"] == str(Path("/project").parent / "rs-mime")
         old_operation = dict(dependencies, **{"qubit-operation": "0.3"})
         try:
             validate_dependencies(old_operation, expected, filename)
