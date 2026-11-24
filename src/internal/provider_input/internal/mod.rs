@@ -7,6 +7,8 @@
 // =============================================================================
 //! Private error sources for provider input handling.
 
+mod budget_read_io_observer;
 mod observed_read_stopped;
 
+pub(super) use budget_read_io_observer::BudgetReadIoObserver;
 pub(super) use observed_read_stopped::ObservedReadStopped;

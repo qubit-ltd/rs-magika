@@ -25,6 +25,7 @@ use qubit_fs::error::FsError;
 use qubit_fs::error::FsErrorKind;
 use qubit_fs::error::FsOperation;
 use qubit_fs::metadata::ResourceVersion;
+use qubit_fs::read::ReadIoEvent;
 use qubit_fs::read::ReadIoObserver;
 use qubit_fs::read::ReadIoPhase;
 use qubit_mime::MimeError;
@@ -71,9 +72,18 @@ fn run_ready<F: Future>(future: F) -> F::Output {
     }
 }
 
-struct NoopReadObserver;
+#[derive(Default)]
+struct CountingReadObserver {
+    ready_events: Arc<std::sync::atomic::AtomicUsize>,
+}
 
-impl ReadIoObserver for NoopReadObserver {}
+impl ReadIoObserver for CountingReadObserver {
+    fn on_io_event(&mut self, event: ReadIoEvent) {
+        if matches!(event, ReadIoEvent::Ready { .. }) {
+            self.ready_events.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
 
 struct ThreadWake {
     thread: std::thread::Thread,
@@ -98,36 +108,160 @@ fn test_provider_input_helper_errors_are_displayable() {
 }
 
 #[test]
-fn test_legacy_async_provider_yields_after_sixty_four_ready_one_byte_ranges() {
+fn test_legacy_async_provider_yields_within_completed_io_budget_for_short_reads() {
     let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
     let provider = ProviderFileSystemSpi::new(content.clone())
         .with_range()
-        .with_max_read_range_bytes(1);
+        .with_max_read_range_bytes(64)
+        .one_byte_reads();
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let path = Path::parse("/cooperative-legacy").unwrap();
     let mut output = vec![0; content.len()];
-    let mut observer = NoopReadObserver;
+    let event_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut observer = CountingReadObserver {
+        ready_events: Arc::clone(&event_count),
+    };
     let mut future = Box::pin(read_async_segments_observed(
         &file_system,
         &path,
         None,
         &mut output,
         0,
-        1,
+        64,
         &mut observer,
     ));
     let wake = Arc::new(ThreadWake {
         thread: std::thread::current(),
         notified: AtomicBool::new(false),
     });
-    let waker = std::task::Waker::from(wake);
+    let waker = std::task::Waker::from(Arc::clone(&wake));
+    let mut context = Context::from_waker(&waker);
+
+    // Baseline negative: before counting actual Ready events, this first poll
+    // completed all 64 prefixes (4,096 one-byte reads) and returned Ready.
+    // The event budget must instead bound each real poll to 128 completions.
+    let mut pending_polls = 0;
+    let mut max_completed_this_poll = 0;
+    loop {
+        let before = event_count.load(Ordering::SeqCst);
+        let poll = future.as_mut().poll(&mut context);
+        let completed_this_poll = event_count.load(Ordering::SeqCst) - before;
+        assert!(
+            completed_this_poll <= 128,
+            "one poll completed {completed_this_poll} provider operations; maximum is 128"
+        );
+        max_completed_this_poll = max_completed_this_poll.max(completed_this_poll);
+        match poll {
+            Poll::Ready(result) => {
+                result.expect("cooperative reads should eventually fill the request");
+                assert!(pending_polls > 0, "long short-read request must yield");
+                break;
+            }
+            Poll::Pending => {
+                pending_polls += 1;
+                assert!(
+                    wake.notified.swap(false, Ordering::AcqRel),
+                    "cooperative yield must self-wake"
+                );
+            }
+        }
+    }
+    assert!(pending_polls >= 1);
+    assert_eq!(65, max_completed_this_poll);
+    assert_eq!(4160, event_count.load(Ordering::SeqCst));
+    assert_eq!(64, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        4096,
+        observations.read_bytes.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    drop(future);
+    assert_eq!(content, output);
+}
+
+#[test]
+fn test_legacy_yield_clears_actual_io_before_observing_cancellation() {
+    let provider = ProviderFileSystemSpi::new(vec![7; 128])
+        .with_range()
+        .with_max_read_range_bytes(64)
+        .one_byte_reads();
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let path = Path::parse("/cancel-at-cooperative-yield").unwrap();
+    let mut output = [0; 128];
+    let in_flight = Arc::new(AtomicBool::new(false));
+    let stop_seen = Arc::new(AtomicBool::new(false));
+
+    struct CancelAtYield {
+        in_flight: Arc<AtomicBool>,
+        stop_requested: bool,
+        stop_seen: Arc<AtomicBool>,
+        read_bytes: usize,
+    }
+    impl ReadIoObserver for CancelAtYield {
+        fn before_io(&mut self, phase: ReadIoPhase) -> std::ops::ControlFlow<()> {
+            if self.stop_requested && phase == ReadIoPhase::Open {
+                assert!(
+                    !self.in_flight.load(Ordering::Acquire),
+                    "cooperative yield must not retain an in-flight I/O marker"
+                );
+                self.stop_seen.store(true, Ordering::Release);
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        }
+
+        fn on_io_event(&mut self, event: ReadIoEvent) {
+            match event {
+                ReadIoEvent::Started { .. } | ReadIoEvent::Pending { .. } => {
+                    self.in_flight.store(true, Ordering::Release);
+                }
+                ReadIoEvent::Ready { .. } => self.in_flight.store(false, Ordering::Release),
+            }
+        }
+
+        fn on_read_bytes(&mut self, bytes: usize) {
+            self.read_bytes += bytes;
+            if self.read_bytes == 64 {
+                self.stop_requested = true;
+            }
+        }
+    }
+
+    let mut observer = CancelAtYield {
+        in_flight: Arc::clone(&in_flight),
+        stop_requested: false,
+        stop_seen: Arc::clone(&stop_seen),
+        read_bytes: 0,
+    };
+    let mut future = Box::pin(read_async_segments_observed(
+        &file_system,
+        &path,
+        None,
+        &mut output,
+        0,
+        64,
+        &mut observer,
+    ));
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(Arc::clone(&wake));
     let mut context = Context::from_waker(&waker);
 
     assert!(future.as_mut().poll(&mut context).is_pending());
-    assert_eq!(64, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
-    run_ready(future).expect("cooperative reads should eventually fill the request");
-    assert_eq!(content, output);
+    assert!(wake.notified.swap(false, Ordering::AcqRel));
+    assert!(!in_flight.load(Ordering::Acquire));
+    assert!(!stop_seen.load(Ordering::Acquire));
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(Err(_))
+    ));
+    assert!(stop_seen.load(Ordering::Acquire));
+    assert_eq!(1, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -336,7 +470,7 @@ fn test_legacy_provider_empty_unknown_zero_short_and_conditional_ranges() {
     let zero_fs = zero_provider.file_system();
     assert!(read_sync_segments(&zero_fs, &path, None, &mut [0; 1], 0, 0).is_err());
     let zero_async_fs = zero_provider.async_file_system();
-    let mut observer = NoopReadObserver;
+    let mut observer = CountingReadObserver::default();
     let async_error = run_ready(read_async_segments_observed(
         &zero_async_fs,
         &path,
