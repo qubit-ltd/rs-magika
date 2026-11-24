@@ -71,6 +71,37 @@ Python 3's `renamex_np` (default executable `python3`; override it with
 missing checkout. Preparing an existing valid worktree and running strict
 read-only validation do not require a publisher.
 
+For an application that needs these unpublished releases, place its workspace
+root beside the pinned checkouts listed in the source repository, with the
+application directory named `app`. Keep this manifest at `app/Cargo.toml`:
+
+```toml
+[workspace]
+
+[package]
+name = "my-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+qubit-magika = { path = "../rs-magika" }
+qubit-mime = { path = "../rs-mime" }
+qubit-fs = { path = "../rs-fs", default-features = false, features = ["async"] }
+qubit-operation = { path = "../rs-operation" }
+qubit-spi = "0.14"
+
+[patch.crates-io]
+qubit-operation = { path = "../rs-operation" }
+```
+
+Dependency paths are relative to the package directory; workspace patches are
+relative to the workspace root. Prepare the fixed sibling checkouts with the
+source repository's preparation helper, verify them with
+`check-locked-local-path-dependencies.sh`, then check the independent
+application lock with Cargo. The local source checker uses this same root
+manifest shape. Registry-only consumers omit all paths and patches and use
+their own lock file.
+
 The registry versions required by the examples were not all available on
 2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
 0.21.1, `qubit-fs` 0.3.3, and `qubit-operation` 0.3.1, while these examples

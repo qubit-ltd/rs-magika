@@ -13,6 +13,12 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from _local_package_identities import (
+    run_self_tests as run_local_package_identity_self_tests,
+    validate_local_package_identities,
+)
+
+
 
 READMES = {
     "README.md": ("Installation", "Quick Start"),
@@ -140,6 +146,12 @@ def consumer_manifest(
         "[dependencies]\n"
         + "\n".join(entries)
         + "\n"
+        + (
+            "\n[patch.crates-io]\n"
+            f'qubit-operation = {{ path = "{local_paths["qubit-operation"]}" }}\n'
+            if filename is not None
+            else ""
+        )
     )
 
 
@@ -193,7 +205,10 @@ def validate_registry_metadata(
     )
 
 
+LOCAL_PACKAGES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-operation")
+
 def run_self_tests() -> None:
+    run_local_package_identity_self_tests()
     expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-spi": "0.14", "qubit-operation": "0.3.2"}
     fixtures = {
         "README.md": """## Installation\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3.2\"\n```\n## Quick Start\n```rust\nfn main() {}\n```\n""",
@@ -266,10 +281,17 @@ def run_self_tests() -> None:
             'qubit-operation = { version = "0.3.2", path = "layout/rs-operation" }'
             in relative_manifest
         )
+        assert '[patch.crates-io]' in relative_manifest
+        assert 'qubit-operation = { path = "layout/rs-operation" }' in relative_manifest
         registry_manifest = consumer_manifest(dependencies, Path("/project"), None)
         validate_registry_manifest(registry_manifest)
         assert "path =" not in registry_manifest
         assert "[patch." not in registry_manifest
+        local_manifest = tomllib.loads(relative_manifest)
+        assert (
+            local_manifest["patch"]["crates-io"]["qubit-operation"]["path"]
+            == "layout/rs-operation"
+        )
         for invalid_registry_manifest in (
             registry_manifest.replace('qubit-magika = "0.18"', 'qubit-magika = { version = "0.18", path = "../rs-magika" }'),
             registry_manifest + "\n[patch.crates-io]\nqubit-magika = { path = \"../rs-magika\" }\n",
@@ -393,6 +415,18 @@ def main() -> int:
                     for package in resolved_packages:
                         source = package.get("source") or "local consumer root"
                         print(f"Resolved {package['name']} {package['version']} source={source}", flush=True)
+                else:
+                    metadata_result = subprocess.run(
+                        ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest_path)],
+                        cwd=consumer_root, env=cargo_env, capture_output=True, text=True, check=False,
+                    )
+                    if metadata_result.returncode:
+                        print(metadata_result.stderr, file=sys.stderr, end="")
+                        return metadata_result.returncode if metadata_result.returncode > 0 else 1
+                    validate_local_package_identities(
+                        json.loads(metadata_result.stdout),
+                        {name: project_root if name == "qubit-magika" else project_root.parent / f"rs-{name.removeprefix('qubit-')}" for name in LOCAL_PACKAGES},
+                    )
                 if args.registry_only:
                     command = [
                         "cargo", "check", "--locked", "--manifest-path", str(manifest_path)
@@ -447,6 +481,18 @@ def main() -> int:
                                     )
                                     return metadata_result.returncode if metadata_result.returncode > 0 else 1
                                 validate_registry_metadata(json.loads(metadata_result.stdout), run_root)
+                            else:
+                                metadata_result = subprocess.run(
+                                    ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(run_manifest)],
+                                    cwd=run_root, env=cargo_env, capture_output=True, text=True, check=False,
+                                )
+                                if metadata_result.returncode:
+                                    print(metadata_result.stderr, file=sys.stderr, end="")
+                                    return metadata_result.returncode if metadata_result.returncode > 0 else 1
+                                validate_local_package_identities(
+                                    json.loads(metadata_result.stdout),
+                                    {name: project_root if name == "qubit-magika" else project_root.parent / f"rs-{name.removeprefix('qubit-')}" for name in LOCAL_PACKAGES},
+                                )
                         command = ["cargo", "run"]
                         if args.registry_only:
                             command.append("--locked")

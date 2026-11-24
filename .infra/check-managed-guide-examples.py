@@ -14,6 +14,12 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from _local_package_identities import (
+    run_self_tests as run_local_package_identity_self_tests,
+    validate_local_package_identities,
+)
+
+
 
 START = "<!-- managed-guide-example-start -->"
 END = "<!-- managed-guide-example-end -->"
@@ -139,7 +145,9 @@ def validate_current_settlement_names(guide_name: str, markdown: str) -> None:
         raise ValueError(f"{guide_name}: use wait_settlement().await instead of released()")
 
 
+
 def run_self_tests() -> None:
+    run_local_package_identity_self_tests()
     guide = "English fixture"
     examples = ["use qubit_magika::MagikaMimeDetector;", "use qubit_operation::OperationManager;"]
     dependencies = {
@@ -170,6 +178,8 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
         'qubit-operation = { version = "0.3.2", path = "layout/rs-operation" }'
         in sibling_consumer
     )
+    sibling_manifest = tomllib.loads(sibling_consumer)
+    assert sibling_manifest["patch"]["crates-io"]["qubit-operation"]["path"] == "layout/rs-operation"
     validate_current_settlement_names(guide, "wait_settlement().await and all_released()")
     try:
         validate_current_settlement_names(guide, "released()")
@@ -250,7 +260,13 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-""" + "\n".join(entries) + "\n"
+""" + "\n".join(entries) + (
+        "\n\n[patch.crates-io]\nqubit-operation = { path = "
+        + toml_value(str(operation_path))
+        + " }\n"
+        if operation_path is not None
+        else "\n"
+    )
 
 
 def main() -> int:
@@ -294,6 +310,18 @@ def main() -> int:
             (consumer / "Cargo.toml").write_text(
                 consumer_manifest(dependencies, project_root, operation_path), encoding="utf-8"
             )
+            metadata_result = subprocess.run(
+                ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(consumer / "Cargo.toml")],
+                cwd=project_root, env=cargo_env, capture_output=True, text=True, check=False,
+            )
+            if metadata_result.returncode:
+                print(metadata_result.stderr, file=sys.stderr, end="")
+                return metadata_result.returncode if metadata_result.returncode > 0 else 1
+            if operation_path is not None:
+                validate_local_package_identities(
+                    json.loads(metadata_result.stdout),
+                    {name: project_root if name == "qubit-magika" else project_root.parent / f"rs-{name.removeprefix('qubit-')}" for name in ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-operation")},
+                )
             print(f"Compiling managed examples from {guide}", flush=True)
             result = subprocess.run(
                 ["cargo", "check", "--manifest-path", str(consumer / "Cargo.toml")],

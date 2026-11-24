@@ -54,6 +54,35 @@ Provider 读取，但不接收 parent operation scope。应用若要把 Provider
 默认调用系统 `python3` 的 `renamex_np`；可用 `RS_INFRA_PYTHON` 指定解释器。其他平台发布缺失 checkout 仍需 GNU `mv -Tn` 或 `gmv`。
 准备已存在的合法 worktree 和运行严格只读校验都不需要发布工具。
 
+需要使用尚未发布的依赖版本时，可把应用 workspace 根放在固定 checkout
+`rs-*` 的同级目录中，应用目录命名为 `app`。将以下清单保存为
+`app/Cargo.toml`：
+
+```toml
+[workspace]
+
+[package]
+name = "my-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+qubit-magika = { path = "../rs-magika" }
+qubit-mime = { path = "../rs-mime" }
+qubit-fs = { path = "../rs-fs", default-features = false, features = ["async"] }
+qubit-operation = { path = "../rs-operation" }
+qubit-spi = "0.14"
+
+[patch.crates-io]
+qubit-operation = { path = "../rs-operation" }
+```
+
+成员依赖路径相对 package 目录解析；workspace patch 路径相对 workspace 根目录解析。
+使用源码仓库的准备脚本准备固定 checkout，再运行
+`check-locked-local-path-dependencies.sh` 核验，然后在独立应用中生成并检查自己的
+lock 文件。本仓库源码 checker 使用相同的根清单结构。仅使用 registry 的消费者不写
+path 或 patch，并使用自己的 lock 文件。
+
 ## 贯穿场景
 
 假设应用接收一个上传的 Python 脚本：它需要根据内容得到 MIME 类型，同时保留对普通
