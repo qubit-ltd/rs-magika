@@ -1173,8 +1173,8 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
             Arc::clone(&state),
         ),
         InferenceFuture::new(Arc::clone(&state)),
-        state.wait_stopped(),
         std::future::pending::<()>(),
+        state.wait_stopped(),
     ));
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
@@ -1211,8 +1211,8 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
             Arc::clone(&state),
         ),
         InferenceFuture::new(Arc::clone(&state)),
-        state.wait_stopped(),
         std::future::pending::<()>(),
+        state.wait_stopped(),
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while reads.load(std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -1264,7 +1264,7 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         ),
         InferenceFuture::new(Arc::clone(&state)),
         std::future::pending::<()>(),
-        std::future::pending::<()>(),
+        state.wait_stopped(),
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !bridge.wait_for_test_waiters(0, 1, Duration::from_millis(1)) {
@@ -1299,7 +1299,7 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
     let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
     state.attach_bridge(Arc::downgrade(&bridge));
     state.finish_business(
-        Ok(Some("application/x-scope-result".to_owned())),
+        Ok(Some("application/x-runtime-cancel-result".to_owned())),
         ChildOutcomeKind::Succeeded,
     );
     state.request_stop();
@@ -1311,11 +1311,11 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
             Arc::clone(&state),
         ),
         InferenceFuture::new(Arc::clone(&state)),
-        state.wait_stopped(),
         std::future::pending::<()>(),
+        state.wait_stopped(),
     ));
     assert_eq!(
-        Some("application/x-scope-result".to_owned()),
+        Some("application/x-runtime-cancel-result".to_owned()),
         result.unwrap()
     );
     assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
