@@ -567,6 +567,83 @@ fn test_scope_admission_rejection_performs_no_io() {
     }
 }
 
+fn assert_opened_provider_session_drops_before_stop_releases_admission(runtime_stop: bool) {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap());
+    let runtime_for_observer = Arc::clone(&runtime);
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let observations = provider.observations();
+    *observations.session_drop_observer.lock().unwrap() = Some(Arc::new(move || {
+        let snapshot = runtime_for_observer.snapshot();
+        let requests = snapshot.admitted_not_started + snapshot.worker_running + snapshot.awaiting_release;
+        (snapshot.reserved_bytes, requests)
+    }));
+    let runtime_for_operation = Arc::clone(&runtime);
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(Arc::clone(&runtime))
+            .build()
+            .unwrap(),
+    );
+    let mut operation = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            let scope = Arc::new(scope);
+            let scope_for_open = Arc::clone(&scope);
+            let runtime_for_hook = Arc::clone(&runtime_for_operation);
+            let provider = provider.with_session_open_hook(Arc::new(move || {
+                if runtime_stop {
+                    let _ = runtime_for_hook.shutdown_blocking(ShutdownMode::Cancel, Duration::ZERO);
+                    assert!(runtime_for_hook.snapshot().cancelling, "runtime cancellation must be scanned before open returns");
+                } else {
+                    let _ = scope_for_open.request_stop(StopReason::UserCancelled);
+                }
+            }));
+            let file_system = provider.async_file_system();
+            detector
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/setup-stop.py"), 4096)
+                .await
+        })
+        .unwrap();
+    let _ = run_ready(operation.wait_outcome()).expect("request outcome should be available");
+    let settlement = run_ready(operation.wait_settlement());
+    let shutdown_report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+    let final_snapshot = runtime.snapshot();
+    let service_report = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let supervisor_report = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+
+    assert_eq!(1, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(1, observations.session_drops.load(Ordering::SeqCst));
+    assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    assert!(
+        observations.session_drop_reserved_bytes.load(Ordering::SeqCst) >= 4096,
+        "opened session must drop while byte capacity remains reserved"
+    );
+    assert!(
+        observations.session_drop_runtime_requests.load(Ordering::SeqCst) > 0,
+        "opened session must drop while its runtime request slot remains held"
+    );
+    assert!(settlement.all_released(), "setup stop should eventually release resources: {settlement:?}");
+    assert!(shutdown_report.worker_stopped, "runtime worker should be joined: {shutdown_report:?}");
+    assert_eq!(0, final_snapshot.reserved_bytes, "runtime bytes should be reclaimed after shutdown");
+    assert_eq!(0, final_snapshot.admitted_not_started + final_snapshot.worker_running + final_snapshot.awaiting_release);
+    assert_eq!(0, service_report.snapshot.active_operations);
+    assert_eq!(0, supervisor_report.snapshot.active_operations);
+}
+
+#[test]
+fn test_scope_stop_drops_opened_provider_session_before_releasing_admission() {
+    assert_opened_provider_session_drops_before_stop_releases_admission(false);
+}
+
+#[test]
+fn test_runtime_stop_drops_opened_provider_session_before_releasing_admission() {
+    assert_opened_provider_session_drops_before_stop_releases_admission(true);
+}
+
 #[test]
 fn test_managed_guide_reuses_detector_for_two_requests() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();

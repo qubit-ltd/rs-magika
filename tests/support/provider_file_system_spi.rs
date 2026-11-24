@@ -69,6 +69,7 @@ pub(crate) struct ProviderFileSystemSpi {
     async_gate: Option<Arc<AsyncProviderGate>>,
     completion_gate: Option<Arc<ProviderReadCompletionGate>>,
     interruption_gate: Option<Arc<ProviderReadCompletionGate>>,
+    session_open_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,6 +282,9 @@ pub(crate) struct ProviderObservations {
     pub(crate) session_read_lengths: Mutex<Vec<usize>>,
     pub(crate) session_read_ranges: Mutex<Vec<(u64, usize)>>,
     pub(crate) session_drops: AtomicUsize,
+    pub(crate) session_drop_reserved_bytes: AtomicUsize,
+    pub(crate) session_drop_runtime_requests: AtomicUsize,
+    pub(crate) session_drop_observer: Mutex<Option<Arc<dyn Fn() -> (usize, usize) + Send + Sync>>>,
     pub(crate) read_bytes: AtomicUsize,
     pub(crate) range_reads: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
@@ -305,6 +309,7 @@ impl ProviderFileSystemSpi {
             async_gate: None,
             completion_gate: None,
             interruption_gate: None,
+            session_open_hook: None,
         }
     }
 
@@ -366,6 +371,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn with_random_access(mut self) -> Self {
         self.random_access = true;
+        self
+    }
+
+    pub(crate) fn with_session_open_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.session_open_hook = Some(hook);
         self
     }
 
@@ -514,6 +524,9 @@ impl FileSystemSpi for ProviderFileSystemSpi {
         }
         let info = OpenedFileInfo::new(FileSystemId::new("magika-test").unwrap(), request.path().clone())
             .with_metadata(self.metadata(request.path()));
+        if let Some(hook) = &self.session_open_hook {
+            hook();
+        }
         Ok(OpenedRandomAccessReader::new(
             info,
             Box::new(ProviderSession {
@@ -598,6 +611,9 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
             }
             let info = OpenedFileInfo::new(FileSystemId::new("magika-test").unwrap(), request.path().clone())
                 .with_metadata(self.metadata(request.path()));
+            if let Some(hook) = &self.session_open_hook {
+                hook();
+            }
             Ok(qubit_fs::spi::OpenedAsyncRandomAccessReader::new(
                 info,
                 Box::new(ProviderSession {
@@ -632,6 +648,11 @@ struct ProviderSession {
 
 impl Drop for ProviderSession {
     fn drop(&mut self) {
+        if let Some(observe) = self.observations.session_drop_observer.lock().unwrap().as_ref() {
+            let (reserved_bytes, runtime_requests) = observe();
+            self.observations.session_drop_reserved_bytes.store(reserved_bytes, Ordering::SeqCst);
+            self.observations.session_drop_runtime_requests.store(runtime_requests, Ordering::SeqCst);
+        }
         self.observations.session_drops.fetch_add(1, Ordering::SeqCst);
     }
 }
