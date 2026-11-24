@@ -46,10 +46,7 @@ pub(crate) fn block_on<F: Future>(future: F, stage: &str) -> F::Output {
             Poll::Ready(output) => return output,
             Poll::Pending => {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                assert!(
-                    !remaining.is_zero(),
-                    "managed operation wait timed out; stage={stage}"
-                );
+                assert!(!remaining.is_zero(), "managed operation wait timed out; stage={stage}");
                 std::thread::park_timeout(remaining);
             }
         }
@@ -65,10 +62,7 @@ fn wait_for_test_gate(gate: &(std::sync::Mutex<bool>, std::sync::Condvar), stage
         assert!(!remaining.is_zero(), "test gate timed out; stage={stage}");
         let (next, timed_out) = ready.wait_timeout(open, remaining).unwrap();
         open = next;
-        assert!(
-            !timed_out.timed_out() || *open,
-            "test gate timed out; stage={stage}"
-        );
+        assert!(!timed_out.timed_out() || *open, "test gate timed out; stage={stage}");
     }
 }
 

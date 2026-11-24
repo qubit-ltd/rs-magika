@@ -10,6 +10,7 @@
 mod async_provider_input;
 mod async_route;
 pub(crate) mod async_sample_bridge;
+mod async_session_read_options;
 mod cooperative_read;
 mod managed_read_observer;
 mod operation_outcome_context;
@@ -26,6 +27,7 @@ mod sync_route;
 pub(crate) mod waker_notify;
 
 pub(crate) use async_provider_input::AsyncProviderInput;
+pub(crate) use async_session_read_options::AsyncSessionReadOptions;
 pub(crate) use managed_read_observer::ManagedReadObserver;
 pub(crate) use operation_outcome_context::INFERENCE_OUTCOME;
 pub(crate) use operation_outcome_context::PROVIDER_OUTCOME;

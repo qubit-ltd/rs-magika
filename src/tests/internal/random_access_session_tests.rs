@@ -65,6 +65,8 @@ use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
 
+use crate::internal::AsyncSessionReadOptions;
+
 const ID: &str = "magika-session-adapter-test";
 
 #[derive(Clone)]
@@ -546,10 +548,9 @@ fn test_async_session_yields_after_sixty_four_ready_short_reads() {
     let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
     *fixture.bytes.write().unwrap() = Arc::from(content.clone());
     let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
-    let mut reader = block_on(filesystem.open_random_access_reader(
-        &Path::parse("/cooperative-session").unwrap(),
-        ReadOptions::default(),
-    ))
+    let mut reader = block_on(
+        filesystem.open_random_access_reader(&Path::parse("/cooperative-session").unwrap(), ReadOptions::default()),
+    )
     .unwrap();
     let mut budget = crate::internal::read_budget::ReadBudget::new(content.len());
     let mut output = vec![0; content.len()];
@@ -559,9 +560,11 @@ fn test_async_session_yields_after_sixty_four_ready_short_reads() {
         &mut budget,
         &mut output,
         0,
-        None,
-        || false,
-        None,
+        AsyncSessionReadOptions {
+            max_segment: None,
+            should_stop: || false,
+            io_in_flight: None,
+        },
     ));
     let wake = Arc::new(ThreadWake {
         thread: std::thread::current(),
@@ -582,10 +585,9 @@ fn test_async_session_stop_after_cooperative_yield_does_not_start_next_read() {
     let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
     *fixture.bytes.write().unwrap() = Arc::from(content.clone());
     let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
-    let mut reader = block_on(filesystem.open_random_access_reader(
-        &Path::parse("/cooperative-stop").unwrap(),
-        ReadOptions::default(),
-    ))
+    let mut reader = block_on(
+        filesystem.open_random_access_reader(&Path::parse("/cooperative-stop").unwrap(), ReadOptions::default()),
+    )
     .unwrap();
     let mut budget = crate::internal::read_budget::ReadBudget::new(content.len());
     let mut output = vec![0; content.len()];
@@ -598,9 +600,11 @@ fn test_async_session_stop_after_cooperative_yield_does_not_start_next_read() {
         &mut budget,
         &mut output,
         0,
-        None,
-        move || should_stop.load(Ordering::Acquire),
-        Some(&io_in_flight),
+        AsyncSessionReadOptions {
+            max_segment: None,
+            should_stop: move || should_stop.load(Ordering::Acquire),
+            io_in_flight: Some(&io_in_flight),
+        },
     ));
     let wake = Arc::new(ThreadWake {
         thread: std::thread::current(),
@@ -611,10 +615,17 @@ fn test_async_session_stop_after_cooperative_yield_does_not_start_next_read() {
 
     assert!(future.as_mut().poll(&mut context).is_pending());
     assert_eq!(64, fixture.attempts.load(Ordering::SeqCst));
-    assert!(!io_in_flight.load(Ordering::Acquire), "cooperative yield must not claim actual I/O");
+    assert!(
+        !io_in_flight.load(Ordering::Acquire),
+        "cooperative yield must not claim actual I/O"
+    );
     stop.store(true, Ordering::Release);
     assert!(matches!(future.as_mut().poll(&mut context), Poll::Ready(Err(_))));
-    assert_eq!(64, fixture.attempts.load(Ordering::SeqCst), "stop after yielding must block read 65");
+    assert_eq!(
+        64,
+        fixture.attempts.load(Ordering::SeqCst),
+        "stop after yielding must block read 65"
+    );
 }
 
 #[test]
@@ -626,8 +637,8 @@ fn test_async_session_yields_before_retry_after_sixty_fourth_ready_interruption(
     }
     pattern.extend([true; 8]);
     pattern.push(false);
-    let fixture = Fixture::new(b"", FileSystemLimit::Unknown)
-        .interrupt_pattern(pattern, Some(FsEffectState::Unchanged));
+    let fixture =
+        Fixture::new(b"", FileSystemLimit::Unknown).interrupt_pattern(pattern, Some(FsEffectState::Unchanged));
     let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
     *fixture.bytes.write().unwrap() = Arc::from(content.clone());
     let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
@@ -644,9 +655,11 @@ fn test_async_session_yields_before_retry_after_sixty_fourth_ready_interruption(
         &mut budget,
         &mut output,
         0,
-        None,
-        || false,
-        None,
+        AsyncSessionReadOptions {
+            max_segment: None,
+            should_stop: || false,
+            io_in_flight: None,
+        },
     ));
     let wake = Arc::new(ThreadWake {
         thread: std::thread::current(),
@@ -678,9 +691,11 @@ fn test_async_session_stops_between_ready_short_reads() {
         &mut budget,
         &mut output,
         0,
-        Some(1),
-        || !fixture.reads.lock().unwrap().is_empty(),
-        None,
+        AsyncSessionReadOptions {
+            max_segment: Some(1),
+            should_stop: || !fixture.reads.lock().unwrap().is_empty(),
+            io_in_flight: None,
+        },
     ));
 
     assert!(
@@ -1093,9 +1108,11 @@ fn test_async_session_cancelled_interruption_does_not_retry() {
         &mut budget,
         &mut [0; 1],
         3,
-        None,
-        || watcher.is_stopped(),
-        None,
+        AsyncSessionReadOptions {
+            max_segment: None,
+            should_stop: || watcher.is_stopped(),
+            io_in_flight: None,
+        },
     ))
     .expect_err("stop after interruption must prevent a retry");
 

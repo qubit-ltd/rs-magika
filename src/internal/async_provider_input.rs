@@ -18,6 +18,7 @@ use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::AsyncRandomAccessReader;
 
+use super::AsyncSessionReadOptions;
 use super::async_route::AsyncRoute;
 use super::managed_read_observer::ManagedReadObserver;
 use super::provider_input::read_async_observed;
@@ -193,14 +194,16 @@ impl AsyncInput for AsyncProviderInput {
                         &mut self.budget,
                         buffer,
                         offset,
-                        *max_segment,
-                        move || {
-                            stop_state
-                                .as_ref()
-                                .is_some_and(|state| !state.try_start_provider_operation())
-                                || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
+                        AsyncSessionReadOptions {
+                            max_segment: *max_segment,
+                            should_stop: move || {
+                                stop_state
+                                    .as_ref()
+                                    .is_some_and(|state| !state.try_start_provider_operation())
+                                    || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
+                            },
+                            io_in_flight: io_in_flight.as_deref(),
                         },
-                        io_in_flight.as_deref(),
                     )
                     .await
                 } else {
@@ -210,9 +213,11 @@ impl AsyncInput for AsyncProviderInput {
                         &mut self.budget,
                         buffer,
                         offset,
-                        *max_segment,
-                        || false,
-                        io_in_flight.as_deref(),
+                        AsyncSessionReadOptions {
+                            max_segment: *max_segment,
+                            should_stop: || false,
+                            io_in_flight: io_in_flight.as_deref(),
+                        },
                     )
                     .await
                 }

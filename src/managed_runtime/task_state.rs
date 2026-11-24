@@ -22,9 +22,9 @@ use qubit_operation::ResourceRef;
 pub(super) use super::admission_gate::AdmissionGate;
 use super::request_resource_scope_guard::RequestResourceScopeGuard;
 use super::task_control::register_waker;
-use crate::internal::waker_notify;
 use super::task_inner::TaskInner;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
+use crate::internal::waker_notify;
 
 /// State observed by both the worker and operation control adapter.
 pub(crate) struct TaskState {

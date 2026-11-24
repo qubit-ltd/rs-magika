@@ -34,8 +34,11 @@ fn test_public_async_content_and_runtime_snapshot() {
     assert_eq!(0, before.admitted_not_started);
     assert_eq!(0, before.worker_running);
 
-    let candidates = block_on(MimeDetectorBackend::guess_from_content_async(&detector, PYTHON), "async content hook")
-        .expect("async content hook should detect the fixture");
+    let candidates = block_on(
+        MimeDetectorBackend::guess_from_content_async(&detector, PYTHON),
+        "async content hook",
+    )
+    .expect("async content hook should detect the fixture");
 
     assert_eq!(vec!["text/x-python"], candidates);
     assert_eq!(
@@ -90,12 +93,10 @@ fn test_public_async_provider_path_hook_completes_operation_child() {
     let file_system = provider.async_file_system();
     let path = Path::parse("/fixture.py").expect("fixture path should parse");
 
-    let (candidates, additional_content) = block_on(MimeDetectorBackend::guess_from_async_provider_path(
-        &detector,
-        &file_system,
-        &path,
-        4096,
-    ), "async provider path hook")
+    let (candidates, additional_content) = block_on(
+        MimeDetectorBackend::guess_from_async_provider_path(&detector, &file_system, &path, 4096),
+        "async provider path hook",
+    )
     .expect("async provider path hook should detect the fixture");
 
     assert_eq!(vec!["text/x-python"], candidates);
@@ -136,12 +137,10 @@ fn test_public_async_provider_path_reports_conditional_open_failure() {
     let file_system = provider.async_file_system();
     let path = Path::parse("/fixture.py").expect("fixture path should parse");
 
-    let error = block_on(MimeDetectorBackend::guess_from_async_provider_path(
-        &detector,
-        &file_system,
-        &path,
-        4096,
-    ), "async provider path open failure")
+    let error = block_on(
+        MimeDetectorBackend::guess_from_async_provider_path(&detector, &file_system, &path, 4096),
+        "async provider path open failure",
+    )
     .expect_err("a failed conditional open should be reported");
     assert!(error.to_string().contains("configured conditional read failure"));
     assert!(observations.opens.load(std::sync::atomic::Ordering::SeqCst) > 0);

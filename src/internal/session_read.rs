@@ -25,6 +25,7 @@ use qubit_fs::read::RandomAccessReader;
 mod internal;
 
 use self::internal::SessionReadStopped;
+use super::AsyncSessionReadOptions;
 use super::cooperative_read::READ_STEPS_PER_POLL;
 use super::cooperative_read::yield_once;
 use super::provider_input::invalid_input;
@@ -193,9 +194,7 @@ async fn read_async_at_retry(
 /// * `budget` - Per-detection cumulative read budget.
 /// * `buffer` - Destination for the requested resource bytes.
 /// * `offset` - Start offset of the requested range.
-/// * `max_segment` - Optional maximum byte count for one session read.
-/// * `should_stop` - Predicate reporting whether the owning request stopped.
-/// * `io_in_flight` - Optional marker set while a provider read is pending.
+/// * `options` - Segmentation, stop, and in-flight settings for the read.
 ///
 /// # Returns
 ///
@@ -212,19 +211,17 @@ pub(crate) async fn read_async_session_with_stop(
     budget: &mut ReadBudget,
     buffer: &mut [u8],
     offset: u64,
-    max_segment: Option<usize>,
-    should_stop: impl Fn() -> bool,
-    io_in_flight: Option<&AtomicBool>,
+    options: AsyncSessionReadOptions<'_, impl Fn() -> bool>,
 ) -> MagikaResult<()> {
     validate_request(length, budget, buffer.len(), offset)?;
-    let segment_limit = max_segment.unwrap_or(usize::MAX);
+    let segment_limit = options.max_segment.unwrap_or(usize::MAX);
     if !buffer.is_empty() && segment_limit == 0 {
         return Err(invalid_input("provider range limit does not permit a nonempty read").into());
     }
     let mut filled = 0;
     let mut completed_steps = 0;
     while filled < buffer.len() {
-        if should_stop() {
+        if (options.should_stop)() {
             return Err(session_read_stopped_io_error().into());
         }
         let step = (buffer.len() - filled).min(segment_limit);
@@ -235,9 +232,9 @@ pub(crate) async fn read_async_session_with_stop(
             reader,
             read_offset,
             &mut buffer[filled..filled + step],
-            &should_stop,
+            &options.should_stop,
             &mut completed_steps,
-            io_in_flight,
+            options.io_in_flight,
         )
         .await?;
         if count == 0 {

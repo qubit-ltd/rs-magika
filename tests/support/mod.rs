@@ -15,9 +15,9 @@ mod real_file_case;
 mod sparse_read_seek;
 mod static_media_stream_classifier;
 
+pub(crate) use async_test_driver::join_before;
 pub(crate) use async_test_driver::run_ready;
 pub(crate) use async_test_driver::run_until;
-pub(crate) use async_test_driver::join_before;
 pub(crate) use detector::detector;
 pub(crate) use failing_read_seek::FailingReadSeek;
 pub(crate) use operation_helpers::ShutdownBlocking;

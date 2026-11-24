@@ -425,7 +425,7 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
             "scope-less capacity holder completion",
             Duration::from_secs(5),
         )
-            .map(|(candidates, _)| candidates.into_iter().next())
+        .map(|(candidates, _)| candidates.into_iter().next())
     };
     assert!(
         service
@@ -1807,7 +1807,7 @@ fn test_provider_completion_gate_observes_notification_before_wait_registration(
             "provider read after completion gate release",
             Duration::from_secs(5),
         )
-            .expect("provider read should resume after gate release")
+        .expect("provider read should resume after gate release")
     );
 }
 
@@ -2740,11 +2740,7 @@ fn test_magika_managed_and_legacy_cancel_at_sixty_fourth_read_completion() {
                 "cancellation must not start a 65th read"
             );
             completion_gate.release();
-            let business_result = join_before(
-                hook,
-                "legacy cancellation completion",
-                Duration::from_secs(5),
-            );
+            let business_result = join_before(hook, "legacy cancellation completion", Duration::from_secs(5));
             assert!(
                 business_result.is_err(),
                 "legacy cancellation should fail the business request: {business_result:?}"
@@ -2869,11 +2865,7 @@ fn test_magika_managed_and_legacy_cancel_before_second_legacy_range() {
                 "cancellation must not open another legacy range"
             );
             completion_gate.release();
-            let business_result = join_before(
-                hook,
-                "legacy cancellation completion",
-                Duration::from_secs(5),
-            );
+            let business_result = join_before(hook, "legacy cancellation completion", Duration::from_secs(5));
             assert!(
                 business_result.is_err(),
                 "legacy range cancellation should fail the business request: {business_result:?}"
@@ -3002,7 +2994,7 @@ fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
                     "ready-read legacy cancellation completion",
                     Duration::from_secs(5),
                 )
-                    .expect_err("legacy hook must report runtime cancellation after the ready read");
+                .expect_err("legacy hook must report runtime cancellation after the ready read");
                 assert!(
                     matches!(error, MimeError::DetectorBackend { ref backend, ref reason }
                         if backend == "magika" && reason == "provider inference stopped"),
@@ -3683,7 +3675,11 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         Ok(outcome) => Ok(outcome),
         Err(()) => run_until(operation.wait_outcome(), Duration::from_secs(3)),
     };
-    join_before(shutdown_thread, "pending provider shutdown report", Duration::from_secs(5));
+    join_before(
+        shutdown_thread,
+        "pending provider shutdown report",
+        Duration::from_secs(5),
+    );
     drop(detector);
     let settlement_after_last_runtime_drop = if cancelled_bridge_exited_while_pending {
         run_until(observer.wait_settlement(), Duration::from_secs(2))

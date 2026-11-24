@@ -12,6 +12,10 @@ use std::task::Waker;
 
 /// Wakes one task while preventing an external waker panic from interrupting
 /// the caller's state transition or cleanup.
+///
+/// # Parameters
+///
+/// - `waker`: The task waker to invoke.
 pub(crate) fn wake(waker: Waker) {
     let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| waker.wake())) else {
         return;
@@ -22,6 +26,10 @@ pub(crate) fn wake(waker: Waker) {
 /// Wakes a task by reference while containing external waker panics.
 ///
 /// Returns whether the external waker completed without panicking.
+///
+/// # Parameters
+///
+/// - `waker`: The task waker to invoke without consuming it.
 pub(crate) fn wake_by_ref(waker: &Waker) -> bool {
     let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| waker.wake_by_ref())) else {
         return true;
@@ -31,6 +39,10 @@ pub(crate) fn wake_by_ref(waker: &Waker) -> bool {
 }
 
 /// Wakes every task, continuing after a faulty external waker.
+///
+/// # Parameters
+///
+/// - `wakers`: The task wakers to invoke.
 pub(crate) fn wake_all(wakers: impl IntoIterator<Item = Waker>) {
     for waker in wakers {
         wake(waker);
@@ -40,6 +52,10 @@ pub(crate) fn wake_all(wakers: impl IntoIterator<Item = Waker>) {
 /// Drops a caught panic payload without allowing a custom payload destructor
 /// to interrupt notification cleanup. If that destructor panics, forgetting
 /// its second payload stops recursive destructor panics.
+///
+/// # Parameters
+///
+/// - `payload`: The panic payload whose destructor must be contained.
 fn drop_panic_payload(payload: Box<dyn std::any::Any + Send>) {
     if let Err(second_payload) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(payload))) {
         // The second panic is caused by destruction of the first payload. Its
@@ -85,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn wake_all_contains_panicking_waker_and_payload_destructor() {
+    fn test_wake_all_continues_after_panicking_waker_and_payload_destructor() {
         let payload_drops = Arc::new(AtomicUsize::new(0));
         let normal_wakes = Arc::new(AtomicUsize::new(0));
         wake_all([
@@ -97,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn wake_by_ref_contains_panicking_waker_and_payload_destructor() {
+    fn test_wake_by_ref_reports_panicking_waker_and_payload_destructor() {
         let payload_drops = Arc::new(AtomicUsize::new(0));
         let waker = Waker::from(Arc::new(PanickingWake(Arc::clone(&payload_drops))));
         assert!(!wake_by_ref(&waker));

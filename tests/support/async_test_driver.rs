@@ -18,19 +18,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 /// Waits for a spawned test thread to finish before joining it.
-pub(crate) fn join_before<T>(
-    worker: std::thread::JoinHandle<T>,
-    stage: &str,
-    timeout: Duration,
-) -> T {
+pub(crate) fn join_before<T>(worker: std::thread::JoinHandle<T>, stage: &str, timeout: Duration) -> T {
     let deadline = Instant::now() + timeout;
     while !worker.is_finished() && Instant::now() < deadline {
         std::thread::park_timeout(Duration::from_millis(1));
     }
-    assert!(
-        worker.is_finished(),
-        "timed out waiting for test thread; stage={stage}"
-    );
+    assert!(worker.is_finished(), "timed out waiting for test thread; stage={stage}");
     worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 

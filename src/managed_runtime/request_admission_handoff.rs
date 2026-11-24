@@ -19,10 +19,10 @@ use std::task::Waker;
 
 use qubit_mime::MimeError;
 use qubit_operation::OperationScope;
-use crate::internal::waker_notify;
 
 use super::request_admission::RequestAdmission;
 use super::worker_input::WorkerInput;
+use crate::internal::waker_notify;
 mod internal;
 
 pub(crate) use internal::BodyStartOr;
@@ -1109,10 +1109,6 @@ mod tests {
     }
 
     fn block_on<F: std::future::Future>(future: F, stage: &str) -> F::Output {
-        crate::tests::internal::bridge_wait::poll_before(
-            future,
-            stage,
-            std::time::Duration::from_secs(5),
-        )
+        crate::tests::internal::bridge_wait::poll_before(future, stage, std::time::Duration::from_secs(5))
     }
 }

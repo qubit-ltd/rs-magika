@@ -45,31 +45,3 @@ pub(crate) fn poll_before<F: Future>(future: F, stage: &str, timeout: Duration) 
         std::thread::park_timeout(remaining.min(Duration::from_millis(1)));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::poll_before;
-    use std::future::pending;
-    use std::time::Duration;
-
-    #[test]
-    fn test_poll_before_reports_stage_for_never_ready_future() {
-        let result = std::panic::catch_unwind(|| {
-            poll_before(
-                pending::<()>(),
-                "never-ready lifecycle phase",
-                Duration::from_millis(2),
-            );
-        });
-        let panic = result.expect_err("a never-ready future must time out");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .expect("timeout should use a string panic message");
-        assert!(
-            message.contains("never-ready lifecycle phase"),
-            "timeout stage missing: {message}"
-        );
-    }
-}

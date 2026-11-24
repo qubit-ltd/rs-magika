@@ -11,14 +11,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
-use std::sync::mpsc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::task::Context;
 use std::task::Poll;
-use std::task::Waker;
 use std::task::Wake;
+use std::task::Waker;
 use std::time::Duration;
 
 use magika::Error as MagikaError;
@@ -93,7 +93,10 @@ impl Drop for WorkerPanicPayloadProbe {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .is_some_and(|runtime| {
-                runtime.worker.try_lock().is_ok_and(|worker| worker.stopped && worker.panicked)
+                runtime
+                    .worker
+                    .try_lock()
+                    .is_ok_and(|worker| worker.stopped && worker.panicked)
             });
         self.observed_updated_state.store(observed, Ordering::SeqCst);
     }
@@ -3767,8 +3770,15 @@ fn test_normal_worker_result_survives_panicking_waiter_and_releases_capacity() {
         Duration::from_secs(2),
     );
     assert_eq!(Some("text/plain"), first_result.unwrap().as_deref());
-    assert!(normal_wake.0.load(Ordering::SeqCst) > 0, "ordinary result waiter must be notified");
-    assert_eq!(0, runtime.snapshot().reserved_bytes, "first request capacity must be released");
+    assert!(
+        normal_wake.0.load(Ordering::SeqCst) > 0,
+        "ordinary result waiter must be notified"
+    );
+    assert_eq!(
+        0,
+        runtime.snapshot().reserved_bytes,
+        "first request capacity must be released"
+    );
 
     let second = runtime.submit(None, WorkerInput::Bytes(vec![2].into())).unwrap();
     let second_result = crate::tests::internal::bridge_wait::join_before(
@@ -3834,7 +3844,10 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
 
     panic_tx.send(()).unwrap();
     assert!(states[0].wait_worker_done_blocking(Duration::from_secs(2)));
-    assert!(normal_wake.0.load(Ordering::SeqCst) > 0, "ordinary waiter must be notified after panic");
+    assert!(
+        normal_wake.0.load(Ordering::SeqCst) > 0,
+        "ordinary waiter must be notified after panic"
+    );
     assert!(states[1].wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(states[0].wait_released_blocking(Duration::from_secs(2)));
     assert!(
