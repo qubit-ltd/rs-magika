@@ -620,6 +620,21 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         self.guess_from_filename(filename)
     }
 
+    /// Detects MIME candidates from an already extracted native basename.
+    ///
+    /// # Parameters
+    ///
+    /// * basename - Native basename to match without splitting path
+    ///   separators that may be ordinary filename characters.
+    ///
+    /// # Returns
+    ///
+    /// Repository MIME candidates in repository order.
+    #[inline]
+    fn guess_from_filename_basename(&self, basename: &str) -> Vec<String> {
+        MimeDetectorBackend::guess_from_filename_basename(&self.filename_detector, basename)
+    }
+
     /// Detects MIME candidates from complete bytes.
     ///
     /// # Parameters
@@ -990,9 +1005,12 @@ mod tests {
     use qubit_mime::ContentRequirement;
     use qubit_mime::MimeConfig;
     use qubit_mime::MimeContentBackend;
+    use qubit_mime::MimeDetectionPolicy;
     use qubit_mime::MimeDetector;
     use qubit_mime::MimeDetectorBackend;
     use qubit_mime::MimeError;
+    use qubit_mime::MimeRepository;
+    use qubit_mime::RepositoryMimeDetector;
     use qubit_operation::ChildFailureSummary;
     use qubit_operation::ChildOutcomeKind;
     use qubit_operation::ChildOutcomeSummary;
@@ -1105,6 +1123,36 @@ mod tests {
     #[test]
     fn test_undefined_content_is_not_a_candidate() {
         assert_eq!(None, content_type_to_mime(ContentType::Undefined));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_filename_backend_preserves_native_basename_separators() {
+        let repository = Box::leak(Box::new(
+            MimeRepository::from_xml(
+                r#"<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-native-basename">
+    <glob pattern="left\right.mimecase" weight="80"/>
+  </mime-type>
+  <mime-type type="application/x-string-basename">
+    <glob pattern="right.mimecase" weight="50"/>
+  </mime-type>
+</mime-info>"#,
+            )
+            .expect("custom repository should parse"),
+        ));
+        let mut detector = MagikaMimeDetector::new().expect("detector should initialize");
+        detector.filename_detector = RepositoryMimeDetector::with_repository(repository);
+
+        assert_eq!(
+            Some("application/x-native-basename".to_owned()),
+            MimeDetector::detect_file(
+                &detector,
+                std::path::Path::new(r"left\right.mimecase"),
+                MimeDetectionPolicy::PreferFilename,
+            )
+            .expect("filename-preferred native path detection should succeed"),
+        );
     }
 
     #[test]
