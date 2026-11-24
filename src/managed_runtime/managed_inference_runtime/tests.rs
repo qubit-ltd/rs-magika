@@ -33,6 +33,18 @@ use super::ManagedInferenceRuntime;
 use super::WorkerInput;
 use super::worker_loop::execute_classified;
 
+struct ThreadWake(std::thread::Thread);
+
+impl std::task::Wake for ThreadWake {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
 fn map_provider_test_error(_: magika::Error) -> MimeError {
     MimeError::detector_backend("magika", "test input failed")
 }
@@ -486,7 +498,9 @@ fn assert_scope_admission_rollback(stopped: bool) {
         .try_submit(options, move |scope| async move {
             let _held = if stopped { None } else { Some(scope.manage(()).unwrap()) };
             if stopped {
-                let _ = scope.request_stop(StopReason::UserCancelled);
+                let status = scope.request_stop(StopReason::UserCancelled);
+                assert_eq!(status, qubit_operation::StopRequestStatus::Accepted);
+                scope.context().stop_requested().await;
             }
             let error = request_runtime
                 .reserve_for_provider(Some(&scope), 8)
@@ -729,6 +743,251 @@ fn test_borrowed_content_accepted_copies_once() {
     assert!(runtime.byte_budget.try_acquire(8).is_some());
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let engine_gate = Arc::clone(&worker_gate);
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        8,
+        Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            let (lock, changed) = &*engine_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+            Ok(Some("application/x-held".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
+    let admission = runtime.reserve_for_provider(None, 4).unwrap();
+    let request_runtime = Arc::clone(&runtime);
+    let mut request = Box::pin(async move { request_runtime.detect_bytes_admitted(admission, b"data".to_vec()).await });
+    let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    assert!(request.as_mut().poll(&mut context).is_pending());
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown =
+        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime.snapshot().cancelling {
+        assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let cancelled_result = match request.as_mut().poll(&mut context) {
+        Poll::Ready(result) => Some(result),
+        Poll::Pending => None,
+    };
+    let cancelled_before_release = cancelled_result.as_ref().is_some_and(Result::is_err);
+    let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
+    let worker_still_running = runtime.snapshot().worker_running == 1;
+
+    gate_cleanup.release();
+    let result_after_release = if let Some(result) = cancelled_result {
+        result
+    } else {
+        loop {
+            if let Poll::Ready(result) = request.as_mut().poll(&mut context) {
+                break result;
+            }
+            assert!(std::time::Instant::now() < deadline + Duration::from_secs(2));
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    };
+    let report = shutdown.join().unwrap();
+    assert!(
+        cancelled_before_release,
+        "Cancel must end business waiting while worker is gated"
+    );
+    assert!(capacity_still_held, "worker-owned bytes must retain aggregate capacity");
+    assert!(
+        worker_still_running,
+        "worker must still be executing before the gate opens"
+    );
+    let error = result_after_release.unwrap_err();
+    assert!(format!("{error:?}").contains("provider operation stopped after cancellation"));
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let engine_gate = Arc::clone(&worker_gate);
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        8,
+        Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            let (lock, changed) = &*engine_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+            Ok(Some("application/x-held".to_owned()))
+        }),
+        Box::new(|| {}),
+    ));
+    let gate_cleanup = ReleaseWorkerGate(Arc::clone(&worker_gate));
+    let request_runtime = Arc::clone(&runtime);
+    let mut request = Box::pin(async move { request_runtime.detect_content_unmanaged(b"data").await });
+    let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    assert!(request.as_mut().poll(&mut context).is_pending());
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown =
+        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime.snapshot().cancelling {
+        assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let cancelled_result = match request.as_mut().poll(&mut context) {
+        Poll::Ready(result) => Some(result),
+        Poll::Pending => None,
+    };
+    let cancelled_before_release = cancelled_result.as_ref().is_some_and(Result::is_err);
+    let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
+    let worker_still_running = runtime.snapshot().worker_running == 1;
+
+    gate_cleanup.release();
+    let result_after_release = if let Some(result) = cancelled_result {
+        result
+    } else {
+        loop {
+            if let Poll::Ready(result) = request.as_mut().poll(&mut context) {
+                break result;
+            }
+            assert!(std::time::Instant::now() < deadline + Duration::from_secs(2));
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    };
+    let report = shutdown.join().unwrap();
+    assert!(
+        cancelled_before_release,
+        "Cancel must end business waiting while worker is gated"
+    );
+    assert!(capacity_still_held, "worker-owned bytes must retain aggregate capacity");
+    assert!(
+        worker_still_running,
+        "worker must still be executing before the gate opens"
+    );
+    let error = result_after_release.unwrap_err();
+    assert!(format!("{error:?}").contains("provider operation stopped after cancellation"));
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_admitted_bytes_preserve_published_result_when_cancel_follows() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let callback_gate = Arc::clone(&release_gate);
+    let (released_result_tx, released_result_rx) = mpsc::sync_channel(1);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        8,
+        Box::new(|_| Ok(Some("application/x-published".to_owned()))),
+        Box::new(move || {
+            released_result_tx.send(()).unwrap();
+            let (lock, changed) = &*callback_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+        }),
+    ));
+    let gate_cleanup = ReleaseWorkerGate(Arc::clone(&release_gate));
+    let admission = runtime.reserve_for_provider(None, 4).unwrap();
+    let request_runtime = Arc::clone(&runtime);
+    let mut request = Box::pin(async move { request_runtime.detect_bytes_admitted(admission, b"data".to_vec()).await });
+    let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    assert!(request.as_mut().poll(&mut context).is_pending());
+    released_result_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown =
+        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime.snapshot().cancelling {
+        assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let result = loop {
+        if let Poll::Ready(result) = request.as_mut().poll(&mut context) {
+            break result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "published result was not observed"
+        );
+        std::thread::park_timeout(Duration::from_millis(1));
+    };
+    let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
+
+    gate_cleanup.release();
+    let report = shutdown.join().unwrap();
+    assert_eq!(result.unwrap().as_deref(), Some("application/x-published"));
+    assert!(
+        capacity_still_held,
+        "published business result must not release worker-owned bytes"
+    );
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_unmanaged_content_waits_for_worker_settlement_after_business_result() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let callback_gate = Arc::clone(&release_gate);
+    let (business_tx, business_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        8,
+        Box::new(|_| Ok(Some("application/x-settled".to_owned()))),
+        Box::new(move || {
+            business_tx.send(()).unwrap();
+            let (lock, changed) = &*callback_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+        }),
+    ));
+    let gate_cleanup = ReleaseWorkerGate(Arc::clone(&release_gate));
+    let request_runtime = Arc::clone(&runtime);
+    let request = std::thread::spawn(move || {
+        result_tx
+            .send(block_on(request_runtime.detect_content_unmanaged(b"data")))
+            .unwrap();
+    });
+    business_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(result_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    assert!(runtime.byte_budget.try_acquire(8).is_none());
+
+    gate_cleanup.release();
+    assert_eq!(
+        Some("application/x-settled".to_owned()),
+        result_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()
+    );
+    request.join().unwrap();
+    assert!(
+        runtime
+            .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
+            .worker_stopped
+    );
 }
 
 struct ReleaseWorkerGate(Arc<(Mutex<bool>, Condvar)>);
@@ -1677,6 +1936,216 @@ fn test_worker_panic_rejects_previously_admitted_dispatch() {
 }
 
 #[test]
+fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
+    for phase in ["open", "stat", "read_all"] {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let (engine_started_tx, engine_started_rx) = mpsc::sync_channel(1);
+        let (panic_tx, panic_rx) = mpsc::sync_channel(1);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            manager.clone(),
+            16,
+            Box::new(move |_| {
+                engine_started_tx.send(()).unwrap();
+                panic_rx.recv().unwrap();
+                panic!("injected inference worker panic");
+            }),
+            Box::new(|| {}),
+        ));
+
+        let first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
+        engine_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let (provider_started_tx, provider_started_rx) = mpsc::sync_channel(1);
+        let (provider_result_tx, provider_result_rx) = mpsc::sync_channel(1);
+        let (provider_state_tx, provider_state_rx) = mpsc::sync_channel(1);
+        let provider_runtime = Arc::clone(&runtime);
+        let provider = manager
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let mut admission = provider_runtime.reserve_for_provider(Some(&scope), 1)?;
+                provider_state_tx.send(admission.task_state()).unwrap();
+                let io_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let io_for_future = Arc::clone(&io_in_flight);
+                let pending_io = std::future::poll_fn(move |_| {
+                    io_for_future.store(true, std::sync::atomic::Ordering::Release);
+                    let _ = provider_started_tx.try_send(());
+                    Poll::<()>::Pending
+                });
+                let result = if phase == "read_all" {
+                    admission
+                        .run_provider_operation_with_status(&scope, pending_io, io_in_flight)
+                        .await
+                } else {
+                    admission.run_provider_operation(&scope, pending_io).await
+                };
+                provider_result_tx
+                    .send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+                Ok::<_, MimeError>(())
+            })
+            .unwrap();
+        provider_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let provider_state = provider_state_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        panic_tx.send(()).unwrap();
+        let provider_result = provider_result_rx.recv_timeout(Duration::from_secs(2));
+        let promptly_notified = provider_result.is_ok();
+        if !promptly_notified {
+            // Keep the regression failure bounded while allowing the old
+            // implementation to release its pending request during unwind.
+            provider_state.request_stop();
+        }
+        let provider_result = match provider_result {
+            Ok(result) => result,
+            Err(_) => provider_result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        };
+        let provider_error = provider_result.unwrap_err();
+
+        assert!(
+            promptly_notified,
+            "pending {phase} operation was not notified of worker fault"
+        );
+        assert!(
+            provider_error.contains("after worker fault"),
+            "pending {phase} operation should report the worker fault, got: {provider_error}"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !provider_state.inner.lock().unwrap().unconfirmed_provider_io {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pending {phase} operation did not retain its I/O uncertainty"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            provider_state.inner.lock().unwrap().unconfirmed_provider_io,
+            "pending {phase} operation must retain its unconfirmed I/O fact"
+        );
+        assert_eq!(
+            block_on(first).unwrap_err().to_string(),
+            "MIME detector backend 'magika' failed: inference worker panicked",
+            "the request that triggered the panic must retain its original MIME failure"
+        );
+        let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+        assert!(report.worker_stopped);
+        assert!(!report.worker_panicked);
+        let _ = block_on(provider.wait_settlement());
+    }
+}
+
+#[test]
+fn test_worker_panic_wakes_real_pending_provider_path_stages() {
+    use crate::tests::internal::random_access_session_tests::Fixture;
+    use crate::tests::internal::random_access_session_tests::TestAsyncReadGate;
+
+    struct ReleaseOnDrop(Arc<TestAsyncReadGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    for phase in ["open", "stat", "read_all"] {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let service = manager.group(GroupOptions { capacity: 2 }).unwrap();
+        let (engine_started_tx, engine_started_rx) = mpsc::sync_channel(1);
+        let (panic_tx, panic_rx) = mpsc::sync_channel(1);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            manager.clone(),
+            qubit_mime::MimeConfig::default().max_buffer_size(),
+            Box::new(move |_| {
+                engine_started_tx.send(()).unwrap();
+                panic_rx.recv().unwrap();
+                panic!("injected inference worker panic");
+            }),
+            Box::new(|| {}),
+        ));
+        let first = runtime.submit(None, WorkerInput::Bytes(vec![b'a'].into())).unwrap();
+        engine_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let gate = Arc::new(TestAsyncReadGate::new());
+        let _release_gate = ReleaseOnDrop(Arc::clone(&gate));
+        let fixture = match phase {
+            "open" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
+                .with_async_open_gate(Arc::clone(&gate)),
+            "stat" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
+                .without_async_random_access()
+                .with_async_stat_gate(Arc::clone(&gate)),
+            "read_all" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
+                .without_async_random_access()
+                .with_async_stream_read_gate(Arc::clone(&gate)),
+            _ => unreachable!("test stage is enumerated above"),
+        };
+        let file_system = qubit_fs::AsyncFileSystem::from_spi(fixture).unwrap();
+        let detector = Arc::new(
+            crate::MagikaMimeDetector::builder()
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .unwrap(),
+        );
+        let (provider_result_tx, provider_result_rx) = mpsc::sync_channel(1);
+        let provider_detector = Arc::clone(&detector);
+        let mut provider = service
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let result = provider_detector
+                    .detect_async_provider_path_managed(
+                        &scope,
+                        &file_system,
+                        &qubit_fs::Path::parse("/worker-fault/pending-stage").unwrap(),
+                        6,
+                    )
+                    .await;
+                provider_result_tx
+                    .send(result.map(|_| ()).map_err(|error| error.to_string()))
+                    .unwrap();
+                Ok::<_, MimeError>(())
+            })
+            .unwrap();
+
+        gate.wait_until_started(Duration::from_secs(2));
+        let provider_state = runtime
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|state| !state.was_dispatched())
+            .cloned()
+            .expect("pending provider request is registered before dispatch");
+        panic_tx.send(()).unwrap();
+        let provider_error = provider_result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker fault must promptly wake provider I/O")
+            .unwrap_err();
+        assert!(
+            provider_error.contains("after worker fault"),
+            "pending {phase} path should expose the worker fault, got: {provider_error}"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !provider_state.inner.lock().unwrap().unconfirmed_provider_io {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pending {phase} provider I/O did not retain its uncertain state"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            block_on(first).unwrap_err().to_string(),
+            "MIME detector backend 'magika' failed: inference worker panicked",
+            "the worker panic request keeps its original MIME error"
+        );
+        let outcome = block_on(provider.wait_outcome()).unwrap();
+        assert!(matches!(outcome, OperationOutcome::Succeeded(())));
+        let settlement = block_on(provider.wait_settlement());
+        assert!(
+            !settlement.all_released(),
+            "pending {phase} I/O must remain visible as a negative settlement"
+        );
+        assert!(runtime.snapshot().faulted);
+    }
+}
+
+#[test]
 fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
     let (started_tx, started_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -2029,4 +2498,59 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
     assert!(report.worker_panicked);
+}
+
+#[test]
+fn test_shutdown_timeout_observes_joinable_worker_while_admission_is_held() {
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(|_| Ok(None)),
+        Box::new(|| panic!("injected worker exit before first receive")),
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime.worker.lock().unwrap().handle.as_ref().unwrap().is_finished() {
+        assert!(std::time::Instant::now() < deadline, "worker did not exit");
+        std::thread::yield_now();
+    }
+
+    let admission = runtime.reserve_request(None, 4).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let first_runtime = Arc::clone(&runtime);
+    let first_barrier = Arc::clone(&barrier);
+    let first_shutdown = std::thread::spawn(move || {
+        first_barrier.wait();
+        first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(50))
+    });
+    let second_runtime = Arc::clone(&runtime);
+    let second_barrier = Arc::clone(&barrier);
+    let second_shutdown = std::thread::spawn(move || {
+        second_barrier.wait();
+        second_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50))
+    });
+    barrier.wait();
+    let first = first_shutdown.join().unwrap();
+    let second = second_shutdown.join().unwrap();
+
+    assert_eq!(1, first.admission.snapshot.service_resources);
+    assert_eq!(1, second.admission.snapshot.service_resources);
+    assert_eq!(4, runtime.snapshot().reserved_bytes);
+    assert!(runtime.byte_budget.try_acquire(8).is_none());
+    assert!(
+        first.worker_stopped,
+        "first timed-out shutdown must reap the exited worker"
+    );
+    assert!(first.worker_panicked, "join must preserve the escaped panic fact");
+    assert!(
+        second.worker_stopped,
+        "concurrent shutdown must observe the completed join"
+    );
+    assert!(second.worker_panicked, "concurrent shutdown must retain the panic fact");
+
+    drop(admission);
+    let resumed = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+    assert!(resumed.worker_stopped);
+    assert!(resumed.worker_panicked);
+    assert_eq!(0, resumed.admission.snapshot.service_resources);
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
 }

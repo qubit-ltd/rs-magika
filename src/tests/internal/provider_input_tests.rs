@@ -22,9 +22,12 @@ use magika::Error;
 use magika::SyncInput;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
+use qubit_fs::read::ReadIoObserver;
+use qubit_fs::read::ReadIoPhase;
 use qubit_mime::MimeError;
 
 use super::provider_input_fixture::ProviderFileSystemSpi;
+use super::provider_input_fixture::ProviderObservations;
 use crate::internal::AsyncProviderInput;
 use crate::internal::SyncProviderInput;
 use crate::internal::provider_input::copy_exact;
@@ -197,6 +200,50 @@ fn test_async_legacy_provider_reads_bounded_ranges_and_reserves_budget_once() {
         opens_before,
         observations.opens.load(std::sync::atomic::Ordering::SeqCst)
     );
+}
+
+#[test]
+fn test_async_legacy_provider_stops_between_completed_ranges() {
+    let provider = ProviderFileSystemSpi::new(vec![0, 1, 2, 3, 4, 5])
+        .with_range()
+        .with_max_read_range_bytes(2);
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let path = Path::parse("/stop-between-ranges").unwrap();
+    struct StopAfterFirstRange {
+        observations: Arc<ProviderObservations>,
+    }
+    impl ReadIoObserver for StopAfterFirstRange {
+        fn before_io(&mut self, phase: ReadIoPhase) -> std::ops::ControlFlow<()> {
+            if phase == ReadIoPhase::Open && !self.observations.options.lock().unwrap().is_empty() {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        }
+    }
+    let mut observer = StopAfterFirstRange {
+        observations: Arc::clone(&observations),
+    };
+    let mut budget = crate::internal::read_budget::ReadBudget::new(4);
+    let mut output = [0; 4];
+
+    let result = run_ready(crate::internal::provider_input::read_async_observed(
+        &file_system,
+        &path,
+        6,
+        None,
+        &mut budget,
+        &mut output,
+        0,
+        &mut observer,
+    ));
+
+    assert!(
+        result.is_err(),
+        "stop after one completed range must prevent the next range"
+    );
+    assert_eq!(1, observations.options.lock().unwrap().len());
 }
 
 #[test]

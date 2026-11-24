@@ -23,6 +23,7 @@ use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
 use qubit_operation::OperationOutcome;
+use qubit_operation::ScopeLimits;
 use qubit_operation::ShutdownMode;
 use qubit_operation::StopReason;
 
@@ -271,4 +272,62 @@ fn test_public_managed_bytes_worker_panic_is_mime_failure() {
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
     assert!(!report.worker_panicked);
+}
+
+#[test]
+fn test_public_managed_bytes_reuses_parent_resource_quotas_after_settlement() {
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let group = manager.group(GroupOptions { capacity: 4 }).unwrap();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        manager.clone(),
+        16,
+        Box::new(|_| Ok(Some("application/x-quota".to_owned()))),
+        Box::new(|| {}),
+    ));
+    let request_runtime = Arc::clone(&runtime);
+    let mut parent = group
+        .as_async()
+        .try_submit(
+            OperationOptions {
+                limits: ScopeLimits {
+                    resources: 1,
+                    resource_scopes: 1,
+                    ..ScopeLimits::default()
+                },
+                ..OperationOptions::default()
+            },
+            move |scope| async move {
+                for _ in 0..2 {
+                    let child_runtime = Arc::clone(&request_runtime);
+                    let mut request = scope
+                        .manager()
+                        .as_async()
+                        .try_submit(OperationOptions::default(), move |child_scope| async move {
+                            child_runtime.detect_bytes(&child_scope, b"sample".to_vec()).await
+                        })
+                        .expect("managed bytes wrapper should be admitted");
+                    assert!(matches!(
+                        request.wait_outcome().await.unwrap(),
+                        OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-quota"
+                    ));
+                    let settlement = request.wait_settlement().await;
+                    assert!(
+                        settlement.all_released()
+                            && settlement.children.iter().all(|child| child.settlement.all_released()),
+                        "managed bytes request and nested inference resources must be released before reuse: {settlement:?}"
+                    );
+                }
+                Ok::<_, MimeError>(())
+            },
+        )
+        .unwrap();
+
+    assert!(matches!(
+        block_on(parent.wait_outcome()).unwrap(),
+        OperationOutcome::Succeeded(())
+    ));
+    assert!(block_on(parent.wait_settlement()).all_released());
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
 }

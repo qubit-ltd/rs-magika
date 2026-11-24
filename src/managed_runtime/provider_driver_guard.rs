@@ -31,6 +31,8 @@ pub(super) struct ProviderDriverGuard<I> {
     pub(super) state: Arc<TaskState>,
     /// Whether a polled provider read has not yet returned `Ready`.
     pub(super) unconfirmed_io: AtomicBool,
+    /// Optional actual-provider I/O state exposed by an aggregate reader.
+    pub(super) io_in_flight: Option<Arc<AtomicBool>>,
 }
 
 impl<I> ProviderDriverGuard<I> {
@@ -41,12 +43,45 @@ impl<I> ProviderDriverGuard<I> {
     /// * `input` - Provider input used to fulfill worker read requests.
     /// * `driver` - Bridge driver returned by the successful dispatch.
     /// * `state` - Request state whose driver completion is reported on drop.
+    ///
+    /// # Returns
+    ///
+    /// A guard that releases the input and driver when sampling completes.
+    #[cfg(test)]
     pub(super) fn new(input: I, driver: AsyncSampleDriver, state: Arc<TaskState>) -> Self {
+        Self::new_with_io_status(input, driver, state, None)
+    }
+
+    /// Creates a guard that distinguishes real provider Pending from yields.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `I` - Provider input held while the bridge driver is active.
+    ///
+    /// # Parameters
+    ///
+    /// * `input` - Provider input used to fulfill worker read requests.
+    /// * `driver` - Bridge driver returned by the successful dispatch.
+    /// * `state` - Request state notified when the bridge driver completes.
+    /// * `io_in_flight` - Optional marker for actual I/O status reported by an
+    ///   aggregate reader.
+    ///
+    /// # Returns
+    ///
+    /// A guard that retains input resources while provider I/O is unconfirmed
+    /// and releases them after confirmed completion.
+    pub(super) fn new_with_io_status(
+        input: I,
+        driver: AsyncSampleDriver,
+        state: Arc<TaskState>,
+        io_in_flight: Option<Arc<AtomicBool>>,
+    ) -> Self {
         Self {
             input: Some(input),
             driver: Some(driver),
             state,
             unconfirmed_io: AtomicBool::new(false),
+            io_in_flight,
         }
     }
 }
@@ -55,6 +90,13 @@ impl<I> ProviderDriverGuard<I> {
 impl<I> Drop for ProviderDriverGuard<I> {
     /// Drops owned provider resources and records only confirmed completion.
     fn drop(&mut self) {
+        if self
+            .io_in_flight
+            .as_ref()
+            .is_some_and(|status| status.load(Ordering::Acquire))
+        {
+            self.unconfirmed_io.store(true, Ordering::Relaxed);
+        }
         // The read future is scoped inside the driver loop and drops before
         // this owner. Drop the input before closing the bridge, then publish
         // completion only when no provider-native work is unconfirmed.

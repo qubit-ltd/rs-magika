@@ -56,6 +56,7 @@ pub(crate) struct ProviderFileSystemSpi {
     max_read_range_bytes: Option<u64>,
     conditional: bool,
     short_read: bool,
+    one_byte_reads: bool,
     fail_conditional_on_open: Option<usize>,
     observations: Arc<ProviderObservations>,
 }
@@ -63,6 +64,7 @@ pub(crate) struct ProviderFileSystemSpi {
 #[derive(Default)]
 pub(crate) struct ProviderObservations {
     pub(crate) opens: AtomicUsize,
+    pub(crate) read_bytes: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
 }
 
@@ -74,6 +76,7 @@ impl ProviderFileSystemSpi {
             max_read_range_bytes: None,
             conditional: false,
             short_read: false,
+            one_byte_reads: false,
             fail_conditional_on_open: None,
             observations: Arc::new(ProviderObservations::default()),
         }
@@ -91,6 +94,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn short_reads(mut self) -> Self {
         self.short_read = true;
+        self
+    }
+
+    pub(crate) fn one_byte_reads(mut self) -> Self {
+        self.one_byte_reads = true;
         self
     }
 
@@ -191,7 +199,14 @@ impl FileSystemSpi for ProviderFileSystemSpi {
 
     fn open_reader(&self, request: OpenReaderRequest<'_>) -> FsResult<OpenedReader> {
         let (info, bytes) = self.open_reader_inner(request)?;
-        Ok(OpenedReader::new(info, Box::new(ProviderReader::new(bytes))))
+        Ok(OpenedReader::new(
+            info,
+            Box::new(ProviderReader::new(
+                bytes,
+                self.one_byte_reads,
+                Arc::clone(&self.observations),
+            )),
+        ))
     }
 }
 
@@ -207,7 +222,14 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
     fn open_reader<'a>(&'a self, request: OpenReaderRequest<'a>) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
         Box::pin(async move {
             let (info, bytes) = self.open_reader_inner(request)?;
-            Ok(OpenedAsyncReader::new(info, Box::new(ProviderReader::new(bytes))))
+            Ok(OpenedAsyncReader::new(
+                info,
+                Box::new(ProviderReader::new(
+                    bytes,
+                    self.one_byte_reads,
+                    Arc::clone(&self.observations),
+                )),
+            ))
         })
     }
 }
@@ -215,17 +237,28 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
 struct ProviderReader {
     bytes: Vec<u8>,
     position: usize,
+    one_byte_reads: bool,
+    observations: Arc<ProviderObservations>,
 }
 
 impl ProviderReader {
-    fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes, position: 0 }
+    fn new(bytes: Vec<u8>, one_byte_reads: bool, observations: Arc<ProviderObservations>) -> Self {
+        Self {
+            bytes,
+            position: 0,
+            one_byte_reads,
+            observations,
+        }
     }
 
     fn read_bytes(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        let count = output.len().min(self.bytes.len().saturating_sub(self.position));
+        let count = output
+            .len()
+            .min(self.bytes.len().saturating_sub(self.position))
+            .min(if self.one_byte_reads { 1 } else { usize::MAX });
         output[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
         self.position += count;
+        self.observations.read_bytes.fetch_add(count, Ordering::SeqCst);
         Ok(count)
     }
 }

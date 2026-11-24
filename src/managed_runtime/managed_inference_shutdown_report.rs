@@ -17,10 +17,17 @@ use qubit_operation::ShutdownReport;
 /// Use [`super::ManagedInferenceRuntime::snapshot`] for a best-effort domain
 /// view.
 ///
-/// A timeout can leave `worker_stopped` false while the runtime retains the
-/// worker handle. Call shutdown again to observe and reap the worker after it
-/// exits; shutdown does not forcibly interrupt native inference or provider
-/// I/O.
+/// `worker_stopped` reports the worker join only; it is independent of
+/// admission and provider settlement. It may be true while an unconfirmed
+/// provider request still retains capacity. A false value means shutdown has
+/// not observed a completed join; the runtime retains the handle so a later
+/// shutdown call can continue observing and reap it. Shutdown does not
+/// forcibly interrupt native inference or provider I/O.
+///
+/// `worker_panicked` records an uncaught panic reported by joining the
+/// worker. A panic caught during inference instead marks the runtime's
+/// [`super::ManagedInferenceSnapshot::faulted`] state and is surfaced as a
+/// detector error; it does not itself set `worker_panicked`.
 #[derive(Clone, Debug)]
 pub struct ManagedInferenceShutdownReport {
     /// Service-group request and resource facts.

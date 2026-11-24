@@ -20,12 +20,13 @@ use qubit_operation::ChildOutcomeKind;
 use qubit_operation::ResourceRef;
 
 pub(super) use super::admission_gate::AdmissionGate;
+use super::request_resource_scope_guard::RequestResourceScopeGuard;
 use super::task_control::register_waker;
 use super::task_inner::TaskInner;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 
 /// State observed by both the worker and operation control adapter.
-pub(super) struct TaskState {
+pub(crate) struct TaskState {
     /// Stable identity attached to the managed child report.
     pub(super) operation_id: u64,
     /// Mutable result and lifecycle facts.
@@ -40,6 +41,8 @@ pub(super) struct TaskState {
     /// User reference to the scope-owned cleanup record, dropped after local
     /// worker and driver access ends.
     scope_resource: std::sync::Mutex<Option<ResourceRef<Arc<super::request_resource_owner::RequestResourceOwner>>>>,
+    /// Attached one-request scope ended when local request access completes.
+    request_scope: std::sync::Mutex<Option<RequestResourceScopeGuard>>,
     /// Weak back-reference lets aggregate release prune the runtime's strong
     /// registry.
     active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
@@ -86,6 +89,7 @@ impl TaskState {
             bridge: std::sync::Mutex::new(bridge),
             owner: std::sync::Mutex::new(None),
             scope_resource: std::sync::Mutex::new(None),
+            request_scope: std::sync::Mutex::new(None),
             active_tasks,
             admission_gate,
         }
@@ -127,7 +131,7 @@ impl TaskState {
     }
 
     /// Reports whether the worker should skip or stop this job.
-    pub(super) fn stop_requested(&self) -> bool {
+    pub(crate) fn stop_requested(&self) -> bool {
         self.inner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -141,6 +145,16 @@ impl TaskState {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .access_complete
+    }
+
+    /// Records that this request's input is owned by the worker queue.
+    pub(super) fn mark_dispatched(&self) {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner()).dispatched = true;
+    }
+
+    /// Reports whether the worker queue can deliver this request's result.
+    pub(super) fn was_dispatched(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner()).dispatched
     }
 
     /// Polls whether stop was requested, registering the caller under the
@@ -217,6 +231,11 @@ impl TaskState {
     ) {
         *self.owner.lock().unwrap_or_else(|error| error.into_inner()) = Some(owner);
         *self.scope_resource.lock().unwrap_or_else(|error| error.into_inner()) = scope_resource;
+    }
+
+    /// Attaches the one-request cleanup scope to this task lifecycle.
+    pub(super) fn attach_request_scope(&self, scope: RequestResourceScopeGuard) {
+        *self.request_scope.lock().unwrap_or_else(|error| error.into_inner()) = Some(scope);
     }
 
     /// Clones the request owner while it remains attached to this task.
@@ -337,6 +356,14 @@ impl TaskState {
         wake_all(wakers);
         self.released.notify_all();
         let owner = self.owner.lock().unwrap_or_else(|error| error.into_inner()).take();
+        let mut request_scope = self
+            .request_scope
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(scope) = request_scope.as_mut() {
+            scope.end();
+        }
         let scope_resource = self
             .scope_resource
             .lock()
@@ -362,6 +389,14 @@ impl TaskState {
         };
         wake_all(wakers);
         self.released.notify_all();
+        let mut request_scope = self
+            .request_scope
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(scope) = request_scope.as_mut() {
+            scope.end();
+        }
         let scope_resource = self
             .scope_resource
             .lock()

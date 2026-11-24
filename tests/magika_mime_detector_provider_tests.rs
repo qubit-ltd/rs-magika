@@ -16,8 +16,6 @@ use qubit_mime::MediaStreamType;
 #[cfg(any(feature = "bundled-onnxruntime", feature = "inventory"))]
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorRegistry;
-#[cfg(feature = "inventory")]
-use qubit_operation::GroupOptions;
 #[cfg(feature = "bundled-onnxruntime")]
 use qubit_operation::ManagerOptions;
 #[cfg(any(feature = "bundled-onnxruntime", feature = "inventory"))]
@@ -52,7 +50,11 @@ fn test_magika_mime_detector_provider_metadata_and_registration() {
 
     assert_eq!(
         vec!["magika"],
-        registry.provider_ids().iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        registry
+            .provider_ids()
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -64,7 +66,8 @@ fn test_provider_shared_runtime_explicit_registry_registration() {
 
     use qubit_operation::ShutdownMode;
 
-    let manager = OperationManager::new(ManagerOptions::default()).expect("operation manager should initialize");
+    let manager = OperationManager::new(ManagerOptions::default())
+        .expect("operation manager should initialize");
     let runtime = Arc::new(
         ManagedInferenceRuntime::new(manager, MimeConfig::default().max_buffer_size())
             .expect("managed runtime should initialize"),
@@ -175,20 +178,30 @@ fn test_global_registry_resolve_explicit_and_default_then_create() {
 #[cfg(feature = "inventory")]
 #[test]
 fn test_magika_provider_is_discovered_with_repository_default() {
+    use qubit_operation_registry::GroupOptions;
+    use qubit_operation_registry::OperationManager;
+
     let registry = MimeDetectorRegistry::builtin();
-    assert!(registry.provider_ids().iter().any(|id| id.as_str() == "magika"));
+    assert!(
+        registry
+            .provider_ids()
+            .iter()
+            .any(|id| id.as_str() == "magika")
+    );
     assert_eq!(
         qubit_spi::ProviderSelection::named("repository").expect("valid repository ID"),
         registry.default_selection(),
     );
     for selector in ["magika", "magika-mime-detector", "magikamimedetector"] {
-        let selection = qubit_spi::ProviderSelection::named(selector).expect("valid Magika selector");
+        let selection =
+            qubit_spi::ProviderSelection::named(selector).expect("valid Magika selector");
         registry
             .resolve_selected(&selection)
             .expect("Magika selector should resolve");
     }
 
-    let manager = OperationManager::new(Default::default()).expect("operation manager should initialize");
+    let manager =
+        OperationManager::new(Default::default()).expect("operation manager should initialize");
     let group = manager
         .group(GroupOptions { capacity: 1 })
         .expect("operation group should initialize");
@@ -204,8 +217,24 @@ fn test_magika_provider_is_discovered_with_repository_default() {
         registry.create_async_backend(&magika, &MimeConfig::default(), &services),
         Err(qubit_mime::MimeError::AsyncUnsupported),
     ));
-    let repository = qubit_spi::ProviderSelection::named("repository").expect("valid repository selector");
+    let repository =
+        qubit_spi::ProviderSelection::named("repository").expect("valid repository selector");
     registry
         .create_async_backend(&repository, &MimeConfig::default(), &services)
         .expect("registered async repository provider should create a backend");
+}
+
+/// An inventory-linked global provider cannot be registered a second time.
+#[cfg(feature = "inventory")]
+#[test]
+fn test_inventory_provider_rejects_duplicate_global_registration() {
+    let error = MimeDetectorRegistry::global()
+        .register(MagikaMimeDetectorProvider::new())
+        .expect_err("inventory-linked Magika provider should already own its selectors");
+
+    assert!(matches!(
+        error,
+        qubit_spi::error::RegistryMutationError::DuplicateSelector { ref selector, .. }
+            if selector.as_ref() == "magika"
+    ));
 }

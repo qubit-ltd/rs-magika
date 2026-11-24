@@ -11,6 +11,7 @@ use std::future::Future;
 use std::future::poll_fn;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
@@ -48,6 +49,7 @@ use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 use super::worker_input::worker_bytes;
+use crate::internal::AsyncProviderInput;
 use crate::internal::INFERENCE_OUTCOME;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 use crate::internal::map_operation_outcome;
@@ -208,6 +210,8 @@ impl ManagedInferenceRuntime {
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let worker_tasks = Arc::clone(&tasks);
         let worker = match std::thread::Builder::new()
             .name("magika-inference".to_owned())
             .spawn(move || {
@@ -225,6 +229,7 @@ impl ManagedInferenceRuntime {
                     receiver,
                     worker_admission_gate,
                     |input| infer_input(&mut session, input),
+                    move |faulted| notify_unqueued_provider_tasks(&worker_tasks, faulted),
                     || {},
                     || {},
                 );
@@ -265,7 +270,7 @@ impl ManagedInferenceRuntime {
             active_requests: Arc::new(AtomicUsize::new(0)),
             max_in_flight_bytes,
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
-            tasks: Arc::new(Mutex::new(Vec::new())),
+            tasks,
             admission_gate,
         })
     }
@@ -404,7 +409,9 @@ impl ManagedInferenceRuntime {
             WorkerInput::Bridge(_, limit, _) => *limit,
             WorkerInput::Features(_, _) => 0,
         };
-        let admission = self.reserve_request(parent, byte_count)?;
+        // The request scope is registered inside the accepted child body,
+        // after submission succeeds and before that body dispatches work.
+        let admission = self.reserve_request(None, byte_count)?;
         self.submit_operation_admitted(parent, admission, input).await
     }
 
@@ -456,16 +463,48 @@ impl ManagedInferenceRuntime {
         before_submit: impl FnOnce(),
     ) -> MimeResult<Option<String>> {
         let runtime = Arc::clone(self);
+        let cancellation_won = Arc::new(AtomicBool::new(false));
+        let body_cancellation_won = Arc::clone(&cancellation_won);
+        let state = Arc::clone(&admission.state);
+        let (request_handoff, mut request_handoff_guard, body_admission) = match parent {
+            Some(_) => {
+                let (handoff, guard) = super::request_admission_handoff::RequestAdmissionHandoff::new(admission);
+                (Some(handoff), Some(guard), None)
+            }
+            None => (None, None, Some(admission)),
+        };
+        let body_handoff = request_handoff.as_ref().map(Arc::clone);
         let body = move |scope| async move {
-            let mut admission = admission;
-            admission.retain_in_scope(&scope)?;
+            let admission = if let Some(handoff) = body_handoff {
+                handoff.body_started();
+                match handoff.wait_for_child_admission(&scope).await {
+                    Some(Ok(admission)) => admission,
+                    Some(Err(error)) => return Err(error),
+                    None => {
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            "request admission handoff closed before registration",
+                        ));
+                    }
+                }
+            } else {
+                let mut admission = body_admission.expect("scope-less request retains its admission");
+                admission.retain_in_scope(&scope)?;
+                admission
+            };
             let mut inference = Box::pin(runtime.dispatch(admission, input)?);
             let mut stop = Box::pin(scope.context().stop_requested());
+            let mut request_stop = Box::pin(state.wait_stopped());
             poll_fn(|cx: &mut Context<'_>| {
-                if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", "inference stopped")));
+                if let Poll::Ready(result) = inference.as_mut().poll(cx) {
+                    return Poll::Ready(result);
                 }
-                inference.as_mut().poll(cx)
+                if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
+                    body_cancellation_won.store(true, std::sync::atomic::Ordering::Release);
+                    state.request_stop();
+                    return Poll::Ready(Err(MimeError::detector_backend("magika", state.provider_stop_reason())));
+                }
+                Poll::Pending
             })
             .await
         };
@@ -482,10 +521,22 @@ impl ManagedInferenceRuntime {
             None => self.service_group.as_async().try_submit(options, body),
         }
         .map_err(|error| MimeError::detector_backend("magika", format!("operation submission failed: {error:?}")))?;
-        let outcome = operation.wait_outcome().await.map_err(|error| {
+        let outcome_result = {
+            let mut outcome = Box::pin(operation.wait_outcome());
+            match (parent, request_handoff.as_ref(), request_handoff_guard.as_mut()) {
+                (Some(parent), Some(handoff), Some(guard)) => {
+                    match handoff.register_on_parent(parent, guard, &mut outcome).await {
+                        Some(outcome) => outcome,
+                        None => outcome.await,
+                    }
+                }
+                _ => outcome.await,
+            }
+        };
+        let outcome = outcome_result.map_err(|error| {
             MimeError::detector_backend("magika", format!("operation outcome unavailable: {error:?}"))
         })?;
-        if parent.is_none() {
+        if parent.is_none() && !cancellation_won.load(std::sync::atomic::Ordering::Acquire) {
             // Legacy unmanaged calls have no public handle through which a
             // caller can observe eventual settlement, so return only after
             // this operation's resources have actually been released.
@@ -543,17 +594,14 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns provider, admission, Magika, or worker errors.
-    pub(crate) async fn detect_async_input_admitted<I>(
+    pub(crate) async fn detect_async_input_admitted(
         &self,
         scope: &OperationScope,
         mut admission: RequestAdmission,
-        input: I,
+        input: AsyncProviderInput,
         max_bytes: usize,
         map_error: fn(MagikaError) -> MimeError,
-    ) -> MimeResult<Option<String>>
-    where
-        I: AsyncInput + Send + 'static,
-    {
+    ) -> MimeResult<Option<String>> {
         let state = Arc::clone(&admission.state);
         let state_for_stop = Arc::clone(&state);
         let worker = async move {
@@ -570,7 +618,8 @@ impl ManagedInferenceRuntime {
             let bridge = AsyncSampleBridge::new(length);
             let driver = bridge.driver();
             let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-            let guard = ProviderDriverGuard::new(input, driver, state);
+            let io_in_flight = input.io_in_flight();
+            let guard = ProviderDriverGuard::new_with_io_status(input, driver, state, io_in_flight);
             drive_async_input(guard, inference).await
         };
         let mut worker = Box::pin(worker);
@@ -633,8 +682,9 @@ impl ManagedInferenceRuntime {
         admission: RequestAdmission,
         bytes: Vec<u8>,
     ) -> MimeResult<Option<String>> {
-        self.dispatch(admission, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?
-            .await
+        let state = Arc::clone(&admission.state);
+        let inference = self.dispatch(admission, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?;
+        await_inference_or_runtime_stop(inference, state).await
     }
 
     /// Maximum total byte payload retained by running and queued jobs.
@@ -813,6 +863,7 @@ impl ManagedInferenceRuntime {
         }
         let sent_state = {
             let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());
+            admission.state.mark_dispatched();
             match sender.as_ref() {
                 Some(sender) => admission.dispatch(input, sender)?,
                 None => {
@@ -834,11 +885,16 @@ impl ManagedInferenceRuntime {
     ///
     /// # Returns
     ///
-    /// Admission and worker termination facts. A false `worker_stopped` means
-    /// the worker has not exited; its handle remains available for a later
-    /// shutdown call to observe and reap. One deadline covers service
-    /// admission/settlement and worker exit. Shutdown does not forcibly
-    /// interrupt native inference or provider I/O.
+    /// Admission and worker termination facts. `worker_stopped` reports the
+    /// join only and can be true while an unconfirmed provider request still
+    /// retains capacity. False means shutdown has not observed a completed
+    /// join; the worker handle remains available for a later call to continue
+    /// observing and reap. One deadline covers service admission/settlement
+    /// and worker exit. Shutdown does not forcibly interrupt native inference
+    /// or provider I/O. A caught inference panic marks
+    /// [`ManagedInferenceSnapshot::faulted`]; only an uncaught panic
+    /// observed while joining sets
+    /// [`ManagedInferenceShutdownReport::worker_panicked`].
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,
@@ -889,10 +945,11 @@ impl ManagedInferenceRuntime {
                 break;
             }
             if remaining_timeout(deadline).is_zero() {
+                let (worker_stopped, worker_panicked) = self.observe_finished_worker();
                 return ManagedInferenceShutdownReport {
                     admission,
-                    worker_stopped: false,
-                    worker_panicked: false,
+                    worker_stopped,
+                    worker_panicked,
                 };
             }
             std::thread::sleep(remaining_timeout(deadline).min(std::time::Duration::from_millis(1)));
@@ -901,40 +958,36 @@ impl ManagedInferenceRuntime {
         self.service_group.close_admission();
         self.sender.lock().unwrap_or_else(|error| error.into_inner()).take();
         loop {
-            let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
-            match worker.handle.as_ref() {
-                Some(handle) if handle.is_finished() => {
-                    let handle = worker.handle.take().expect("finished worker handle is present");
-                    worker.panicked = handle.join().is_err();
-                    worker.stopped = true;
-                    return ManagedInferenceShutdownReport {
-                        admission,
-                        worker_stopped: worker.stopped,
-                        worker_panicked: worker.panicked,
-                    };
-                }
-                Some(_) => {
-                    let panicked = worker.panicked;
-                    drop(worker);
-                    let remaining = remaining_timeout(deadline);
-                    if remaining.is_zero() {
-                        return ManagedInferenceShutdownReport {
-                            admission,
-                            worker_stopped: false,
-                            worker_panicked: panicked,
-                        };
-                    }
-                    std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
-                }
-                None => {
-                    return ManagedInferenceShutdownReport {
-                        admission,
-                        worker_stopped: worker.stopped,
-                        worker_panicked: worker.panicked,
-                    };
-                }
+            let (worker_stopped, worker_panicked) = self.observe_finished_worker();
+            if worker_stopped {
+                return ManagedInferenceShutdownReport {
+                    admission,
+                    worker_stopped,
+                    worker_panicked,
+                };
             }
+            let remaining = remaining_timeout(deadline);
+            if remaining.is_zero() {
+                return ManagedInferenceShutdownReport {
+                    admission,
+                    worker_stopped: false,
+                    worker_panicked,
+                };
+            }
+            std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
         }
+    }
+
+    /// Joins the worker when its thread has already finished and returns the
+    /// facts retained across concurrent and subsequent shutdown calls.
+    fn observe_finished_worker(&self) -> (bool, bool) {
+        let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
+        if worker.handle.as_ref().is_some_and(|handle| handle.is_finished()) {
+            let handle = worker.handle.take().expect("finished worker handle is present");
+            worker.panicked = handle.join().is_err();
+            worker.stopped = true;
+        }
+        (worker.stopped, worker.panicked)
     }
 
     /// Captures the runtime group and local request counts.
@@ -955,6 +1008,53 @@ impl ManagedInferenceRuntime {
             },
         }
     }
+}
+
+/// Wakes accepted provider operations whose input has not reached the worker.
+///
+/// # Parameters
+///
+/// * `tasks` - Runtime-local active request registry.
+/// * `faulted` - Request whose inference panic closed worker delivery.
+pub(super) fn notify_unqueued_provider_tasks(tasks: &Mutex<Vec<Arc<TaskState>>>, faulted: &Arc<TaskState>) {
+    let waiting = tasks.lock().unwrap_or_else(|error| error.into_inner()).clone();
+    for task in waiting {
+        if !Arc::ptr_eq(&task, faulted) && !task.was_dispatched() {
+            task.request_stop();
+        }
+    }
+}
+
+/// Observes a published worker result or runtime cancellation, whichever is
+/// observed first. The inference future retains its stop control; dropping it
+/// on cancellation requests worker stop while the worker continues to own its
+/// input and admission resources until access is complete.
+///
+/// # Parameters
+///
+/// * `inference` - Worker result future retained until result or stop is
+///   observed.
+/// * `state` - Request lifecycle state used to observe runtime stop.
+///
+/// # Returns
+///
+/// The MIME result, or a backend error when runtime stop wins.
+async fn await_inference_or_runtime_stop(
+    inference: InferenceFuture,
+    state: Arc<TaskState>,
+) -> MimeResult<Option<String>> {
+    let mut inference = Box::pin(inference);
+    let mut stopped = Box::pin(state.wait_stopped());
+    poll_fn(|context| {
+        if let Poll::Ready(result) = inference.as_mut().poll(context) {
+            return Poll::Ready(result);
+        }
+        if stopped.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Err(MimeError::detector_backend("magika", state.provider_stop_reason())));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// Computes the time left before a shared shutdown deadline.
@@ -1078,12 +1178,25 @@ where
                     if stopped.as_mut().poll(cx).is_ready() || closed.as_mut().poll(cx).is_ready() {
                         return Poll::Ready(None);
                     }
-                    guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
-                    if let Poll::Ready(result) = read.as_mut().poll(cx) {
-                        guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
-                        return Poll::Ready(Some(result));
+                    if guard.io_in_flight.is_none() {
+                        guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
-                    Poll::Pending
+                    match read.as_mut().poll(cx) {
+                        Poll::Ready(result) => {
+                            guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
+                            Poll::Ready(Some(result))
+                        }
+                        Poll::Pending => {
+                            let pending = guard
+                                .io_in_flight
+                                .as_ref()
+                                .map_or(true, |status| status.load(std::sync::atomic::Ordering::Acquire));
+                            guard
+                                .unconfirmed_io
+                                .store(pending, std::sync::atomic::Ordering::Relaxed);
+                            Poll::Pending
+                        }
+                    }
                 })
                 .await;
                 let Some(read_result) = read_result else {

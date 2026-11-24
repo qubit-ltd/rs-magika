@@ -8,6 +8,8 @@
 //! Asynchronous provider-backed input for Magika feature extraction.
 
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use magika::AsyncInput;
 use magika::Result as MagikaResult;
@@ -17,9 +19,13 @@ use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::AsyncRandomAccessReader;
 
 use super::async_route::AsyncRoute;
-use super::provider_input::read_async;
+use super::managed_read_observer::ManagedReadObserver;
+use super::provider_input::read_async_observed;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
+use super::session_read::read_async_session_with_stop;
+use super::stop_watcher::StopWatcher;
+use crate::managed_runtime::task_state::TaskState;
 
 /// Adapts asynchronous filesystem ranges to Magika's random-access input.
 pub(crate) struct AsyncProviderInput {
@@ -31,6 +37,12 @@ pub(crate) struct AsyncProviderInput {
     version: Option<ResourceVersion>,
     /// Cumulative limit shared by all reads in one detection.
     budget: ReadBudget,
+    /// Managed request state used to stop between confirmed session I/Os.
+    stop_state: Option<Arc<TaskState>>,
+    /// Scope stop state read directly between aggregate provider I/Os.
+    stop_watcher: Option<Arc<StopWatcher>>,
+    /// Tracks actual provider futures, excluding aggregate scheduling yields.
+    io_in_flight: Option<Arc<AtomicBool>>,
 }
 
 impl AsyncProviderInput {
@@ -56,6 +68,9 @@ impl AsyncProviderInput {
             length,
             version,
             budget: ReadBudget::new(limit),
+            stop_state: None,
+            stop_watcher: None,
+            io_in_flight: Some(Arc::new(AtomicBool::new(false))),
         }
     }
 
@@ -78,7 +93,48 @@ impl AsyncProviderInput {
             length,
             version: None,
             budget: ReadBudget::new(limit),
+            stop_state: None,
+            stop_watcher: None,
+            io_in_flight: None,
         }
+    }
+
+    /// Observes request cancellation between confirmed provider session reads.
+    ///
+    /// # Parameters
+    ///
+    /// * `state` - Runtime state that is set when this request is cancelled.
+    ///
+    /// # Returns
+    ///
+    /// This input configured to stop before later session reads.
+    pub(crate) fn with_stop_state(mut self, state: Arc<TaskState>) -> Self {
+        self.stop_state = Some(state);
+        self
+    }
+
+    /// Observes operation-scope cancellation between provider operations.
+    ///
+    /// # Parameters
+    ///
+    /// * `watcher` - Scope cancellation state checked at each I/O boundary.
+    ///
+    /// # Returns
+    ///
+    /// This input configured to stop before later provider I/O after the
+    /// operation scope accepts cancellation.
+    pub(crate) fn with_stop_watcher(mut self, watcher: Arc<StopWatcher>) -> Self {
+        self.stop_watcher = Some(watcher);
+        self
+    }
+
+    /// Clones the actual-I/O marker for an owned legacy route.
+    ///
+    /// # Returns
+    ///
+    /// `Some` for an owned legacy route and `None` for a session route.
+    pub(crate) fn io_in_flight(&self) -> Option<Arc<AtomicBool>> {
+        self.io_in_flight.as_ref().map(Arc::clone)
     }
 }
 
@@ -108,21 +164,45 @@ impl AsyncInput for AsyncProviderInput {
     /// Returns an I/O error when the range is invalid, exceeds the cumulative
     /// budget, or cannot be read exactly from the provider.
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
+        let stop_state = self.stop_state.as_ref().map(Arc::clone);
+        let stop_watcher = self.stop_watcher.as_ref().map(Arc::clone);
         match &mut self.route {
             AsyncRoute::OwnedLegacy { file_system, path } => {
-                read_async(
-                    file_system,
-                    path,
-                    self.length,
-                    self.version.as_ref(),
-                    &mut self.budget,
-                    buffer,
-                    offset,
-                )
-                .await
+                if let Some(io_in_flight) = &self.io_in_flight {
+                    let mut observer = ManagedReadObserver::new(stop_state, Arc::clone(io_in_flight), stop_watcher);
+                    read_async_observed(
+                        file_system,
+                        path,
+                        self.length,
+                        self.version.as_ref(),
+                        &mut self.budget,
+                        buffer,
+                        offset,
+                        &mut observer,
+                    )
+                    .await
+                } else {
+                    unreachable!("owned async provider inputs track observed I/O")
+                }
             }
             AsyncRoute::Session { reader, max_segment } => {
-                read_async_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment).await
+                if stop_state.is_some() || stop_watcher.is_some() {
+                    read_async_session_with_stop(
+                        reader,
+                        self.length,
+                        &mut self.budget,
+                        buffer,
+                        offset,
+                        *max_segment,
+                        move || {
+                            stop_state.as_ref().is_some_and(|state| state.stop_requested())
+                                || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
+                        },
+                    )
+                    .await
+                } else {
+                    read_async_session(reader, self.length, &mut self.budget, buffer, offset, *max_segment).await
+                }
             }
         }
     }

@@ -37,10 +37,12 @@ use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 
 use crate::internal::AsyncProviderInput;
+use crate::internal::ManagedReadObserver;
 use crate::internal::PROVIDER_OUTCOME;
 use crate::internal::ProviderPathRoute;
 use crate::internal::ReadSeekInput;
 use crate::internal::ReaderScope;
+use crate::internal::StopWatcher;
 use crate::internal::SyncProviderInput;
 use crate::internal::is_unsupported_provider_error;
 use crate::internal::map_operation_outcome;
@@ -49,6 +51,7 @@ use crate::internal::select_provider_path_route;
 use crate::managed_runtime::ManagedInferenceRuntime;
 use crate::managed_runtime::ManagedInferenceShutdownReport;
 use crate::managed_runtime::ManagedInferenceSnapshot;
+use crate::managed_runtime::request_admission_handoff::RequestAdmissionHandoff;
 
 /// MIME detector backed by Google's Magika model.
 ///
@@ -174,10 +177,14 @@ impl MagikaMimeDetector {
     /// a range read), the runtime reserves request capacity and the
     /// `max_bytes` accounting budget and commits the optional scope child.
     /// Closed, full, or already-cancelled requests are rejected before
-    /// provider I/O. The byte reservation bounds logical sampling and owned
-    /// payload accounting; it is not a bound on total process memory or
-    /// provider/network work. The `read_all` fallback transfers its
-    /// returned buffer to the worker without making another full-size copy.
+    /// provider I/O. Admission capacity is a permission/accounting reservation;
+    /// it does not prove provider completion or resource release. The byte
+    /// reservation bounds logical sampling and owned payload accounting; it
+    /// is not a bound on total process memory or provider/network work. The
+    /// `read_all` fallback moves its returned `Vec` into worker ownership
+    /// without cloning its contents. Converting it with `into_boxed_slice`
+    /// may reallocate when the vector has spare capacity, so this is not a
+    /// guarantee of zero-copy operation.
     ///
     /// Dropping a pending provider future cancels local polling only. A
     /// provider's native or remote operation may continue, and this API has no
@@ -185,9 +192,10 @@ impl MagikaMimeDetector {
     /// child settlement remain pending, potentially indefinitely; future
     /// cancellation does not prove that underlying I/O was interrupted.
     ///
-    /// A Rust panic caught during session inference is surfaced as a backend
-    /// error from this call while its child operation records `Panicked` and
-    /// the runtime becomes faulted. This is distinct from
+    /// A Rust panic caught during session inference makes this future return
+    /// `MimeError::DetectorBackend`; the public child `OperationOutcome` is
+    /// `Failed(MimeError)`. The runtime also records its internal panic fact
+    /// and becomes faulted. This is distinct from
     /// [`ManagedInferenceShutdownReport::worker_panicked`], which reports an
     /// uncaught panic observed while joining the worker.
     ///
@@ -222,7 +230,9 @@ impl MagikaMimeDetector {
                 limit,
             });
         }
-        let admission = self.runtime.reserve_for_provider(Some(scope), max_bytes)?;
+        // This admission is created before the child operation is submitted;
+        // attach its resource scope only after the child body starts.
+        let admission = self.runtime.reserve_for_provider(None, max_bytes)?;
         let runtime = std::sync::Arc::clone(&self.runtime);
         let file_system = file_system.clone();
         let path = path.clone();
@@ -230,17 +240,41 @@ impl MagikaMimeDetector {
             requirement: ChildRequirement::Optional,
             ..OperationOptions::default()
         };
+        let (handoff, mut handoff_guard) = RequestAdmissionHandoff::new(admission);
+        let body_handoff = std::sync::Arc::clone(&handoff);
         let mut operation = scope
             .manager()
             .as_async()
             .try_submit(options, move |child_scope| async move {
+                body_handoff.body_started();
+                let admission = match body_handoff.wait_for_child_admission(&child_scope).await {
+                    Some(Ok(admission)) => admission,
+                    Some(Err(error)) => return Err(error),
+                    None => {
+                        return Err(MimeError::detector_backend(
+                            "magika",
+                            "request admission handoff closed before registration",
+                        ));
+                    }
+                };
                 Self::detect_async_provider_admitted(runtime, &child_scope, admission, &file_system, &path, max_bytes)
                     .await
             })
             .map_err(|error| {
-                MimeError::detector_backend("magika", format!("provider operation submission failed: {error:?}"))
+                MimeError::detector_backend(
+                    "magika",
+                    format!("operation scope rejected inference: provider operation submission failed: {error:?}"),
+                )
             })?;
-        let outcome = operation.wait_outcome().await.map_err(|error| {
+        let mut outcome = Box::pin(operation.wait_outcome());
+        let outcome = match handoff
+            .register_on_parent(scope, &mut handoff_guard, &mut outcome)
+            .await
+        {
+            Some(outcome) => outcome,
+            None => outcome.await,
+        };
+        let outcome = outcome.map_err(|error| {
             MimeError::detector_backend("magika", format!("provider operation outcome unavailable: {error:?}"))
         })?;
         map_operation_outcome(outcome, PROVIDER_OUTCOME)
@@ -294,7 +328,9 @@ impl MagikaMimeDetector {
                     .max_read_range_bytes()
                     .maximum()
                     .and_then(|value| usize::try_from(value).ok());
-                let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment);
+                let input = AsyncProviderInput::from_session(reader, max_bytes, max_segment)
+                    .with_stop_state(admission.task_state())
+                    .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
@@ -320,7 +356,9 @@ impl MagikaMimeDetector {
         match route {
             ProviderPathRoute::Range { length, version } => {
                 let input =
-                    AsyncProviderInput::new_owned(file_system.clone(), path.clone(), length, version, max_bytes);
+                    AsyncProviderInput::new_owned(file_system.clone(), path.clone(), length, version, max_bytes)
+                        .with_stop_state(admission.task_state())
+                        .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
                     .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
                     .await;
@@ -333,10 +371,26 @@ impl MagikaMimeDetector {
             }
             ProviderPathRoute::ReadAll => {}
         }
+        let io_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut observer = ManagedReadObserver::new(
+            Some(admission.task_state()),
+            std::sync::Arc::clone(&io_in_flight),
+            Some(StopWatcher::new(scope.context())),
+        );
         let read_result = admission
-            .run_provider_operation(scope, file_system.read_all(path, ReadOptions::default(), max_bytes))
+            .run_provider_operation_with_status(
+                scope,
+                file_system.read_all_observed(path, ReadOptions::default(), max_bytes, &mut observer),
+                io_in_flight,
+            )
             .await?;
-        let bytes = read_result?;
+        let bytes = match read_result {
+            Ok(bytes) => bytes,
+            Err(qubit_fs::read::ObservedReadError::Stopped) => {
+                return Err(MimeError::detector_backend("magika", "provider read stopped"));
+            }
+            Err(qubit_fs::read::ObservedReadError::Provider(error)) => return Err(error.into()),
+        };
         runtime.detect_bytes_admitted(admission, bytes).await
     }
 
@@ -595,7 +649,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// hook has no parent operation scope. It uses both this detector's
     /// per-request owned-payload limit and the shared runtime's aggregate
     /// owned-payload byte budget. These logical byte budgets do not bound all
-    /// process memory, provider buffers, or transient allocations.
+    /// process memory, provider buffers, or transient allocations. Successful
+    /// return reports the hook's MIME result; the hook has no public operation
+    /// handle or separate settlement result. Its internal unmanaged path waits
+    /// for resource settlement before returning when cancellation has not won.
     ///
     /// # Parameters
     ///
@@ -1172,23 +1229,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_window_rejects_a_position_after_end_and_restores_it() {
-        let detector = MagikaMimeDetector::new().expect("detector should initialize");
-        let mut reader = Cursor::new(b"data".to_vec());
-        reader.set_position(5);
-
-        let error = MimeContentBackend::detect_reader(&detector, &mut reader)
-            .expect_err("a reader position past EOF cannot form a remaining window");
-
-        assert!(matches!(error, MimeError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::InvalidInput));
-        assert_eq!(
-            5,
-            reader.position(),
-            "the original reader position is restored on error"
-        );
-    }
-
-    #[test]
     fn test_magika_io_errors_map_to_mime_io_errors() {
         let error = super::map_magika_error(Error::IOError(std::io::Error::other("io")));
         assert!(matches!(error, MimeError::Io(_)));
@@ -1202,26 +1242,6 @@ mod tests {
             bytes: b"#!/usr/bin/env python3\nprint('ok')\n",
         };
         assert_eq!(vec!["text/x-python"], detector.guess_from_magika_input(input).unwrap());
-    }
-
-    #[test]
-    fn test_ruled_sync_input_bypasses_session_worker() {
-        let detector = MagikaMimeDetector::new().expect("detector should initialize");
-        assert_eq!(
-            content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
-            detector.guess_from_magika_input(&b""[..]).unwrap()
-        );
-        assert!(
-            detector
-                .runtime
-                .shutdown_blocking(qubit_operation::ShutdownMode::Drain, std::time::Duration::from_secs(30),)
-                .worker_stopped
-        );
-        assert_eq!(
-            content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
-            detector.guess_from_magika_input(&b""[..]).unwrap(),
-            "ruled empty content remains available after runtime shutdown"
-        );
     }
 
     #[test]

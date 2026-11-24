@@ -57,6 +57,7 @@ use qubit_fs::spi::RandomAccessReadSession;
 use qubit_fs::spi::SpiFuture;
 use qubit_fs::spi::StatRequest;
 use qubit_fs::spi::StatResponse;
+use qubit_io::AsyncInput as AsyncStreamInput;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorBackend;
 use qubit_operation::GroupOptions;
@@ -78,8 +79,13 @@ pub(crate) struct Fixture {
     interrupt_effect: Option<Option<FsEffectState>>,
     interrupt_kind: FsErrorKind,
     interrupt_pattern: Option<Vec<bool>>,
+    stop_on_interrupt: Option<Arc<qubit_operation::OperationContext>>,
     attempts: Arc<AtomicUsize>,
     async_read_gate: Option<Arc<TestAsyncReadGate>>,
+    async_open_gate: Option<Arc<TestAsyncReadGate>>,
+    async_stat_gate: Option<Arc<TestAsyncReadGate>>,
+    async_stream_read_gate: Option<Arc<TestAsyncReadGate>>,
+    async_random_access_unsupported: bool,
 }
 
 impl Fixture {
@@ -95,16 +101,41 @@ impl Fixture {
             interrupt_effect: None,
             interrupt_kind: FsErrorKind::Interrupted,
             interrupt_pattern: None,
+            stop_on_interrupt: None,
             attempts: Arc::new(AtomicUsize::new(0)),
             async_read_gate: None,
+            async_open_gate: None,
+            async_stat_gate: None,
+            async_stream_read_gate: None,
+            async_random_access_unsupported: false,
         }
     }
     pub(crate) fn with_async_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
         self.async_read_gate = Some(gate);
         self
     }
+    pub(crate) fn with_async_open_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+        self.async_open_gate = Some(gate);
+        self
+    }
+    pub(crate) fn with_async_stat_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+        self.async_stat_gate = Some(gate);
+        self
+    }
+    pub(crate) fn with_async_stream_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
+        self.async_stream_read_gate = Some(gate);
+        self
+    }
+    pub(crate) fn without_async_random_access(mut self) -> Self {
+        self.async_random_access_unsupported = true;
+        self
+    }
     fn interrupt_once(mut self, effect: Option<FsEffectState>) -> Self {
         self.interrupt_effect = Some(effect);
+        self
+    }
+    fn stop_after_interruption(mut self, stop: Arc<qubit_operation::OperationContext>) -> Self {
+        self.stop_on_interrupt = Some(stop);
         self
     }
     fn fail_once(mut self, kind: FsErrorKind, effect: Option<FsEffectState>) -> Self {
@@ -144,6 +175,7 @@ impl Fixture {
             interrupt_effect: self.interrupt_effect,
             interrupt_kind: self.interrupt_kind,
             interrupt_pattern: self.interrupt_pattern.clone(),
+            stop_on_interrupt: self.stop_on_interrupt.clone(),
             attempts: self.attempts.clone(),
             async_read_gate: self.async_read_gate.clone(),
         }
@@ -182,14 +214,35 @@ impl AsyncFileSystemSpi for Fixture {
         Fixture::properties(self)
     }
     fn stat<'a>(&'a self, request: StatRequest<'a>) -> SpiFuture<'a, FsResult<StatResponse>> {
-        Box::pin(async move { FileSystemSpi::stat(self, request) })
+        let gate = self.async_stat_gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            FileSystemSpi::stat(self, request)
+        })
     }
-    fn open_reader<'a>(&'a self, _request: OpenReaderRequest<'a>) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
-        Box::pin(async {
-            Err(FsError::new(
-                FsErrorKind::UnsupportedOperation,
-                FsOperation::OpenReader,
-                "legacy reader unused",
+    fn open_reader<'a>(&'a self, request: OpenReaderRequest<'a>) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
+        let Some(gate) = self.async_stream_read_gate.clone() else {
+            return Box::pin(async {
+                Err(FsError::new(
+                    FsErrorKind::UnsupportedOperation,
+                    FsOperation::OpenReader,
+                    "legacy reader unused",
+                ))
+            });
+        };
+        let info = self.info(request.path());
+        let bytes = self.bytes.read().unwrap().clone();
+        Box::pin(async move {
+            Ok(OpenedAsyncReader::new(
+                info,
+                Box::new(AsyncFixtureStream {
+                    bytes,
+                    position: 0,
+                    gate: Some(gate),
+                    gate_wait: None,
+                }),
             ))
         })
     }
@@ -197,12 +250,64 @@ impl AsyncFileSystemSpi for Fixture {
         &'a self,
         request: OpenReaderRequest<'a>,
     ) -> SpiFuture<'a, FsResult<OpenedAsyncRandomAccessReader>> {
+        if self.async_random_access_unsupported {
+            return Box::pin(async move {
+                Err(FsError::new(
+                    FsErrorKind::UnsupportedOperation,
+                    FsOperation::OpenReader,
+                    "random access is disabled by the fixture",
+                ))
+            });
+        }
+        let gate = self.async_open_gate.clone();
         Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
             Ok(OpenedAsyncRandomAccessReader::new(
                 self.info(request.path()),
                 Box::new(self.session()),
             ))
         })
+    }
+}
+
+struct AsyncFixtureStream {
+    bytes: Arc<[u8]>,
+    position: usize,
+    gate: Option<Arc<TestAsyncReadGate>>,
+    gate_wait: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
+impl AsyncStreamInput for AsyncFixtureStream {
+    type Item = u8;
+
+    unsafe fn poll_read_unchecked(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        output: &mut [u8],
+        index: usize,
+        count: usize,
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.as_mut().get_mut();
+        if count == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        if this.gate_wait.is_none()
+            && let Some(gate) = this.gate.take()
+        {
+            this.gate_wait = Some(Box::pin(async move { gate.wait().await }));
+        }
+        if let Some(gate_wait) = &mut this.gate_wait {
+            if gate_wait.as_mut().poll(context).is_pending() {
+                return Poll::Pending;
+            }
+            this.gate_wait.take();
+        }
+        let read = count.min(this.bytes.len().saturating_sub(this.position));
+        output[index..index + read].copy_from_slice(&this.bytes[this.position..this.position + read]);
+        this.position += read;
+        Poll::Ready(Ok(read))
     }
 }
 
@@ -213,6 +318,7 @@ struct Session {
     interrupt_effect: Option<Option<FsEffectState>>,
     interrupt_kind: FsErrorKind,
     interrupt_pattern: Option<Vec<bool>>,
+    stop_on_interrupt: Option<Arc<qubit_operation::OperationContext>>,
     attempts: Arc<AtomicUsize>,
     async_read_gate: Option<Arc<TestAsyncReadGate>>,
 }
@@ -289,6 +395,9 @@ impl RandomAccessReadSession for Session {
             .copied()
             .unwrap_or(attempt == 0 && self.interrupt_effect.is_some());
         if should_interrupt {
+            if let Some(stop) = &self.stop_on_interrupt {
+                stop.request_stop(qubit_operation::StopReason::UserCancelled);
+            }
             let effect = self.interrupt_effect.unwrap_or(None);
             let error = FsError::new(self.interrupt_kind, FsOperation::Read, "fixture interruption");
             return Err(match effect {
@@ -399,6 +508,34 @@ fn test_async_session_fills_direct_buffer_in_short_reads_and_obeys_segment_limit
     assert_eq!(vec![(2, 2), (3, 2), (4, 2), (5, 1)], *fixture.reads.lock().unwrap());
     drop(input);
     assert_eq!(1, fixture.drops.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_async_session_stops_between_ready_short_reads() {
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Maximum(1));
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let mut reader = block_on(filesystem.open_random_access_reader(
+        &Path::parse("/cancel-between-short-reads").unwrap(),
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(6);
+    let mut output = [0; 3];
+    let result = block_on(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        6,
+        &mut budget,
+        &mut output,
+        0,
+        Some(1),
+        || !fixture.reads.lock().unwrap().is_empty(),
+    ));
+
+    assert!(
+        result.is_err(),
+        "stop after the first completed read must prevent the next read"
+    );
+    assert_eq!(vec![(0, 1)], *fixture.reads.lock().unwrap());
 }
 
 #[test]
@@ -785,6 +922,36 @@ fn test_async_session_resets_retry_count_after_short_read_progress() {
 #[test]
 fn test_async_session_retries_unchanged_interruption_at_same_range() {
     assert_async_session_retries_safe_interruption(Some(FsEffectState::Unchanged));
+}
+
+#[test]
+fn test_async_session_cancelled_interruption_does_not_retry() {
+    let stop = Arc::new(qubit_operation::OperationContext::new(qubit_operation::ContextOptions::default()).unwrap());
+    let fixture = Fixture::new(b"abcdef", FileSystemLimit::Unknown)
+        .interrupt_once(Some(FsEffectState::Unchanged))
+        .stop_after_interruption(Arc::clone(&stop));
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let mut reader =
+        block_on(filesystem.open_random_access_reader(&Path::parse("/same").unwrap(), ReadOptions::default())).unwrap();
+    let mut budget = crate::internal::read_budget::ReadBudget::new(6);
+    let watcher = crate::internal::StopWatcher::new(stop.as_ref().clone());
+    let error = block_on(crate::internal::read_async_session_with_stop(
+        &mut reader,
+        6,
+        &mut budget,
+        &mut [0; 1],
+        3,
+        None,
+        || watcher.is_stopped(),
+    ))
+    .expect_err("stop after interruption must prevent a retry");
+
+    let magika::Error::IOError(error) = error else {
+        panic!("expected I/O cancellation error")
+    };
+    assert_eq!(std::io::ErrorKind::Interrupted, error.kind());
+    assert_eq!(1, fixture.attempts.load(Ordering::SeqCst));
+    assert_eq!(vec![(3, 1)], *fixture.reads.lock().unwrap());
 }
 
 fn assert_async_session_retries_safe_interruption(effect: Option<FsEffectState>) {
