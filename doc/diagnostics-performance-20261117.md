@@ -83,3 +83,30 @@ rg -l -i 'rs-magika|magika' rs-* --glob 'Cargo.toml' --glob '*.md' --glob '*.yml
 rg -n -i 'qubit-magika|rs-magika|magika' rs-*/Cargo.toml  # exit 0
 rg -n -i 'rs-magika|magika' rs-fs/doc rs-fs-local/doc --glob '*.md' rs-mime/doc/user_guide.md rs-mime/doc/user_guide.zh_CN.md  # exit 0
 ```
+
+## 2026-11-24 downstream fixture and workload evidence
+
+The recursive Cargo manifest scan of the registered downstream source layout (the seven fixed sibling repositories plus the task's `rs-magika` checkout, excluding every `target` directory) found the Magika package itself and its two isolated consumers, plus one downstream integration fixture: `rs-mime/tests/fixtures/magika_inventory_consumer/Cargo.toml`. No other sibling manifest declares or references `qubit-magika`. The MIME fixture is explicit: without its `inventory` feature it imports and registers `MagikaMimeDetectorProvider`; with `inventory` it asserts that the built-in registry contains `magika` and selects it by name. Both branches assert that the registry default remains `repository`. The fixture checks Python content as `text/x-python`, PDF filename detection as `application/pdf`, and stops the explicitly owned runtime in the non-inventory branch.
+
+The matching fixture checkout is `/home/starfish/.local/share/agent-worktrees/09cb1293-5a53-407c-9580-e6203b9aa613-round-11/downstream/rs-mime` at `61db4a3e6fd974cd7c9b52377de7e17d13ce0818`; its source graph used the task `rs-magika` checkout at `41a444b109c22bc6757fc3571d821add46ddd9b6` and `rs-operation` at `175ddef5624abfb8d56f77fd5028da0b808cb0cc`. The fixed dependency pin `../rs-mime@33424a6f63feb8dab3a1214fd68f9ce1151c7762` does not contain this fixture, so the requested manifest path fails there with `error: manifest path ... does not exist` (exit 101). The fixture was not copied or changed; the two metadata checks below use the separately registered matching downstream layout.
+
+The fixture manifest disables Magika default features and declares its own `inventory = ["qubit-magika/inventory"]`; its lockfile records `qubit-magika 0.18.0`. Its workflow, `.github/workflows/magika-consumer.yml`, is manually dispatchable and runs on relevant pull requests and `main` pushes. It pins the sibling graph, installs Rust 1.94.0, downloads and checksum-verifies ONNX Runtime 1.24.2, checks the unique `qubit-operation` identity in both feature graphs, then runs the consumer in explicit-registration and inventory-discovery modes. The workflow pins a historical Magika SHA (`d78dd23a1b849ff8a3e3cbfcdd97def889ce0a7b`); these offline metadata checks instead resolved the registered task checkout at `41a444b`.
+
+Both locked offline metadata configurations succeeded (exit 0) against the matching registered layout:
+
+```text
+cargo +1.94.0 metadata --locked --offline --format-version 1 --manifest-path ../rs-mime/tests/fixtures/magika_inventory_consumer/Cargo.toml
+cargo +1.94.0 metadata --locked --offline --format-version 1 --manifest-path ../rs-mime/tests/fixtures/magika_inventory_consumer/Cargo.toml --features inventory
+```
+
+Each resolved the fixture root `magika-inventory-consumer 0.0.0`, `qubit-magika 0.18.0` from the task checkout, `qubit-mime 0.22.0` from the fixture checkout, and `qubit-operation 0.3.2` from the registered sibling. Raw JSON and stderr are preserved outside all worktree layouts at `/tmp/rs-magika-t6-metadata-default.json`, `/tmp/rs-magika-t6-metadata-default.stderr`, `/tmp/rs-magika-t6-metadata-inventory.json`, and `/tmp/rs-magika-t6-metadata-inventory.stderr`. No build or runtime artifact was produced by metadata. The actual workflow's ONNX Runtime download and consumer runs were inspected but not run in this offline metadata check.
+
+| Production evidence requested | Finding |
+| --- | --- |
+| Representative request proportions / input mix | Missing; fixture covers one Python content sample and one PDF filename assertion only. |
+| Target concurrency | Missing; CI executes a single consumer process and sets no workload concurrency target. |
+| p95 / p99 latency objectives | Missing; the workflow has no latency thresholds. The historical local mechanism experiment only reports p50/p95 for synthetic gated requests and defines no SLO. |
+| Memory ceiling | Missing; neither fixture nor workflow sets or measures an RSS budget. |
+| Per-poll segment sampling / fairness evidence | Missing; fixture behavior assertions do not record segment counts, work per poll, or fairness under load. |
+
+There is no identified production load and no complete target set, so the planned same-input topology comparison was not run. Existing cold-start, peak RSS, p99, success/refusal under representative load, and segment fairness evidence remain absent. The downstream fixture establishes integration shape and locked dependency resolution, not production performance. No evidence supports changing the runtime topology in this pass; keep the architectural decision and evidence limits stated above.
