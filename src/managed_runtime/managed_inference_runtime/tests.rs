@@ -2197,6 +2197,100 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
 }
 
 #[test]
+fn test_provider_input_drops_before_first_setup_poll_releases_admission() {
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        manager.clone(),
+        8,
+        Box::new(|_| Ok(None)),
+        Box::new(|| {}),
+    ));
+    let operation_runtime = Arc::clone(&runtime);
+    let mut operation = manager
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            let admission = operation_runtime.reserve_for_provider(None, 4)?;
+            let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let runtime_for_drop = Arc::clone(&operation_runtime);
+            let observed_bytes_for_drop = Arc::clone(&observed_bytes);
+            let (reader, session_drops, session_reads) = crate::tests::internal::random_access_session_tests::
+                opened_async_session_for_managed_setup_test(move || {
+                    observed_bytes_for_drop.store(
+                        runtime_for_drop.snapshot().reserved_bytes,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                });
+            let input = crate::internal::AsyncProviderInput::from_session(reader, 4, Some(4));
+            let detection = operation_runtime.detect_async_input_admitted(
+                &scope,
+                admission,
+                input,
+                4,
+                map_provider_test_error,
+            );
+            let _ = operation_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::ZERO);
+            drop(detection);
+            assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(1, session_drops.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(session_reads.lock().unwrap().is_empty());
+            assert_eq!(0, operation_runtime.snapshot().reserved_bytes);
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let outcome = block_on(operation.wait_outcome()).unwrap();
+    assert!(matches!(outcome, OperationOutcome::Succeeded(())));
+    let _settlement = block_on(operation.wait_settlement());
+    let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+}
+
+#[test]
+fn test_provider_input_drops_before_first_setup_poll_after_scope_stop() {
+    let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        manager.clone(),
+        8,
+        Box::new(|_| Ok(None)),
+        Box::new(|| {}),
+    ));
+    let operation_runtime = Arc::clone(&runtime);
+    let mut operation = manager
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            let admission = operation_runtime.reserve_for_provider(None, 4)?;
+            let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let runtime_for_drop = Arc::clone(&operation_runtime);
+            let observed_bytes_for_drop = Arc::clone(&observed_bytes);
+            let (reader, session_drops, session_reads) = crate::tests::internal::random_access_session_tests::
+                opened_async_session_for_managed_setup_test(move || {
+                    observed_bytes_for_drop.store(
+                        runtime_for_drop.snapshot().reserved_bytes,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                });
+            let input = crate::internal::AsyncProviderInput::from_session(reader, 4, Some(4));
+            let detection = operation_runtime.detect_async_input_admitted(
+                &scope,
+                admission,
+                input,
+                4,
+                map_provider_test_error,
+            );
+            let _ = scope.request_stop(StopReason::UserCancelled);
+            drop(detection);
+            assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(1, session_drops.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(session_reads.lock().unwrap().is_empty());
+            assert_eq!(0, operation_runtime.snapshot().reserved_bytes);
+            Ok::<_, MimeError>(())
+        })
+        .unwrap();
+    let outcome = block_on(operation.wait_outcome()).unwrap();
+    assert!(matches!(outcome, OperationOutcome::Stopped(_)));
+    let _settlement = block_on(operation.wait_settlement());
+    let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+}
+
+#[test]
 fn test_provider_input_drops_before_begin_rejection_releases_admission() {
     struct DropObservedInput {
         runtime: Arc<ManagedInferenceRuntime>,

@@ -137,6 +137,10 @@ impl RequestResourceOwner {
     }
 
     /// Returns resources after a scope commit that never published this owner.
+    ///
+    /// # Returns
+    ///
+    /// The service and byte permits once, or `None` after transfer or release.
     pub(super) fn take_resources(&self) -> Option<(ServicePermit, BytePermit)> {
         self.resources.lock().unwrap_or_else(|error| error.into_inner()).take()
     }

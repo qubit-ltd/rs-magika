@@ -30,6 +30,10 @@ impl RequestResourceScopeGuard {
     }
 
     /// Borrows the attached scope while its guard remains active.
+    ///
+    /// # Returns
+    ///
+    /// The active resource scope owned by this guard.
     pub(super) fn scope(&self) -> &ResourceScope {
         self.scope
             .as_ref()
