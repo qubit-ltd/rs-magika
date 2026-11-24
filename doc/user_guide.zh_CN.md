@@ -208,23 +208,32 @@ fn detect_uploaded_path(
 Media refinement 是可选的。例如，内置的 ffprobe classifier 可以区分仅音频、仅视频和
 音视频内容。需要先安装 `ffprobe`，并确保它位于 `PATH` 中：
 
+应用启动前设置 `QUBIT_MIME_ENABLE_PRECISE_DETECTION=true`（配置键为
+`mime.enable.precise.detection`）以启用 precise detection；`MimeConfig::from_env()`
+会读取该设置。默认的歧义映射覆盖 `webm`（`video/webm` 或 `audio/webm`）和
+`ogg`（`video/ogg` 或 `audio/ogg`）。符合条件的输入在检测 MIME type 或文件名匹配这些映射时才会执行 refinement。
+
 ```rust
 use std::sync::Arc;
 
-use qubit_magika::{MagikaMimeDetector, ManagedInferenceRuntime};
-use qubit_mime::FfprobeCommandMediaStreamClassifier;
+use qubit_magika::MagikaMimeDetector;
+use qubit_mime::{FfprobeCommandMediaStreamClassifier, MimeConfig};
 
 fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
+    let config = MimeConfig::from_env()?;
     let classifier = Arc::new(FfprobeCommandMediaStreamClassifier::new());
     MagikaMimeDetector::builder()
+        .mime_config(config)
         .media_stream_classifier(Some(classifier))
         .build()
 }
 ```
 
-如果应用使用 registry 构造 detector，也可以把同一个 classifier 传给
-`MagikaMimeDetectorProvider::with_media_stream_classifier`。classifier 失败时返回
-`MimeError`；只有 classifier 成功时才会进行 refinement。
+如果应用使用 registry 构造 detector，应把同一个 classifier 传给
+`MagikaMimeDetectorProvider::with_media_stream_classifier`，并将启用后的配置传给
+`create_configured(&config)`。`MagikaMimeDetector::from_mime_config` 接收配置，但不会挂接
+classifier；需要同时配置两者时请使用 builder。classifier 失败时返回 `MimeError`；只有 classifier
+成功时才会进行 refinement。
 
 ### 共享应用管理的推理 runtime
 
@@ -328,7 +337,9 @@ use std::path::PathBuf;
 use qubit_magika::MagikaMimeDetector;
 
 fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
-    let runtime = PathBuf::from(std::env::var("ORT_LIBRARY_PATH")?);
+    let runtime = std::env::var_os("ORT_LIBRARY_PATH")
+        .map(PathBuf::from)
+        .ok_or("ORT_LIBRARY_PATH must name the ONNX Runtime shared library")?;
     if !ort::init_from(runtime)?.commit() {
         return Err("ONNX Runtime environment was already initialized".into());
     }
