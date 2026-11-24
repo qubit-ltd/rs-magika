@@ -37,6 +37,7 @@ use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 
 use crate::internal::AsyncProviderInput;
+use crate::internal::ManagedReadObserver;
 use crate::internal::PROVIDER_OUTCOME;
 use crate::internal::ProviderPathRoute;
 use crate::internal::ReadSeekInput;
@@ -335,10 +336,22 @@ impl MagikaMimeDetector {
             }
             ProviderPathRoute::ReadAll => {}
         }
+        let io_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut observer = ManagedReadObserver::new(Some(admission.task_state()), std::sync::Arc::clone(&io_in_flight));
         let read_result = admission
-            .run_provider_operation(scope, file_system.read_all(path, ReadOptions::default(), max_bytes))
+            .run_provider_operation_with_status(
+                scope,
+                file_system.read_all_observed(path, ReadOptions::default(), max_bytes, &mut observer),
+                io_in_flight,
+            )
             .await?;
-        let bytes = read_result?;
+        let bytes = match read_result {
+            Ok(bytes) => bytes,
+            Err(qubit_fs::read::ObservedReadError::Stopped) => {
+                return Err(MimeError::detector_backend("magika", "provider read stopped"));
+            }
+            Err(qubit_fs::read::ObservedReadError::Provider(error)) => return Err(error.into()),
+        };
         runtime.detect_bytes_admitted(admission, bytes).await
     }
 

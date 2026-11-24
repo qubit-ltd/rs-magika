@@ -14,6 +14,8 @@ use magika::Result as MagikaResult;
 use qubit_fs::FileSystem;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
+use qubit_fs::read::ObservedReadError;
+use qubit_fs::read::ReadIoObserver;
 use qubit_fs::read::ReadOptions;
 use qubit_mime::MimeError;
 
@@ -124,7 +126,8 @@ pub(crate) fn read_sync_segments(
 ///
 /// Returns an I/O error when validation, budget reservation, or any provider
 /// range fails.
-pub(crate) async fn read_async(
+/// Reads an asynchronous provider range through rs-fs's observed prefix loop.
+pub(crate) async fn read_async_observed<O: ReadIoObserver>(
     file_system: &qubit_fs::AsyncFileSystem,
     path: &Path,
     length: u64,
@@ -132,21 +135,7 @@ pub(crate) async fn read_async(
     budget: &mut ReadBudget,
     buffer: &mut [u8],
     offset: u64,
-) -> MagikaResult<()> {
-    read_async_with_stop(file_system, path, length, version, budget, buffer, offset, || false).await
-}
-
-/// Reads an asynchronous provider range while checking cancellation between
-/// completed filesystem operations.
-pub(crate) async fn read_async_with_stop(
-    file_system: &qubit_fs::AsyncFileSystem,
-    path: &Path,
-    length: u64,
-    version: Option<&ResourceVersion>,
-    budget: &mut ReadBudget,
-    buffer: &mut [u8],
-    offset: u64,
-    should_stop: impl Fn() -> bool,
+    observer: &mut O,
 ) -> MagikaResult<()> {
     validate_request(length, budget, buffer.len(), offset)?;
     if buffer.is_empty() {
@@ -158,7 +147,47 @@ pub(crate) async fn read_async_with_stop(
         .max_read_range_bytes()
         .maximum()
         .map_or(usize::MAX, |maximum| usize::try_from(maximum).unwrap_or(usize::MAX));
-    read_async_segments_with_stop(file_system, path, version, buffer, offset, max_segment, should_stop).await
+    read_async_segments_observed(file_system, path, version, buffer, offset, max_segment, observer).await
+}
+
+/// Reads bounded asynchronous ranges while observing actual provider I/O.
+pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
+    file_system: &qubit_fs::AsyncFileSystem,
+    path: &Path,
+    version: Option<&ResourceVersion>,
+    buffer: &mut [u8],
+    offset: u64,
+    max_segment: usize,
+    observer: &mut O,
+) -> MagikaResult<()> {
+    if max_segment == 0 {
+        return Err(invalid_input("provider maximum read range is zero").into());
+    }
+    let mut completed = 0;
+    while completed < buffer.len() {
+        let segment_length = (buffer.len() - completed).min(max_segment);
+        let segment_offset = offset
+            .checked_add(completed as u64)
+            .ok_or_else(|| invalid_input("provider input offset overflow"))?;
+        let outcome = file_system
+            .read_prefix_observed(
+                path,
+                read_options(segment_offset, segment_length, version),
+                segment_length,
+                observer,
+            )
+            .await;
+        let bytes = match outcome {
+            Ok(outcome) => outcome.into_bytes(),
+            Err(ObservedReadError::Stopped) => {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into());
+            }
+            Err(ObservedReadError::Provider(error)) => return Err(error.into_io_error().into()),
+        };
+        copy_exact(&mut buffer[completed..completed + segment_length], bytes)?;
+        completed += segment_length;
+    }
+    Ok(())
 }
 
 /// Reads a complete asynchronous request using the supplied maximum range.
@@ -176,6 +205,7 @@ pub(crate) async fn read_async_with_stop(
 ///
 /// Returns an I/O error when the segment limit is zero, an offset overflows,
 /// or a provider segment fails or returns the wrong length.
+#[cfg(test)]
 pub(crate) async fn read_async_segments(
     file_system: &qubit_fs::AsyncFileSystem,
     path: &Path,
@@ -184,28 +214,11 @@ pub(crate) async fn read_async_segments(
     offset: u64,
     max_segment: usize,
 ) -> MagikaResult<()> {
-    read_async_segments_with_stop(file_system, path, version, buffer, offset, max_segment, || false).await
-}
-
-/// Reads bounded asynchronous ranges, checking cancellation between completed
-/// provider operations.
-pub(crate) async fn read_async_segments_with_stop(
-    file_system: &qubit_fs::AsyncFileSystem,
-    path: &Path,
-    version: Option<&ResourceVersion>,
-    buffer: &mut [u8],
-    offset: u64,
-    max_segment: usize,
-    should_stop: impl Fn() -> bool,
-) -> MagikaResult<()> {
     if max_segment == 0 {
         return Err(invalid_input("provider maximum read range is zero").into());
     }
     let mut completed = 0;
     while completed < buffer.len() {
-        if should_stop() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into());
-        }
         let segment_length = (buffer.len() - completed).min(max_segment);
         let segment_offset = offset
             .checked_add(completed as u64)

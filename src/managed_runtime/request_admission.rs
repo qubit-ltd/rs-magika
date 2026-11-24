@@ -9,6 +9,8 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
@@ -37,6 +39,8 @@ pub(crate) struct RequestAdmission {
     provider_pending: bool,
     /// Whether the provider future crossed its first-poll start boundary.
     provider_polled: bool,
+    /// Actual provider poll state for observed aggregate reads.
+    provider_io_status: Option<Arc<AtomicBool>>,
 }
 
 impl RequestAdmission {
@@ -64,6 +68,7 @@ impl RequestAdmission {
             dispatched: false,
             provider_pending: false,
             provider_polled: false,
+            provider_io_status: None,
         }
     }
 
@@ -89,7 +94,38 @@ impl RequestAdmission {
     where
         F: Future,
     {
+        self.run_provider_operation_inner(scope, operation, None).await
+    }
+
+    /// Polls an aggregate provider operation while using actual-I/O observer
+    /// state to distinguish provider Pending from cooperative yields.
+    pub(crate) async fn run_provider_operation_with_status<F>(
+        &mut self,
+        scope: &OperationScope,
+        operation: F,
+        io_in_flight: Arc<AtomicBool>,
+    ) -> MimeResult<F::Output>
+    where
+        F: Future,
+    {
+        self.run_provider_operation_inner(scope, operation, Some(io_in_flight))
+            .await
+    }
+
+    async fn run_provider_operation_inner<F>(
+        &mut self,
+        scope: &OperationScope,
+        operation: F,
+        io_in_flight: Option<Arc<AtomicBool>>,
+    ) -> MimeResult<F::Output>
+    where
+        F: Future,
+    {
         self.begin_provider_operation()?;
+        if let Some(io_in_flight) = &io_in_flight {
+            io_in_flight.store(false, Ordering::Release);
+            self.provider_io_status = Some(Arc::clone(io_in_flight));
+        }
         // This wrapper can identify the first poll boundary precisely; the
         // lower-level begin method retains its historical caller contract.
         self.provider_polled = false;
@@ -105,8 +141,23 @@ impl RequestAdmission {
                 state.request_stop();
                 return std::task::Poll::Ready(None);
             }
-            self.provider_polled = true;
-            operation.as_mut().poll(context).map(Some)
+            if io_in_flight.is_none() {
+                self.provider_polled = true;
+            }
+            let result = operation.as_mut().poll(context);
+            match result {
+                std::task::Poll::Ready(output) => std::task::Poll::Ready(Some(output)),
+                std::task::Poll::Pending => {
+                    if let Some(io_in_flight) = &io_in_flight {
+                        let pending = io_in_flight.load(Ordering::Acquire);
+                        self.provider_pending = pending;
+                        self.provider_polled = pending;
+                    } else {
+                        self.provider_polled = true;
+                    }
+                    std::task::Poll::Pending
+                }
+            }
         })
         .await;
         match outcome {
@@ -115,7 +166,13 @@ impl RequestAdmission {
                 Ok(output)
             }
             None => {
-                if !self.provider_polled {
+                if io_in_flight
+                    .as_ref()
+                    .is_some_and(|io_in_flight| io_in_flight.load(Ordering::Acquire))
+                {
+                    self.provider_pending = true;
+                    self.provider_polled = true;
+                } else if !self.provider_polled || io_in_flight.is_some() {
                     self.provider_operation_completed();
                 }
                 Err(MimeError::detector_backend("magika", state.provider_stop_reason()))
@@ -144,6 +201,7 @@ impl RequestAdmission {
     pub(crate) fn provider_operation_completed(&mut self) {
         self.provider_pending = false;
         self.provider_polled = false;
+        self.provider_io_status = None;
     }
 
     /// Transfers the request and its reservations to the worker.
@@ -279,7 +337,11 @@ impl Drop for RequestAdmission {
     /// Settles the lease or retains permits for unresolved provider I/O.
     fn drop(&mut self) {
         if !self.dispatched {
-            if self.provider_pending && self.provider_polled {
+            let provider_io_unconfirmed = self
+                .provider_io_status
+                .as_ref()
+                .is_some_and(|status| status.load(Ordering::Acquire));
+            if provider_io_unconfirmed || (self.provider_pending && self.provider_polled) {
                 self.state.mark_unconfirmed_provider_io();
                 // rs-fs has no observer for provider-native completion after
                 // its caller future is dropped, so retain committed resources.
@@ -311,6 +373,7 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::task::Context;
     use std::task::Poll;
     use std::task::Waker;
@@ -408,6 +471,46 @@ mod tests {
         assert_eq!(retry.recovery.phase, RecoveryPhase::Pending);
         assert_eq!(recovery.snapshot().failures_total, 1);
         assert!(!settlement.all_released());
+    }
+
+    #[test]
+    fn test_observed_provider_poll_unwind_retains_admission_resources() {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let mut operation = manager
+            .as_async()
+            .try_submit(OperationOptions::default(), |scope| async move {
+                let budget = Arc::new(ByteBudget::new(1));
+                let mut admission = RequestAdmission::new(
+                    Arc::new(TaskState::new(707, None)),
+                    service_resource(),
+                    budget.try_acquire(1).unwrap(),
+                );
+                admission.retain_in_scope(&scope).unwrap();
+                let io_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let status = Arc::clone(&io_in_flight);
+                let panic_during_io_poll = std::future::poll_fn(move |_| {
+                    status.store(true, Ordering::Release);
+                    panic!("provider future unwound after actual I/O poll started");
+                    #[allow(unreachable_code)]
+                    Poll::<()>::Pending
+                });
+                let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    block_on(admission.run_provider_operation_with_status(&scope, panic_during_io_poll, io_in_flight))
+                }));
+                assert!(unwind.is_err());
+                drop(admission);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        assert!(matches!(
+            block_on(operation.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
+        let settlement = block_on(operation.wait_settlement());
+        assert!(!settlement.all_released());
+        assert!(settlement.recovery_count > 0);
+        assert!(settlement.cleanup_failures_total > 0);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

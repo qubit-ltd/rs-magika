@@ -21,12 +21,11 @@ mod sync_provider_input;
 mod sync_route;
 
 pub(crate) use async_provider_input::AsyncProviderInput;
+pub(crate) use async_provider_input::ManagedReadObserver;
 pub(crate) use operation_outcome_context::INFERENCE_OUTCOME;
 pub(crate) use operation_outcome_context::PROVIDER_OUTCOME;
 pub(crate) use operation_outcome_context::map_operation_outcome;
 pub(crate) use provider_input::map_provider_magika_error;
-#[cfg(test)]
-pub(crate) use provider_input::read_async_segments_with_stop;
 pub(crate) use provider_path_route::ProviderPathRoute;
 pub(crate) use provider_path_route::is_unsupported_provider_error;
 pub(crate) use provider_path_route::select_provider_path_route;
