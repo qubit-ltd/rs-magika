@@ -181,16 +181,24 @@ impl MagikaMimeDetector {
     /// it does not prove provider completion or resource release. The byte
     /// reservation bounds logical sampling and owned payload accounting; it
     /// is not a bound on total process memory or provider/network work. The
-    /// `read_all` fallback moves its returned `Vec` into worker ownership
-    /// without cloning its contents. Converting it with `into_boxed_slice`
-    /// may reallocate when the vector has spare capacity, so this is not a
-    /// guarantee of zero-copy operation.
+    /// `read_all` fallback moves its returned `Vec` into the async
+    /// dispatch path without cloning its contents. That path converts it with
+    /// `into_boxed_slice` before dispatching the input to the worker; the
+    /// conversion may reallocate when the vector has spare capacity, so this
+    /// is not a guarantee of zero-copy operation.
     ///
     /// Dropping a pending provider future cancels local polling only. A
     /// provider's native or remote operation may continue, and this API has no
     /// completion observer for that work. In that case resource release and
     /// child settlement remain pending, potentially indefinitely; future
     /// cancellation does not prove that underlying I/O was interrupted.
+    /// The returned future reports the child business outcome; the parent
+    /// scope observer separately reports settlement. `Pending(snapshot)` is a
+    /// bounded observation, while `Ready(report)` may still report unreleased
+    /// resources. Unknown provider completion retains runtime and byte
+    /// capacity. The built-in cleanup policy does not release it on retry
+    /// without new completion evidence; recovery must use the registered
+    /// recovery policy or handle.
     ///
     /// A Rust panic caught during session inference makes this future return
     /// `MimeError::DetectorBackend`; the public child `OperationOutcome` is
@@ -661,13 +669,17 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// The input is copied only after the runtime accepts the request. The
     /// worker performs feature sampling and inference, so polling this future
     /// does not wait for model execution. Unlike managed APIs, this legacy
-    /// hook has no parent operation scope. It uses both this detector's
-    /// per-request owned-payload limit and the shared runtime's aggregate
+    /// hook has no parent operation scope and exposes only its business result,
+    /// not a settlement observer. Ordinary completion waits for the internal
+    /// operation to settle; runtime `Cancel` may return its stop error first
+    /// while the worker still retains input and byte capacity. It uses both
+    /// this detector's per-request owned-payload limit and the shared runtime's aggregate
     /// owned-payload byte budget. These logical byte budgets do not bound all
     /// process memory, provider buffers, or transient allocations. Successful
     /// return reports the hook's MIME result; the hook has no public operation
     /// handle or separate settlement result. Its internal unmanaged path waits
-    /// for resource settlement before returning when cancellation has not won.
+    /// for resource settlement on ordinary completion, but runtime
+    /// cancellation may win the result race and return before release.
     ///
     /// # Parameters
     ///
@@ -830,7 +842,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// Detects MIME candidates from an asynchronous filesystem path using this
     /// detector's shared inference runtime. This legacy MIME hook has no
     /// caller-provided operation scope; it waits for the submitted internal
-    /// operation's settlement before returning.
+    /// operation's business outcome on ordinary completion. Runtime
+    /// cancellation may return its stop outcome before provider I/O completion
+    /// is known or resources are released. This legacy hook has no parent
+    /// operation scope and exposes no settlement observer.
     ///
     /// # Parameters
     ///

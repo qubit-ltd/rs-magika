@@ -381,15 +381,14 @@ lengths do not cap total process memory, including provider buffers and
 transient allocations. After shutdown, ruled sync inputs can still return
 directly; requests needing model inference use the closed runtime and fail.
 
-On ordinary completion, the legacy `guess_from_content_async` hook waits for
-its internal operation to settle before returning. Runtime `Cancel` can end
-that business wait early with an error while the worker still owns its input
-and byte capacity; the hook has no parent-scope observer for checking release.
-The legacy async provider-path hook returns the internal child business result
-without exposing a settlement observer. Runtime `Cancel` may return its stop
-error while a provider's native or remote I/O remains unconfirmed. Use the
-explicit managed APIs when the application needs to distinguish a result from
-resource release.
+The legacy `guess_from_content_async` hook waits for its internal operation to
+settle on ordinary completion. Runtime `Cancel` can return its stop error
+before the worker releases input and byte capacity. The legacy async
+provider-path hook exposes only the internal child business outcome; runtime
+`Cancel` may return that stop outcome while native or remote provider I/O is
+still unconfirmed. Neither hook accepts a parent scope or exposes settlement.
+Use the explicit managed APIs when the application needs to distinguish
+business outcome from resource release.
 
 The async content hook returns the backend's raw Magika candidate list, like
 the synchronous content hook. It does not apply high-level MIME selection or
@@ -526,12 +525,14 @@ assumed to be seconds. `wait_settlement_until(deadline)` returns
 `Result<SettlementWait, ObservationError>`. `SettlementWait::Pending(snapshot)`
 is a bounded observation, not a release confirmation. The deadline must come
 from the operation's clock domain. The example matches both variants and checks
-`all_released()` on a ready report, then returns the outcome, observer, and
-original settlement result so callers retain a negative report for recovery
-handling and can continue observation after a pending snapshot. Failed
-cleanup retains an unconfirmed resource for recovery observation; retry is
-available only through the registered recovery policy/handle, not by resubmitting
-the inference request. `shutdown_application` returns `DetectorPending` with the
+`all_released()` on a ready report. `Ready(report)` is terminal but can contain
+negative release evidence; preserve that report for recovery. `Pending(snapshot)`
+only means this wait reached its deadline, so callers may continue observing.
+Unknown provider I/O can produce a ready negative report with an unreleased
+resource. The built-in cleanup policy retains its capacity, and retrying that
+cleanup without new completion evidence produces another failure. Recovery
+must use the registered recovery policy/handle; resubmitting inference does not
+release the prior request. `shutdown_application` returns `DetectorPending` with the
 diagnostic report so the caller can retry detector shutdown before closing the
 manager. `ManagerPending` retains both its snapshot and handle for another
 `wait_for`; `Completed` carries the final manager report. Keep shutdown at a synchronous application
@@ -558,10 +559,11 @@ guarantee about total process memory or provider/network activity. Admission
 reserves runtime capacity and this byte budget, then commits the optional scope
 child before the first provider `open`, `stat`, `read_all`, `length`, or range-read
 call. A closed runtime, full capacity, or cancelled scope is rejected before
-those provider calls. The `read_all` fallback transfers its buffer to the
-worker without an explicit second full-size clone. The worker converts the
-owned `Vec` with `into_boxed_slice`; that conversion may reallocate to trim
-unused capacity, so this is not a zero-allocation guarantee. Sampling and
+those provider calls. The `read_all` fallback transfers its buffer into the
+async dispatch path without an explicit second full-size clone. That path
+converts the owned `Vec` with `into_boxed_slice` before dispatching input to the
+worker; conversion may reallocate to trim unused capacity, so this is not a
+zero-allocation guarantee. Sampling and
 inference run on the session-owning worker; async provider reads are serviced
 by the operation future without blocking its executor.
 

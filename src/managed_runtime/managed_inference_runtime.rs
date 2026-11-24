@@ -576,10 +576,6 @@ impl ManagedInferenceRuntime {
 
     /// Drives provider reads for an already admitted async input.
     ///
-    /// # Type Parameters
-    ///
-    /// * `I` - Provider input whose range reads can be awaited.
-    ///
     /// # Parameters
     ///
     /// * `admission` - Previously reserved operation and byte capacity.

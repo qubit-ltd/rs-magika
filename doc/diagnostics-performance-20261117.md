@@ -74,6 +74,8 @@ The 2026-11-17 experiment above remains useful as a mechanism check: it used one
 
 No representative request mix, target concurrency, tail-latency SLO, or memory cap was found. Accordingly, the ignored experiment was not rerun as a workload comparison; the available evidence does not justify an architectural change, so retain the shared runtime architecture. A future decision needs an identified consumer, its mixed request distribution and concurrency, explicit p95/p99 and memory limits, then cold-start time, peak RSS, success/refusal rate, and warm p50/p95 measurements for both topologies on the same machine and sample set.
 
+The concrete MAG-R11 evidence gap is consumer-side workload data: no downstream manifest identifies a `qubit-magika` deployment, and the reviewed MIME integration guides, compatibility references, fixture, and planning documents contain no measured request distribution, target concurrency, p95/p99 objective, or process-memory budget. The historical gated test supplies controlled delay values and one small Python input only; it has no startup, peak-RSS, or CPU measurements. These missing inputs prevent a representative shared-versus-independent runtime comparison. Keep the single-worker design until an identified consumer supplies those values; do not use the historical p50/p95 table as a production SLO result.
+
 Evidence search commands (read-only):
 
 Run from the adjacent source-layout root (the directory containing `rs-*`):

@@ -116,16 +116,23 @@ sampling can call `MagikaMimeDetector::detect_async_provider_path_managed` or
 work to that scope so its report can track release separately from the
 business result. Create the runtime and detector at startup, pass the scope to
 each managed request, and drain the runtime during application shutdown.
+The returned detection result is the business outcome. The scope observer
+reports release separately: `Pending(snapshot)` is only a bounded wait, and
+`Ready(report)` may still contain unreleased resources. Unknown provider I/O
+keeps capacity reserved; the built-in cleanup policy does not release it on a
+retry without new completion evidence. The shutdown report's `worker_stopped`
+records worker join independently of either observation.
 
 The inventory submits a synchronous `MimeDetectorSpec` factory only. It does
 not add a provider to `qubit-mime`'s separate async provider registry or attach
 an application scope. Selecting this sync-only `magika` provider through the
 scope-aware async `MimeRuntime` route returns `AsyncUnsupported`; it does not
 fall back to synchronous inference. The legacy content hook waits for ordinary
-inference settlement, but a runtime `Cancel` result can return before the
-worker releases its input and permits. The legacy provider-path hook waits for
-the business result and does not expose settlement or parent-scope
-observation. See the [managed lifecycle guide](doc/user_guide.md#migration-guide)
+inference settlement, but runtime `Cancel` may return its stop error before the
+worker releases its input and permits. The legacy provider-path hook observes
+only its child business outcome; `Cancel` can return that stop outcome while
+provider I/O remains unconfirmed. Neither legacy hook accepts a parent scope or
+exposes settlement. See the [managed lifecycle guide](doc/user_guide.md#migration-guide)
 for these distinctions.
 
 The inventory-enabled `MimeDetectorRegistry::builtin()` discovers the
