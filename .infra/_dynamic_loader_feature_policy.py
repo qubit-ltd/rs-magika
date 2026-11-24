@@ -144,7 +144,7 @@ def check_dynamic_metadata(metadata: dict[str, Any], expect_inventory: str | Non
         normal_magika_edges = [
             dep for dep in (root_node or {}).get("deps", [])
             if isinstance(dep, dict) and str(dep.get("pkg")) == magika_id
-            and any(isinstance(kind, dict) and kind.get("kind") is None
+            and any(isinstance(kind, dict) and "kind" in kind and kind["kind"] is None
                     for kind in dep.get("dep_kinds", []))
         ]
         if len(normal_magika_edges) != 1:
@@ -244,4 +244,8 @@ def run_self_tests() -> None:
         wrong_kind = graph(["load-dynamic"], ["disable-linking"])
         wrong_kind["resolve"]["nodes"][0]["deps"][1]["dep_kinds"] = [{"kind": kind, "target": None}]
         errors = check_dynamic_metadata(wrong_kind)
-        assert errors and "normal dependency edge" in " ".join(errors)
+        assert errors and "one normal dependency edge" in " ".join(errors)
+    missing_kind = graph(["load-dynamic"], ["disable-linking"])
+    missing_kind["resolve"]["nodes"][0]["deps"][1]["dep_kinds"] = [{"target": None}]
+    errors = check_dynamic_metadata(missing_kind)
+    assert errors and "one normal dependency edge" in " ".join(errors)

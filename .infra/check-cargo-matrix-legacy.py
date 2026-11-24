@@ -61,21 +61,30 @@ def self_test() -> list[str]:
         if not any("checks[0].name" in error for error in check(path)):
             failures.append("legacy-invalid check name was accepted")
 
-        repository_matrix = Path(__file__).resolve().parent / "ci" / "cargo-matrix.json"
+        checker = Path(__file__).resolve()
+        fake_repository = Path(temporary) / "fake-project"
+        (fake_repository / ".infra" / "ci").mkdir(parents=True)
+        (fake_repository / ".infra" / "ci" / "cargo-matrix.json").write_text(
+            json.dumps({"version": 1, "checks": []})
+        )
         from_parent = subprocess.run(
             [sys.executable, str(Path(__file__).resolve()),],
-            cwd=Path(__file__).resolve().parent.parent.parent,
+            cwd=fake_repository,
             capture_output=True,
             text=True,
             check=False,
         )
         if from_parent.returncode:
-            failures.append(f"default matrix path failed from parent directory: {from_parent.stderr.strip()}")
-        if check(repository_matrix):
-            failures.append("repository matrix was rejected through explicit path")
-        missing = Path(temporary) / "missing.json"
-        if not any("cannot read matrix JSON" in error for error in check(missing)):
-            failures.append("missing explicit matrix path was accepted")
+            failures.append(f"default matrix path failed outside repository: {from_parent.stderr.strip()}")
+        explicit = subprocess.run(
+            [sys.executable, str(checker), "--matrix", str(fake_repository / ".infra/ci/cargo-matrix.json")],
+            cwd=Path(__file__).resolve().parent.parent.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if explicit.returncode == 0 or "checks must contain at least one check" not in explicit.stderr:
+            failures.append("explicit invalid matrix path was not rejected with the matrix error")
     return failures
 
 
