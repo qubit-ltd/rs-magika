@@ -21,6 +21,7 @@ use qubit_mime::MimeError;
 
 mod internal;
 
+use self::internal::BudgetReadIoObserver;
 use self::internal::ObservedReadStopped;
 use super::cooperative_read::READ_STEPS_PER_POLL;
 use super::cooperative_read::yield_once;
@@ -219,7 +220,7 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
         return Err(invalid_input("provider maximum read range is zero").into());
     }
     let mut completed = 0;
-    let mut completed_steps = 0;
+    let mut budgeted_observer = BudgetReadIoObserver::new(observer);
     while completed < buffer.len() {
         let segment_length = (buffer.len() - completed).min(max_segment);
         let segment_offset = offset
@@ -230,7 +231,7 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
                 path,
                 read_options(segment_offset, segment_length, version),
                 segment_length,
-                observer,
+                &mut budgeted_observer,
             )
             .await;
         let bytes = match outcome {
@@ -242,9 +243,14 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
         };
         copy_exact(&mut buffer[completed..completed + segment_length], bytes)?;
         completed += segment_length;
-        completed_steps += 1;
-        if completed < buffer.len() && completed_steps >= READ_STEPS_PER_POLL {
-            completed_steps = 0;
+        // rs-fs limits one prefix poll to at most one Open plus 64 Reads.
+        // Since we check only at complete segment boundaries, a prior segment
+        // can leave at most 63 events before the next segment adds at most 65:
+        // no poll therefore completes more than 128 provider operations.
+        if completed < buffer.len()
+            && budgeted_observer.completed_events() >= READ_STEPS_PER_POLL
+        {
+            budgeted_observer.reset();
             yield_once().await;
         }
     }
