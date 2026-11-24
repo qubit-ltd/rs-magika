@@ -1405,12 +1405,14 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
             let (lock, changed) = &*gate;
             *lock.lock().unwrap() = true;
             changed.notify_all();
-            assert!(crate::tests::internal::bridge_wait::join_before(
-                shutdown,
-                "cancel shutdown after provider result observation",
-                Duration::from_secs(6),
-            )
-            .worker_stopped);
+            assert!(
+                crate::tests::internal::bridge_wait::join_before(
+                    shutdown,
+                    "cancel shutdown after provider result observation",
+                    Duration::from_secs(6),
+                )
+                .worker_stopped
+            );
             Ok::<_, MimeError>(result)
         })
         .unwrap();
@@ -1515,12 +1517,14 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             assert_eq!(1, runtime.snapshot().admitted_not_started);
             if worker_fault {
                 let fault = runtime.submit(None, WorkerInput::Bytes(vec![0xff].into())).unwrap();
-                assert!(crate::tests::internal::bridge_wait::poll_before(
-                    fault,
-                    "worker fault while closing managed handoff",
-                    Duration::from_secs(2),
-                )
-                .is_err());
+                assert!(
+                    crate::tests::internal::bridge_wait::poll_before(
+                        fault,
+                        "worker fault while closing managed handoff",
+                        Duration::from_secs(2),
+                    )
+                    .is_err()
+                );
             } else {
                 let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
                 assert!(report.worker_stopped);
@@ -1762,23 +1766,27 @@ fn test_single_executor_blocked_handoff_returns_stop_without_provider_io() {
 
             if worker_fault {
                 let fault = runtime.submit(None, WorkerInput::Bytes(vec![0xff].into())).unwrap();
-                assert!(crate::tests::internal::bridge_wait::poll_before(
-                    fault,
-                    "worker fault while closing single executor handoff",
-                    Duration::from_secs(2),
-                )
-                .is_err());
+                assert!(
+                    crate::tests::internal::bridge_wait::poll_before(
+                        fault,
+                        "worker fault while closing single executor handoff",
+                        Duration::from_secs(2),
+                    )
+                    .is_err()
+                );
             } else {
                 let stopping_runtime = Arc::clone(&runtime);
                 let stop = std::thread::spawn(move || {
                     stopping_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
                 });
-                assert!(crate::tests::internal::bridge_wait::join_before(
-                    stop,
-                    "cancel shutdown after single executor handoff",
-                    Duration::from_secs(6),
-                )
-                .worker_stopped);
+                assert!(
+                    crate::tests::internal::bridge_wait::join_before(
+                        stop,
+                        "cancel shutdown after single executor handoff",
+                        Duration::from_secs(6),
+                    )
+                    .worker_stopped
+                );
             }
 
             let result = match detection.as_mut().poll(&mut context) {
@@ -1967,12 +1975,14 @@ fn test_worker_fault_closes_an_unsubmitted_request_handoff() {
     let (_handoff, _guard) = RequestAdmissionHandoff::new(admission);
     let inference = runtime.submit(None, WorkerInput::Bytes(vec![1].into())).unwrap();
 
-    assert!(crate::tests::internal::bridge_wait::poll_before(
-        inference,
-        "unsubmitted request handoff worker fault",
-        Duration::from_secs(2),
-    )
-    .is_err());
+    assert!(
+        crate::tests::internal::bridge_wait::poll_before(
+            inference,
+            "unsubmitted request handoff worker fault",
+            Duration::from_secs(2),
+        )
+        .is_err()
+    );
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
 
     assert!(state.stop_requested());
@@ -3163,12 +3173,14 @@ fn test_drain_real_managed_provider_route_completes_gated_read() {
         .unwrap(),
         OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-fixture"
     ));
-    assert!(crate::tests::internal::bridge_wait::poll_before(
-        operation.wait_settlement(),
-        "drained provider operation settlement",
-        Duration::from_secs(2),
-    )
-    .all_released());
+    assert!(
+        crate::tests::internal::bridge_wait::poll_before(
+            operation.wait_settlement(),
+            "drained provider operation settlement",
+            Duration::from_secs(2),
+        )
+        .all_released()
+    );
     let report = crate::tests::internal::bridge_wait::join_before(
         shutdown,
         "drain shutdown after real provider route",
@@ -3309,12 +3321,14 @@ fn test_cancel_admitted_provider_does_not_submit_model_job() {
     });
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     release_tx.send(()).unwrap();
-    assert!(crate::tests::internal::bridge_wait::join_before(
-        detect,
-        "cancelled admitted provider completion",
-        Duration::from_secs(2),
-    )
-    .is_err());
+    assert!(
+        crate::tests::internal::bridge_wait::join_before(
+            detect,
+            "cancelled admitted provider completion",
+            Duration::from_secs(2),
+        )
+        .is_err()
+    );
     let report = crate::tests::internal::bridge_wait::join_before(
         shutdown,
         "cancel shutdown after provider cancellation",
@@ -3337,12 +3351,14 @@ fn test_worker_panic_rejects_previously_admitted_dispatch() {
     let first = runtime
         .dispatch(first_admission, WorkerInput::Bytes(vec![b'x'].into()))
         .unwrap();
-    assert!(crate::tests::internal::bridge_wait::poll_before(
-        first,
-        "first admitted inference after worker panic",
-        Duration::from_secs(2),
-    )
-    .is_err());
+    assert!(
+        crate::tests::internal::bridge_wait::poll_before(
+            first,
+            "first admitted inference after worker panic",
+            Duration::from_secs(2),
+        )
+        .is_err()
+    );
     let error = match runtime.dispatch(second_admission, WorkerInput::Bytes(vec![b'y'].into())) {
         Ok(_) => panic!("dispatch after worker fault unexpectedly succeeded"),
         Err(error) => error,
@@ -3643,18 +3659,22 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
         second_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
     });
     barrier.wait();
-    assert!(crate::tests::internal::bridge_wait::join_before(
-        first_shutdown,
-        "first drain caller after shutdown barrier",
-        Duration::from_secs(2),
-    )
-    .worker_stopped);
-    assert!(crate::tests::internal::bridge_wait::join_before(
-        second_shutdown,
-        "second drain caller after shutdown barrier",
-        Duration::from_secs(2),
-    )
-    .worker_stopped);
+    assert!(
+        crate::tests::internal::bridge_wait::join_before(
+            first_shutdown,
+            "first drain caller after shutdown barrier",
+            Duration::from_secs(2),
+        )
+        .worker_stopped
+    );
+    assert!(
+        crate::tests::internal::bridge_wait::join_before(
+            second_shutdown,
+            "second drain caller after shutdown barrier",
+            Duration::from_secs(2),
+        )
+        .worker_stopped
+    );
 }
 
 #[test]
