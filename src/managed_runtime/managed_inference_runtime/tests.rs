@@ -306,7 +306,11 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         8,
         Box::new(move |_| {
             entered_tx.send(()).unwrap();
-            engine_release.lock().unwrap().recv().unwrap();
+            engine_release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("snapshot inference release barrier");
             Ok(Some("text/plain".to_owned()))
         }),
         Box::new(|| {}),
@@ -367,7 +371,13 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
 
     release_on_failure.release();
     assert_eq!(
-        block_on(inference).unwrap().as_deref(),
+        crate::tests::internal::bridge_wait::poll_before(
+            inference,
+            "inference after explicit driver release during drain",
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .as_deref(),
         Some("text/plain"),
         "accepted inference should return its real worker result"
     );
@@ -414,7 +424,13 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     let (request_tx, request_rx) = mpsc::sync_channel(1);
     let request_bridge = Arc::clone(&bridge);
     let request_thread = std::thread::spawn(move || {
-        request_tx.send(block_on(request_bridge.next_request())).unwrap();
+        request_tx
+            .send(crate::tests::internal::bridge_wait::poll_before(
+                request_bridge.next_request(),
+                "worker sampling request after bridge submission",
+                Duration::from_secs(5),
+            ))
+            .unwrap();
     });
     let request = request_rx
         .recv_timeout(Duration::from_secs(5))
@@ -481,7 +497,16 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
 
     drop(driver);
     state.mark_driver_done();
-    assert_eq!(block_on(inference).unwrap().as_deref(), Some("application/x-bytes-4"));
+    assert_eq!(
+        crate::tests::internal::bridge_wait::poll_before(
+            inference,
+            "inference after explicit bridge driver release",
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .as_deref(),
+        Some("application/x-bytes-4")
+    );
     let report = shutdown_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("shutdown must finish after the known-safe driver completes");
@@ -592,7 +617,12 @@ fn assert_scope_admission_rollback(stopped: bool) {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let outcome = block_on(operation.wait_outcome()).expect("operation outcome must be available");
+    let outcome = crate::tests::internal::bridge_wait::poll_before(
+        operation.wait_outcome(),
+        "scope admission rollback operation outcome",
+        Duration::from_secs(2),
+    )
+    .expect("operation outcome must be available");
     if stopped {
         assert!(
             matches!(outcome, OperationOutcome::Succeeded(()))
@@ -666,7 +696,12 @@ fn test_scope_admission_repeated_failures_do_not_accumulate() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let outcome = block_on(operation.wait_outcome()).expect("operation outcome must be available");
+    let outcome = crate::tests::internal::bridge_wait::poll_before(
+        operation.wait_outcome(),
+        "repeated scope admission failure operation outcome",
+        Duration::from_secs(2),
+    )
+    .expect("operation outcome must be available");
     assert!(
         matches!(outcome, OperationOutcome::Succeeded(())),
         "unexpected outcome: {outcome:?}"
@@ -702,7 +737,12 @@ fn test_scope_admission_failure_preserves_other_request() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let outcome = block_on(operation.wait_outcome()).expect("operation outcome must be available");
+    let outcome = crate::tests::internal::bridge_wait::poll_before(
+        operation.wait_outcome(),
+        "scope admission failure operation outcome",
+        Duration::from_secs(2),
+    )
+    .expect("operation outcome must be available");
     assert!(
         matches!(outcome, OperationOutcome::Succeeded(())),
         "unexpected outcome: {outcome:?}"
@@ -750,10 +790,14 @@ fn test_borrowed_content_closed_does_not_copy() {
     let runtime = borrowed_test_runtime(8);
     let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
     let copies = std::sync::atomic::AtomicUsize::new(0);
-    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |_| {
-        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::from(b"x".as_slice())
-    }));
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_content_unmanaged_with_copy(b"x", |_| {
+            copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::from(b"x".as_slice())
+        }),
+        "closed borrowed content rejection",
+        Duration::from_secs(2),
+    );
     assert!(result.is_err());
     assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -764,10 +808,14 @@ fn test_borrowed_content_full_does_not_copy() {
     let first = runtime.reserve_for_provider(None, 0).unwrap();
     let second = runtime.reserve_for_provider(None, 0).unwrap();
     let copies = std::sync::atomic::AtomicUsize::new(0);
-    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |_| {
-        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::from(b"x".as_slice())
-    }));
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_content_unmanaged_with_copy(b"x", |_| {
+            copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::from(b"x".as_slice())
+        }),
+        "full borrowed content rejection",
+        Duration::from_secs(2),
+    );
     assert!(result.is_err());
     assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 0);
     drop((first, second));
@@ -779,10 +827,14 @@ fn test_borrowed_content_budget_rejection_does_not_copy() {
     let runtime = borrowed_test_runtime(8);
     let reservation = runtime.reserve_for_provider(None, 8).unwrap();
     let copies = std::sync::atomic::AtomicUsize::new(0);
-    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |_| {
-        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::from(b"x".as_slice())
-    }));
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_content_unmanaged_with_copy(b"x", |_| {
+            copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::from(b"x".as_slice())
+        }),
+        "borrowed content budget rejection",
+        Duration::from_secs(2),
+    );
     assert!(result.is_err());
     assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 0);
     drop(reservation);
@@ -793,11 +845,15 @@ fn test_borrowed_content_budget_rejection_does_not_copy() {
 fn test_borrowed_content_accepted_copies_once() {
     let runtime = borrowed_test_runtime(8);
     let copies = std::sync::atomic::AtomicUsize::new(0);
-    let result = block_on(runtime.detect_content_unmanaged_with_copy(b"x", |content| {
-        copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        assert!(runtime.byte_budget.try_acquire(8).is_none());
-        content.to_vec().into_boxed_slice()
-    }));
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_content_unmanaged_with_copy(b"x", |content| {
+            copies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(runtime.byte_budget.try_acquire(8).is_none());
+            content.to_vec().into_boxed_slice()
+        }),
+        "accepted borrowed content inference",
+        Duration::from_secs(2),
+    );
     assert_eq!(result.unwrap(), None);
     assert_eq!(copies.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(runtime.byte_budget.try_acquire(8).is_some());
@@ -858,7 +914,11 @@ fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
     let worker_still_running = runtime.snapshot().worker_running == 1;
 
     gate_cleanup.release();
-    let report = shutdown.join().unwrap();
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "cancel shutdown after admitted bytes gate release",
+        Duration::from_secs(6),
+    );
     assert!(
         cancelled_before_release,
         "Cancel must end business waiting while worker is gated"
@@ -925,7 +985,11 @@ fn test_unmanaged_content_cancel_returns_before_worker_releases_capacity() {
     let worker_still_running = runtime.snapshot().worker_running == 1;
 
     gate_cleanup.release();
-    let report = shutdown.join().unwrap();
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "cancel shutdown after unmanaged content gate release",
+        Duration::from_secs(6),
+    );
     assert!(
         cancelled_before_release,
         "Cancel must end business waiting while worker is gated"
@@ -992,7 +1056,11 @@ fn test_admitted_bytes_preserve_published_result_when_cancel_follows() {
     let capacity_still_held = runtime.byte_budget.try_acquire(8).is_none();
 
     gate_cleanup.release();
-    let report = shutdown.join().unwrap();
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "cancel shutdown after published provider result",
+        Duration::from_secs(6),
+    );
     assert_eq!(result.unwrap().as_deref(), Some("application/x-published"));
     assert!(
         capacity_still_held,
@@ -1024,14 +1092,18 @@ fn test_range_driver_returns_published_result_after_runtime_stop_without_reading
     state.request_stop();
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
-    let result = block_on(super::drive_async_input(
-        ProviderDriverGuard::new(
-            ReadCountingInput(Arc::clone(&reads)),
-            bridge.driver(),
-            Arc::clone(&state),
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        super::drive_async_input(
+            ProviderDriverGuard::new(
+                ReadCountingInput(Arc::clone(&reads)),
+                bridge.driver(),
+                Arc::clone(&state),
+            ),
+            InferenceFuture::new(state),
         ),
-        InferenceFuture::new(state),
-    ));
+        "range driver returns already published result after runtime stop",
+        Duration::from_secs(2),
+    );
 
     assert_eq!(Some("application/x-published".to_owned()), result.unwrap());
     assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
@@ -1231,12 +1303,16 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
     );
     state.request_stop();
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let result = block_on(super::drive_async_input_with_stops(
-        ProviderDriverGuard::new(PendingInput(Arc::clone(&reads)), bridge.driver(), Arc::clone(&state)),
-        InferenceFuture::new(Arc::clone(&state)),
-        std::future::pending::<()>(),
-        state.wait_stopped(),
-    ));
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        super::drive_async_input_with_stops(
+            ProviderDriverGuard::new(PendingInput(Arc::clone(&reads)), bridge.driver(), Arc::clone(&state)),
+            InferenceFuture::new(Arc::clone(&state)),
+            std::future::pending::<()>(),
+            state.wait_stopped(),
+        ),
+        "range driver returns published result when cancellation precedes observer poll",
+        Duration::from_secs(2),
+    );
     assert_eq!(Some("application/x-runtime-cancel-result".to_owned()), result.unwrap());
     assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
 }
@@ -1254,7 +1330,9 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
         128,
         Box::new(move |_| {
             engine_started_tx.send(()).unwrap();
-            engine_release_rx.recv().unwrap();
+            engine_release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("published range inference release barrier");
             Ok(Some("application/x-published-range".to_owned()))
         }),
         Box::new(move || {
@@ -1327,12 +1405,22 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
             let (lock, changed) = &*gate;
             *lock.lock().unwrap() = true;
             changed.notify_all();
-            assert!(shutdown.join().unwrap().worker_stopped);
+            assert!(crate::tests::internal::bridge_wait::join_before(
+                shutdown,
+                "cancel shutdown after provider result observation",
+                Duration::from_secs(6),
+            )
+            .worker_stopped);
             Ok::<_, MimeError>(result)
         })
         .unwrap();
 
-    let outcome = block_on(operation.wait_outcome()).unwrap();
+    let outcome = crate::tests::internal::bridge_wait::poll_before(
+        operation.wait_outcome(),
+        "managed range operation outcome after cancel",
+        Duration::from_secs(2),
+    )
+    .unwrap();
     let OperationOutcome::Succeeded(result) = outcome else {
         panic!("outer operation should return the managed result observation: {outcome:?}");
     };
@@ -1427,7 +1515,12 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             assert_eq!(1, runtime.snapshot().admitted_not_started);
             if worker_fault {
                 let fault = runtime.submit(None, WorkerInput::Bytes(vec![0xff].into())).unwrap();
-                assert!(block_on(fault).is_err());
+                assert!(crate::tests::internal::bridge_wait::poll_before(
+                    fault,
+                    "worker fault while closing managed handoff",
+                    Duration::from_secs(2),
+                )
+                .is_err());
             } else {
                 let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
                 assert!(report.worker_stopped);
@@ -1453,7 +1546,12 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             assert_eq!(0, observations.opens.load(Ordering::SeqCst));
             assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
             task_gate.release();
-            let _ = block_on(operation.wait_outcome()).unwrap();
+            let _ = crate::tests::internal::bridge_wait::poll_before(
+                operation.wait_outcome(),
+                "stopped public handoff operation outcome",
+                Duration::from_secs(2),
+            )
+            .unwrap();
             if worker_fault {
                 let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
                 assert!(report.worker_stopped);
@@ -1509,7 +1607,12 @@ fn test_managed_public_handoffs_deliver_admission_and_complete() {
             })
             .unwrap();
         assert!(matches!(
-            block_on(operation.wait_outcome()).unwrap(),
+            crate::tests::internal::bridge_wait::poll_before(
+                operation.wait_outcome(),
+                "managed public handoff operation outcome",
+                Duration::from_secs(2),
+            )
+            .unwrap(),
             OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-managed-delivered"
         ));
         assert_eq!(1, engine_calls.load(Ordering::SeqCst));
@@ -1579,7 +1682,12 @@ fn test_managed_public_handoffs_cancel_before_child_body_starts() {
             .unwrap();
 
         assert!(matches!(
-            block_on(operation.wait_outcome()).unwrap(),
+            crate::tests::internal::bridge_wait::poll_before(
+                operation.wait_outcome(),
+                "cancelled managed handoff operation outcome",
+                Duration::from_secs(2),
+            )
+            .unwrap(),
             OperationOutcome::Succeeded(())
         ));
         assert!(runtime.tasks.lock().unwrap().is_empty());
@@ -1654,13 +1762,23 @@ fn test_single_executor_blocked_handoff_returns_stop_without_provider_io() {
 
             if worker_fault {
                 let fault = runtime.submit(None, WorkerInput::Bytes(vec![0xff].into())).unwrap();
-                assert!(block_on(fault).is_err());
+                assert!(crate::tests::internal::bridge_wait::poll_before(
+                    fault,
+                    "worker fault while closing single executor handoff",
+                    Duration::from_secs(2),
+                )
+                .is_err());
             } else {
                 let stopping_runtime = Arc::clone(&runtime);
                 let stop = std::thread::spawn(move || {
                     stopping_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
                 });
-                assert!(stop.join().unwrap().worker_stopped);
+                assert!(crate::tests::internal::bridge_wait::join_before(
+                    stop,
+                    "cancel shutdown after single executor handoff",
+                    Duration::from_secs(6),
+                )
+                .worker_stopped);
             }
 
             let result = match detection.as_mut().poll(&mut context) {
@@ -1684,7 +1802,12 @@ fn test_single_executor_blocked_handoff_returns_stop_without_provider_io() {
 
             drop(_release_executor);
             assert!(matches!(
-                block_on(blocker.wait_outcome()).unwrap(),
+                crate::tests::internal::bridge_wait::poll_before(
+                    blocker.wait_outcome(),
+                    "single executor blocker completion after release",
+                    Duration::from_secs(2),
+                )
+                .unwrap(),
                 OperationOutcome::Succeeded(())
             ));
         }
@@ -1730,7 +1853,12 @@ fn test_scope_less_bytes_cancel_releases_blocked_handoff_before_executor_resumes
 
     release_tx.send(()).unwrap();
     assert!(matches!(
-        block_on(blocker.wait_outcome()).unwrap(),
+        crate::tests::internal::bridge_wait::poll_before(
+            blocker.wait_outcome(),
+            "scope-less bytes handoff blocker completion after release",
+            Duration::from_secs(2),
+        )
+        .unwrap(),
         OperationOutcome::Succeeded(())
     ));
     let retirement_deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1807,7 +1935,12 @@ fn test_scope_less_provider_cancel_releases_blocked_handoff_before_provider_io()
 
     release_tx.send(()).unwrap();
     assert!(matches!(
-        block_on(blocker.wait_outcome()).unwrap(),
+        crate::tests::internal::bridge_wait::poll_before(
+            blocker.wait_outcome(),
+            "scope-less provider handoff blocker completion after release",
+            Duration::from_secs(2),
+        )
+        .unwrap(),
         OperationOutcome::Succeeded(())
     ));
     let retirement_deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1834,7 +1967,12 @@ fn test_worker_fault_closes_an_unsubmitted_request_handoff() {
     let (_handoff, _guard) = RequestAdmissionHandoff::new(admission);
     let inference = runtime.submit(None, WorkerInput::Bytes(vec![1].into())).unwrap();
 
-    assert!(block_on(inference).is_err());
+    assert!(crate::tests::internal::bridge_wait::poll_before(
+        inference,
+        "unsubmitted request handoff worker fault",
+        Duration::from_secs(2),
+    )
+    .is_err());
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
 
     assert!(state.stop_requested());
@@ -1866,7 +2004,11 @@ fn test_unmanaged_content_waits_for_worker_settlement_after_business_result() {
     let request_runtime = Arc::clone(&runtime);
     let request = std::thread::spawn(move || {
         result_tx
-            .send(block_on(request_runtime.detect_content_unmanaged(b"data")))
+            .send(crate::tests::internal::bridge_wait::poll_before(
+                request_runtime.detect_content_unmanaged(b"data"),
+                "unmanaged inference completion after worker settlement",
+                Duration::from_secs(2),
+            ))
             .unwrap();
     });
     business_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -2095,7 +2237,9 @@ fn test_provider_length_error_drops_input_before_settling_admission() {
                 std::sync::atomic::Ordering::Release,
             );
             self.started.send(()).unwrap();
-            self.release.recv().unwrap();
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("input drop release barrier");
         }
     }
     impl magika::AsyncInput for DropObservedLengthInput {
@@ -2128,14 +2272,22 @@ fn test_provider_length_error_drops_input_before_settling_admission() {
         observed_released: Arc::clone(&observed_released),
     };
     let detect = std::thread::spawn(move || {
-        block_on(detect_runtime.detect_async_input_admitted_test(admission, input, 4, map_length_error))
+        crate::tests::internal::bridge_wait::poll_before(
+            detect_runtime.detect_async_input_admitted_test(admission, input, 4, map_length_error),
+            "provider length error detection and input drop",
+            Duration::from_secs(2),
+        )
     });
 
     let drop_started = started_rx.recv_timeout(Duration::from_secs(2)).is_ok();
     let bytes_during_drop = observed_bytes.load(std::sync::atomic::Ordering::Acquire);
     let released_during_drop = observed_released.load(std::sync::atomic::Ordering::Acquire);
     let _ = release_tx.send(());
-    let result = detect.join().unwrap();
+    let result = crate::tests::internal::bridge_wait::join_before(
+        detect,
+        "provider length error input drop completion",
+        Duration::from_secs(2),
+    );
 
     assert!(drop_started, "input destructor did not reach its barrier");
     assert_eq!(4, bytes_during_drop);
@@ -2200,8 +2352,16 @@ fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registratio
     if !scanned_before_registration {
         scan_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     }
-    let _report = shutdown.join().unwrap();
-    reserver.join().unwrap();
+    let _report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "cancel shutdown after request registration scan",
+        Duration::from_secs(2),
+    );
+    crate::tests::internal::bridge_wait::join_before(
+        reserver,
+        "request reservation after shutdown scan barrier",
+        Duration::from_secs(2),
+    );
 
     assert!(
         admission.state.stop_requested(),
@@ -2232,7 +2392,11 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = block_on(first.wait_outcome());
+    let _ = crate::tests::internal::bridge_wait::poll_before(
+        first.wait_outcome(),
+        "first committed provider admission operation outcome",
+        Duration::from_secs(2),
+    );
 
     let later_runtime = Arc::clone(&runtime);
     let mut later = service
@@ -2246,7 +2410,11 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let _ = block_on(later.wait_outcome());
+    let _ = crate::tests::internal::bridge_wait::poll_before(
+        later.wait_outcome(),
+        "later committed provider admission operation outcome",
+        Duration::from_secs(2),
+    );
 
     let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
 }
@@ -2289,9 +2457,18 @@ fn test_provider_input_drops_before_first_setup_poll_releases_admission() {
             Ok::<_, MimeError>(())
         })
         .unwrap();
-    let outcome = block_on(operation.wait_outcome()).unwrap();
+    let outcome = crate::tests::internal::bridge_wait::poll_before(
+        operation.wait_outcome(),
+        "provider setup drop operation outcome",
+        Duration::from_secs(2),
+    )
+    .unwrap();
     assert!(matches!(outcome, OperationOutcome::Succeeded(())));
-    let _settlement = block_on(operation.wait_settlement());
+    let _settlement = crate::tests::internal::bridge_wait::poll_before(
+        operation.wait_settlement(),
+        "provider setup drop operation settlement",
+        Duration::from_secs(2),
+    );
     let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
 }
 
@@ -2335,17 +2512,21 @@ fn test_provider_input_drops_before_begin_rejection_releases_admission() {
     state.request_stop();
     let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let result = block_on(runtime.detect_async_input_admitted_test(
-        admission,
-        DropObservedInput {
-            runtime: Arc::clone(&runtime),
-            state: Arc::clone(&state),
-            observed_bytes: Arc::clone(&observed_bytes),
-            observed_released: Arc::clone(&observed_released),
-        },
-        4,
-        map_provider_test_error,
-    ));
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_async_input_admitted_test(
+            admission,
+            DropObservedInput {
+                runtime: Arc::clone(&runtime),
+                state: Arc::clone(&state),
+                observed_bytes: Arc::clone(&observed_bytes),
+                observed_released: Arc::clone(&observed_released),
+            },
+            4,
+            map_provider_test_error,
+        ),
+        "provider input drop before begin rejection",
+        Duration::from_secs(2),
+    );
     assert!(result.is_err());
     assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::Acquire));
     assert!(!observed_released.load(std::sync::atomic::Ordering::Acquire));
@@ -2400,18 +2581,22 @@ fn test_provider_input_drops_before_dispatch_rejection_releases_admission() {
         let state = Arc::clone(&admission.state);
         let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let result = block_on(runtime.detect_async_input_admitted_test(
-            admission,
-            DropObservedInput {
-                runtime: Arc::clone(&runtime),
-                state: Arc::clone(&state),
-                observed_bytes: Arc::clone(&observed_bytes),
-                observed_released: Arc::clone(&observed_released),
-                close_gate_on_length: !close_sender,
-            },
-            4,
-            map_provider_test_error,
-        ));
+        let result = crate::tests::internal::bridge_wait::poll_before(
+            runtime.detect_async_input_admitted_test(
+                admission,
+                DropObservedInput {
+                    runtime: Arc::clone(&runtime),
+                    state: Arc::clone(&state),
+                    observed_bytes: Arc::clone(&observed_bytes),
+                    observed_released: Arc::clone(&observed_released),
+                    close_gate_on_length: !close_sender,
+                },
+                4,
+                map_provider_test_error,
+            ),
+            "provider input drop before dispatch rejection",
+            Duration::from_secs(2),
+        );
         assert!(result.is_err());
         assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::Acquire));
         assert!(!observed_released.load(std::sync::atomic::Ordering::Acquire));
@@ -2764,7 +2949,11 @@ fn assert_current_bridge_closes_for_engine(
         engine,
         Box::new(move || {
             business_tx.send(()).unwrap();
-            release_wait.lock().unwrap().recv().unwrap();
+            release_wait
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker callback release barrier");
         }),
     );
     let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
@@ -2787,7 +2976,11 @@ fn assert_current_bridge_closes_for_engine(
     let (closed_tx, closed_rx) = mpsc::sync_channel(1);
     let waiting_bridge = Arc::clone(&bridge);
     let closure_observer = std::thread::spawn(move || {
-        block_on(waiting_bridge.closed());
+        crate::tests::internal::bridge_wait::poll_before(
+            waiting_bridge.closed(),
+            "current bridge closure after worker completion",
+            Duration::from_secs(2),
+        );
         closed_tx.send(()).unwrap();
     });
     if closed_rx.recv_timeout(Duration::from_secs(2)).is_err() {
@@ -2842,7 +3035,11 @@ fn test_drain_admitted_provider_completes_after_gate_closes() {
             let release = Arc::clone(&self.1);
             async move {
                 started.send(()).unwrap();
-                release.lock().unwrap().recv().unwrap();
+                release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("drained provider length release barrier");
                 Ok(1)
             }
         }
@@ -2859,12 +3056,16 @@ fn test_drain_admitted_provider_completes_after_gate_closes() {
     let release_rx = Arc::new(Mutex::new(release_rx));
     let detect_runtime = Arc::clone(&runtime);
     let detect = std::thread::spawn(move || {
-        block_on(detect_runtime.detect_async_input_admitted_test(
-            admission,
-            GatedLengthInput(started_tx, release_rx),
-            8,
-            map_provider_test_error,
-        ))
+        crate::tests::internal::bridge_wait::poll_before(
+            detect_runtime.detect_async_input_admitted_test(
+                admission,
+                GatedLengthInput(started_tx, release_rx),
+                8,
+                map_provider_test_error,
+            ),
+            "drained admitted provider detection",
+            Duration::from_secs(2),
+        )
     });
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -2954,23 +3155,40 @@ fn test_drain_real_managed_provider_route_completes_gated_read() {
     assert!(runtime.reserve_for_provider(None, 1).is_err());
     gate.release();
     assert!(matches!(
-        block_on(operation.wait_outcome()).unwrap(),
+        crate::tests::internal::bridge_wait::poll_before(
+            operation.wait_outcome(),
+            "drained provider operation outcome",
+            Duration::from_secs(2),
+        )
+        .unwrap(),
         OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-fixture"
     ));
-    assert!(block_on(operation.wait_settlement()).all_released());
-    let report = shutdown.join().unwrap();
+    assert!(crate::tests::internal::bridge_wait::poll_before(
+        operation.wait_settlement(),
+        "drained provider operation settlement",
+        Duration::from_secs(2),
+    )
+    .all_released());
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "drain shutdown after real provider route",
+        Duration::from_secs(2),
+    );
     assert_eq!(0, report.admission.snapshot.active_operations);
     assert!(report.worker_stopped);
     service.close_admission();
-    assert_eq!(
-        0,
-        supervisor
-            .request_shutdown(ShutdownMode::Drain)
-            .wait()
-            .unwrap()
-            .snapshot
-            .active_operations
-    );
+    let supervisor_shutdown = supervisor
+        .request_shutdown(ShutdownMode::Drain)
+        .wait_for(Duration::from_secs(2))
+        .unwrap();
+    let supervisor_report = match supervisor_shutdown {
+        qubit_operation::ShutdownWait::Completed(report) => report,
+        qubit_operation::ShutdownWait::Pending(snapshot) => panic!(
+            "supervisor shutdown did not complete; active_operations={}",
+            snapshot.active_operations
+        ),
+    };
+    assert_eq!(0, supervisor_report.snapshot.active_operations);
 }
 
 #[test]
@@ -2982,16 +3200,24 @@ fn test_drain_reserved_content_can_submit_operation_after_gate_closes() {
     let release_rx = Arc::new(Mutex::new(release_rx));
     let submit_runtime = Arc::clone(&runtime);
     let submit = std::thread::spawn(move || {
-        block_on(submit_runtime.submit_operation_admitted_with_hook(
-            None,
-            admission,
-            WorkerInput::Bytes(vec![b'x'].into()),
-            move || {
-                submit_tx.send(()).unwrap();
-                release_rx.lock().unwrap().recv().unwrap();
-            },
-            |_| {},
-        ))
+        crate::tests::internal::bridge_wait::poll_before(
+            submit_runtime.submit_operation_admitted_with_hook(
+                None,
+                admission,
+                WorkerInput::Bytes(vec![b'x'].into()),
+                move || {
+                    submit_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("reserved content release barrier");
+                },
+                |_| {},
+            ),
+            "reserved content submit after drain closes",
+            Duration::from_secs(2),
+        )
     });
     submit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -3005,8 +3231,20 @@ fn test_drain_reserved_content_can_submit_operation_after_gate_closes() {
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(runtime.reserve_for_provider(None, 1).is_err());
     release_tx.send(()).unwrap();
-    assert_eq!(submit.join().unwrap().unwrap(), None);
-    let report = shutdown.join().unwrap();
+    assert_eq!(
+        crate::tests::internal::bridge_wait::join_before(
+            submit,
+            "reserved content submission after drain gate closes",
+            Duration::from_secs(2),
+        )
+        .unwrap(),
+        None
+    );
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "drain shutdown after reserved content submission",
+        Duration::from_secs(2),
+    );
     assert_eq!(0, report.admission.snapshot.active_operations);
     assert!(report.worker_stopped);
 }
@@ -3020,7 +3258,11 @@ fn test_cancel_admitted_provider_does_not_submit_model_job() {
             let release = Arc::clone(&self.1);
             async move {
                 started.send(()).unwrap();
-                release.lock().unwrap().recv().unwrap();
+                release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("cancelled provider length release barrier");
                 Ok(1)
             }
         }
@@ -3046,12 +3288,16 @@ fn test_cancel_admitted_provider_does_not_submit_model_job() {
     let release_rx = Arc::new(Mutex::new(release_rx));
     let detect_runtime = Arc::clone(&runtime);
     let detect = std::thread::spawn(move || {
-        block_on(detect_runtime.detect_async_input_admitted_test(
-            admission,
-            GatedLengthInput(started_tx, release_rx),
-            8,
-            map_provider_test_error,
-        ))
+        crate::tests::internal::bridge_wait::poll_before(
+            detect_runtime.detect_async_input_admitted_test(
+                admission,
+                GatedLengthInput(started_tx, release_rx),
+                8,
+                map_provider_test_error,
+            ),
+            "cancelled admitted provider detection",
+            Duration::from_secs(2),
+        )
     });
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let (closed_tx, closed_rx) = mpsc::sync_channel(1);
@@ -3063,8 +3309,17 @@ fn test_cancel_admitted_provider_does_not_submit_model_job() {
     });
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     release_tx.send(()).unwrap();
-    assert!(detect.join().unwrap().is_err());
-    let report = shutdown.join().unwrap();
+    assert!(crate::tests::internal::bridge_wait::join_before(
+        detect,
+        "cancelled admitted provider completion",
+        Duration::from_secs(2),
+    )
+    .is_err());
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "cancel shutdown after provider cancellation",
+        Duration::from_secs(2),
+    );
     assert!(report.worker_stopped);
     assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
 }
@@ -3082,7 +3337,12 @@ fn test_worker_panic_rejects_previously_admitted_dispatch() {
     let first = runtime
         .dispatch(first_admission, WorkerInput::Bytes(vec![b'x'].into()))
         .unwrap();
-    assert!(first.wait_blocking().is_err());
+    assert!(crate::tests::internal::bridge_wait::poll_before(
+        first,
+        "first admitted inference after worker panic",
+        Duration::from_secs(2),
+    )
+    .is_err());
     let error = match runtime.dispatch(second_admission, WorkerInput::Bytes(vec![b'y'].into())) {
         Ok(_) => panic!("dispatch after worker fault unexpectedly succeeded"),
         Err(error) => error,
@@ -3104,7 +3364,9 @@ fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
             16,
             Box::new(move |_| {
                 engine_started_tx.send(()).unwrap();
-                panic_rx.recv().unwrap();
+                panic_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("worker panic release barrier");
                 panic!("injected inference worker panic");
             }),
             Box::new(|| {}),
@@ -3180,14 +3442,24 @@ fn test_worker_panic_wakes_pending_provider_io_before_delivery() {
             "pending {phase} operation must retain its unconfirmed I/O fact"
         );
         assert_eq!(
-            block_on(first).unwrap_err().to_string(),
+            crate::tests::internal::bridge_wait::poll_before(
+                first,
+                "worker panic request outcome",
+                Duration::from_secs(2),
+            )
+            .unwrap_err()
+            .to_string(),
             "MIME detector backend 'magika' failed: inference worker panicked",
             "the request that triggered the panic must retain its original MIME failure"
         );
         let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
         assert!(report.worker_stopped);
         assert!(!report.worker_panicked);
-        let _ = block_on(provider.wait_settlement());
+        let _ = crate::tests::internal::bridge_wait::poll_before(
+            provider.wait_settlement(),
+            "pending provider settlement after worker panic",
+            Duration::from_secs(2),
+        );
     }
 }
 
@@ -3213,7 +3485,9 @@ fn test_worker_panic_wakes_real_pending_provider_path_stages() {
             qubit_mime::MimeConfig::default().max_buffer_size(),
             Box::new(move |_| {
                 engine_started_tx.send(()).unwrap();
-                panic_rx.recv().unwrap();
+                panic_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("real provider worker panic release barrier");
                 panic!("injected inference worker panic");
             }),
             Box::new(|| {}),
@@ -3288,13 +3562,28 @@ fn test_worker_panic_wakes_real_pending_provider_path_stages() {
             std::thread::yield_now();
         }
         assert_eq!(
-            block_on(first).unwrap_err().to_string(),
+            crate::tests::internal::bridge_wait::poll_before(
+                first,
+                "worker panic request outcome with real provider path",
+                Duration::from_secs(2),
+            )
+            .unwrap_err()
+            .to_string(),
             "MIME detector backend 'magika' failed: inference worker panicked",
             "the worker panic request keeps its original MIME error"
         );
-        let outcome = block_on(provider.wait_outcome()).unwrap();
+        let outcome = crate::tests::internal::bridge_wait::poll_before(
+            provider.wait_outcome(),
+            "real provider operation outcome after worker panic",
+            Duration::from_secs(2),
+        )
+        .unwrap();
         assert!(matches!(outcome, OperationOutcome::Succeeded(())));
-        let settlement = block_on(provider.wait_settlement());
+        let settlement = crate::tests::internal::bridge_wait::poll_before(
+            provider.wait_settlement(),
+            "real provider settlement after worker panic",
+            Duration::from_secs(2),
+        );
         assert!(
             !settlement.all_released(),
             "pending {phase} I/O must remain visible as a negative settlement"
@@ -3314,7 +3603,11 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
         8,
         Box::new(move |_| {
             started_tx.send(()).unwrap();
-            engine_release.lock().unwrap().recv().unwrap();
+            engine_release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2))
+                .expect("drain timeout inference release barrier");
             Ok(None)
         }),
         Box::new(|| {}),
@@ -3327,7 +3620,15 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
     assert_eq!(1, first.admission.snapshot.service_resources);
 
     release_tx.send(()).unwrap();
-    assert_eq!(block_on(inference).unwrap(), None);
+    assert_eq!(
+        crate::tests::internal::bridge_wait::poll_before(
+            inference,
+            "inference completion after drain timeout release",
+            Duration::from_secs(2),
+        )
+        .unwrap(),
+        None
+    );
     let barrier = Arc::new(std::sync::Barrier::new(3));
     let first_runtime = Arc::clone(&runtime);
     let first_barrier = Arc::clone(&barrier);
@@ -3342,8 +3643,18 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
         second_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
     });
     barrier.wait();
-    assert!(first_shutdown.join().unwrap().worker_stopped);
-    assert!(second_shutdown.join().unwrap().worker_stopped);
+    assert!(crate::tests::internal::bridge_wait::join_before(
+        first_shutdown,
+        "first drain caller after shutdown barrier",
+        Duration::from_secs(2),
+    )
+    .worker_stopped);
+    assert!(crate::tests::internal::bridge_wait::join_before(
+        second_shutdown,
+        "second drain caller after shutdown barrier",
+        Duration::from_secs(2),
+    )
+    .worker_stopped);
 }
 
 #[test]
@@ -3356,7 +3667,9 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
         8,
         Box::new(move |_| {
             entered_tx.send(()).unwrap();
-            panic_rx.recv().unwrap();
+            panic_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("fault injection release barrier");
             panic!("injected worker panic")
         }),
         Box::new(|| {}),
@@ -3453,12 +3766,21 @@ fn test_unmanaged_detection_enforces_limit_and_shutdown_joins_worker() {
     assert!(format!("{runtime:?}").contains("ManagedInferenceRuntime"));
     assert_eq!(runtime.max_in_flight_bytes(), 8);
     assert!(matches!(
-        block_on(runtime.detect_bytes_unmanaged(vec![0; 9])),
+        crate::tests::internal::bridge_wait::poll_before(
+            runtime.detect_bytes_unmanaged(vec![0; 9]),
+            "unmanaged byte limit rejection",
+            Duration::from_secs(2),
+        ),
         Err(MimeError::BufferLimitExceeded { .. })
     ));
     assert_eq!(
         Some("application/x-3".to_owned()),
-        block_on(runtime.detect_bytes_unmanaged(vec![1, 2, 3])).unwrap()
+        crate::tests::internal::bridge_wait::poll_before(
+            runtime.detect_bytes_unmanaged(vec![1, 2, 3]),
+            "unmanaged byte detection within limit",
+            Duration::from_secs(2),
+        )
+        .unwrap()
     );
 
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
@@ -3508,7 +3830,14 @@ fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
     let (lock, ready) = &*gate;
     *lock.lock().unwrap() = true;
     ready.notify_all();
-    assert!(matches!(first.wait_blocking(), Ok(None)));
+    assert!(matches!(
+        crate::tests::internal::bridge_wait::poll_before(
+            first,
+            "first queued inference after worker gate release",
+            Duration::from_secs(5),
+        ),
+        Ok(None)
+    ));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
 }
@@ -3543,18 +3872,6 @@ fn test_shutdown_recovers_poisoned_runtime_mutexes() {
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
     assert!(report.admission.snapshot.active_operations == 0);
     assert!(report.worker_stopped);
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = Box::pin(future);
-    loop {
-        match Pin::as_mut(&mut future).poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
 }
 
 #[test]
@@ -3609,8 +3926,24 @@ fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
     assert!(third_admission.is_err());
     assert_eq!(7, reserved_while_worker_is_gated);
 
-    assert_eq!(Some("application/x-gated".to_owned()), block_on(first).unwrap());
-    assert_eq!(Some("application/x-gated".to_owned()), block_on(second).unwrap());
+    assert_eq!(
+        Some("application/x-gated".to_owned()),
+        crate::tests::internal::bridge_wait::poll_before(
+            first,
+            "first admitted inference after worker gate release",
+            Duration::from_secs(2),
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        Some("application/x-gated".to_owned()),
+        crate::tests::internal::bridge_wait::poll_before(
+            second,
+            "second admitted inference after worker gate release",
+            Duration::from_secs(2),
+        )
+        .unwrap()
+    );
     assert!(first_state.wait_released_blocking(Duration::from_secs(2)));
     assert!(second_state.wait_released_blocking(Duration::from_secs(2)));
     assert_eq!(
@@ -3728,7 +4061,9 @@ fn test_rejected_bytes_drop_before_worker_release_is_published() {
             self.observed_released
                 .store(released, std::sync::atomic::Ordering::Release);
             self.started.send(()).unwrap();
-            self.release.recv().unwrap();
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("rejected bytes drop release barrier");
         }
     }
 
@@ -3770,12 +4105,16 @@ fn test_rejected_bytes_drop_before_worker_release_is_published() {
     let released_during_drop = observed_released.load(std::sync::atomic::Ordering::Acquire);
     let bytes_before_release = runtime.snapshot().reserved_bytes;
     let _ = release_tx.send(());
-    let dispatch_result = dispatch.join();
+    let dispatch_result = crate::tests::internal::bridge_wait::join_before(
+        dispatch,
+        "rejected bytes dispatch after payload drop",
+        Duration::from_secs(2),
+    );
     assert!(drop_started, "payload destructor did not reach its barrier");
     assert_eq!(1, bytes_during_drop);
     assert!(!released_during_drop);
     assert_eq!(1, bytes_before_release);
-    assert!(dispatch_result.unwrap().is_err());
+    assert!(dispatch_result.is_err());
     assert!(state.wait_released_blocking(Duration::ZERO));
     assert_eq!(0, runtime.snapshot().reserved_bytes);
     let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
@@ -3796,7 +4135,9 @@ fn test_scope_less_scope_registration_rejection_drops_payload_before_release() {
                 self.runtime.snapshot().reserved_bytes == 4 && !self.state.wait_released_blocking(Duration::ZERO);
             self.observed.store(held, std::sync::atomic::Ordering::Release);
             self.started.send(()).unwrap();
-            self.release.recv().unwrap();
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("scope-less registration drop release barrier");
         }
     }
 
@@ -3811,34 +4152,42 @@ fn test_scope_less_scope_registration_rejection_drops_payload_before_release() {
     let probe_state = Arc::clone(&state);
     let probe_observed = Arc::clone(&observed);
     let submit = std::thread::spawn(move || {
-        block_on(submit_runtime.submit_operation_admitted_with_hook(
-            None,
-            admission,
-            WorkerInput::Bytes(WorkerBytes::with_drop_probe(
-                vec![b'x'].into_boxed_slice(),
-                Box::new(DropOrderProbe {
-                    runtime: probe_runtime,
-                    state: probe_state,
-                    started: started_tx,
-                    release: release_rx,
-                    observed: probe_observed,
-                }),
-            )),
-            || {},
-            |scope| {
-                let _ = scope.request_stop(StopReason::UserCancelled);
-            },
-        ))
+        crate::tests::internal::bridge_wait::poll_before(
+            submit_runtime.submit_operation_admitted_with_hook(
+                None,
+                admission,
+                WorkerInput::Bytes(WorkerBytes::with_drop_probe(
+                    vec![b'x'].into_boxed_slice(),
+                    Box::new(DropOrderProbe {
+                        runtime: probe_runtime,
+                        state: probe_state,
+                        started: started_tx,
+                        release: release_rx,
+                        observed: probe_observed,
+                    }),
+                )),
+                || {},
+                |scope| {
+                    let _ = scope.request_stop(StopReason::UserCancelled);
+                },
+            ),
+            "scope-less scope registration rejection",
+            Duration::from_secs(2),
+        )
     });
     let drop_started = started_rx.recv_timeout(Duration::from_secs(2)).is_ok();
     let held_during_drop = observed.load(std::sync::atomic::Ordering::Acquire);
     let bytes_before_release = runtime.snapshot().reserved_bytes;
     let _ = release_tx.send(());
-    let submit_result = submit.join();
+    let submit_result = crate::tests::internal::bridge_wait::join_before(
+        submit,
+        "scope-less rejected submission after payload drop",
+        Duration::from_secs(2),
+    );
     assert!(drop_started, "payload destructor did not reach its barrier");
     assert!(held_during_drop);
     assert_eq!(4, bytes_before_release);
-    assert!(submit_result.unwrap().is_err());
+    assert!(submit_result.is_err());
     assert!(state.wait_released_blocking(Duration::ZERO));
     assert_eq!(0, runtime.snapshot().reserved_bytes);
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
@@ -3874,8 +4223,16 @@ fn test_shutdown_timeout_observes_joinable_worker_while_admission_is_held() {
         second_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50))
     });
     barrier.wait();
-    let first = first_shutdown.join().unwrap();
-    let second = second_shutdown.join().unwrap();
+    let first = crate::tests::internal::bridge_wait::join_before(
+        first_shutdown,
+        "first shutdown caller after held admission barrier",
+        Duration::from_secs(2),
+    );
+    let second = crate::tests::internal::bridge_wait::join_before(
+        second_shutdown,
+        "second shutdown caller after held admission barrier",
+        Duration::from_secs(2),
+    );
 
     assert_eq!(1, first.admission.snapshot.service_resources);
     assert_eq!(1, second.admission.snapshot.service_resources);
