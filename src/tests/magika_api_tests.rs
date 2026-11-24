@@ -34,7 +34,7 @@ fn test_public_async_content_and_runtime_snapshot() {
     assert_eq!(0, before.admitted_not_started);
     assert_eq!(0, before.worker_running);
 
-    let candidates = block_on(MimeDetectorBackend::guess_from_content_async(&detector, PYTHON))
+    let candidates = block_on(MimeDetectorBackend::guess_from_content_async(&detector, PYTHON), "async content hook")
         .expect("async content hook should detect the fixture");
 
     assert_eq!(vec!["text/x-python"], candidates);
@@ -95,7 +95,7 @@ fn test_public_async_provider_path_hook_completes_operation_child() {
         &file_system,
         &path,
         4096,
-    ))
+    ), "async provider path hook")
     .expect("async provider path hook should detect the fixture");
 
     assert_eq!(vec!["text/x-python"], candidates);
@@ -141,7 +141,7 @@ fn test_public_async_provider_path_reports_conditional_open_failure() {
         &file_system,
         &path,
         4096,
-    ))
+    ), "async provider path open failure")
     .expect_err("a failed conditional open should be reported");
     assert!(error.to_string().contains("configured conditional read failure"));
     assert!(observations.opens.load(std::sync::atomic::Ordering::SeqCst) > 0);
@@ -168,12 +168,13 @@ fn test_public_managed_content_hook_runs_as_operation_child() {
         })
         .expect("managed child should be admitted");
 
-    let outcome = block_on(operation.wait_outcome()).expect("operation outcome should be delivered");
+    let outcome = block_on(operation.wait_outcome(), "managed content operation outcome")
+        .expect("operation outcome should be delivered");
     assert!(
         matches!(outcome, OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"),
         "managed content hook returned {outcome:?}"
     );
-    let settlement = block_on(operation.wait_settlement());
+    let settlement = block_on(operation.wait_settlement(), "managed content operation settlement");
     assert!(settlement.all_released());
     let report = detector.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));
     assert!(report.worker_stopped);
@@ -200,13 +201,14 @@ fn test_public_managed_provider_path_hook_settles_operation_child() {
         })
         .expect("managed provider child should be admitted");
 
-    let outcome = block_on(operation.wait_outcome()).expect("operation outcome should be delivered");
+    let outcome = block_on(operation.wait_outcome(), "managed provider operation outcome")
+        .expect("operation outcome should be delivered");
     assert!(
         matches!(outcome, OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"),
         "managed provider hook returned {outcome:?}"
     );
     assert!(observations.opens.load(std::sync::atomic::Ordering::SeqCst) > 0);
-    assert!(block_on(operation.wait_settlement()).all_released());
+    assert!(block_on(operation.wait_settlement(), "managed provider operation settlement").all_released());
     let report = detector.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));
     assert!(report.worker_stopped);
 }

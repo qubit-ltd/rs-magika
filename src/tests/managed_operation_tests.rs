@@ -36,15 +36,39 @@ impl Wake for ThreadWaker {
     }
 }
 
-pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: Future>(future: F, stage: &str) -> F::Output {
     let waker = std::task::Waker::from(Arc::new(ThreadWaker(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = pin!(future);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         match future.as_mut().poll(&mut context) {
             Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::park(),
+            Poll::Pending => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "managed operation wait timed out; stage={stage}"
+                );
+                std::thread::park_timeout(remaining);
+            }
         }
+    }
+}
+
+fn wait_for_test_gate(gate: &(std::sync::Mutex<bool>, std::sync::Condvar), stage: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (lock, ready) = gate;
+    let mut open = lock.lock().unwrap();
+    while !*open {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!remaining.is_zero(), "test gate timed out; stage={stage}");
+        let (next, timed_out) = ready.wait_timeout(open, remaining).unwrap();
+        open = next;
+        assert!(
+            !timed_out.timed_out() || *open,
+            "test gate timed out; stage={stage}"
+        );
     }
 }
 
@@ -64,11 +88,7 @@ fn test_public_child_result_precedes_worker_resource_release() {
             Ok(Some("application/x-lifecycle".to_owned()))
         }),
         Box::new(move || {
-            let (lock, ready) = &*worker_gate_task;
-            let mut released = lock.lock().unwrap();
-            while !*released {
-                released = ready.wait(released).unwrap();
-            }
+            wait_for_test_gate(&worker_gate_task, "worker resource release");
         }),
     ));
     let request_runtime = Arc::clone(&runtime);
@@ -80,7 +100,7 @@ fn test_public_child_result_precedes_worker_resource_release() {
         .unwrap();
     started.1.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(matches!(
-        block_on(operation.wait_outcome()).unwrap(),
+        block_on(operation.wait_outcome(), "child operation outcome").unwrap(),
         OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-lifecycle"
     ));
     assert!(group.snapshot().active_operations > 0);
@@ -88,7 +108,7 @@ fn test_public_child_result_precedes_worker_resource_release() {
     let (lock, ready) = &*worker_gate;
     *lock.lock().unwrap() = true;
     ready.notify_all();
-    let _settlement = block_on(operation.wait_settlement());
+    let _settlement = block_on(operation.wait_settlement(), "child operation settlement");
     assert_eq!(0, group.snapshot().active_operations);
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
@@ -107,11 +127,7 @@ fn test_public_stop_returns_outcome_while_native_worker_retains_resources() {
         16,
         Box::new(move |_| {
             entered_tx.send(()).unwrap();
-            let (lock, ready) = &*worker_gate_task;
-            let mut released = lock.lock().unwrap();
-            while !*released {
-                released = ready.wait(released).unwrap();
-            }
+            wait_for_test_gate(&worker_gate_task, "cancelled native worker release");
             Ok(None)
         }),
         Box::new(|| {}),
@@ -126,7 +142,7 @@ fn test_public_stop_returns_outcome_while_native_worker_retains_resources() {
     entered.1.recv_timeout(Duration::from_secs(2)).unwrap();
     let _ = operation.request_stop(StopReason::UserCancelled);
     assert!(matches!(
-        block_on(operation.wait_outcome()).unwrap(),
+        block_on(operation.wait_outcome(), "stopped operation outcome").unwrap(),
         OperationOutcome::Stopped(_)
     ));
     assert!(group.snapshot().active_operations > 0);
@@ -136,7 +152,7 @@ fn test_public_stop_returns_outcome_while_native_worker_retains_resources() {
     let (lock, ready) = &*worker_gate;
     *lock.lock().unwrap() = true;
     ready.notify_all();
-    let _settlement = block_on(operation.wait_settlement());
+    let _settlement = block_on(operation.wait_settlement(), "stopped operation settlement");
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
     assert!(report.worker_stopped);
 }
@@ -190,11 +206,7 @@ fn test_public_managed_provider_worker_panic_reports_failure_and_settlement() {
         128,
         Box::new(move |_| {
             entered_tx.send(()).unwrap();
-            let (lock, ready) = &*engine_gate;
-            let mut open = lock.lock().unwrap();
-            while !*open {
-                open = ready.wait(open).unwrap();
-            }
+            wait_for_test_gate(&engine_gate, "provider panic engine release");
             panic!("inference engine panic")
         }),
         Box::new(|| {}),
@@ -229,12 +241,12 @@ fn test_public_managed_provider_worker_panic_reports_failure_and_settlement() {
     ready.notify_all();
 
     assert!(matches!(
-        block_on(operation.wait_outcome()).unwrap(),
+        block_on(operation.wait_outcome(), "provider worker panic outcome").unwrap(),
         OperationOutcome::Failed(_)
     ));
-    let queued_error = block_on(queued).unwrap_err();
+    let queued_error = block_on(queued, "queued request worker panic outcome").unwrap_err();
     assert!(queued_error.to_string().contains("worker panic"));
-    let settlement = block_on(operation.wait_settlement());
+    let settlement = block_on(operation.wait_settlement(), "provider worker panic settlement");
     assert!(settlement.all_released());
     let snapshot = runtime.snapshot();
     assert!(snapshot.faulted);
@@ -264,10 +276,10 @@ fn test_public_managed_bytes_worker_panic_is_mime_failure() {
         .unwrap();
 
     assert!(matches!(
-        block_on(operation.wait_outcome()).unwrap(),
+        block_on(operation.wait_outcome(), "managed bytes panic outcome").unwrap(),
         OperationOutcome::Failed(_)
     ));
-    assert!(block_on(operation.wait_settlement()).all_released());
+    assert!(block_on(operation.wait_settlement(), "managed bytes panic settlement").all_released());
     assert!(runtime.snapshot().faulted);
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
@@ -323,10 +335,10 @@ fn test_public_managed_bytes_reuses_parent_resource_quotas_after_settlement() {
         .unwrap();
 
     assert!(matches!(
-        block_on(parent.wait_outcome()).unwrap(),
+        block_on(parent.wait_outcome(), "parent operation outcome").unwrap(),
         OperationOutcome::Succeeded(())
     ));
-    assert!(block_on(parent.wait_settlement()).all_released());
+    assert!(block_on(parent.wait_settlement(), "parent operation settlement").all_released());
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
     assert_eq!(0, runtime.snapshot().reserved_bytes);

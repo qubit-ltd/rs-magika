@@ -287,10 +287,15 @@ mod tests {
         let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
         let mut context = Context::from_waker(&waker);
         let mut future = pin!(future);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             match future.as_mut().poll(&mut context) {
                 Poll::Ready(output) => return output,
-                Poll::Pending => std::thread::park(),
+                Poll::Pending => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    assert!(!remaining.is_zero(), "builder async detection did not complete");
+                    std::thread::park_timeout(remaining);
+                }
             }
         }
     }
