@@ -17,6 +17,7 @@ use std::task::Poll;
 use std::task::Waker;
 use std::time::Duration;
 
+use magika::Error as MagikaError;
 use qubit_mime::MimeError;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::GroupOptions;
@@ -29,6 +30,9 @@ use qubit_operation::ShutdownMode;
 use qubit_operation::StopReason;
 
 use super::super::worker_input::WorkerBytes;
+use super::super::inference_future::InferenceFuture;
+use super::super::provider_driver_guard::ProviderDriverGuard;
+use super::super::request_admission_handoff::RequestAdmissionHandoff;
 use super::ManagedInferenceRuntime;
 use super::WorkerInput;
 use super::worker_loop::execute_classified;
@@ -935,6 +939,171 @@ fn test_admitted_bytes_preserve_published_result_when_cancel_follows() {
         capacity_still_held,
         "published business result must not release worker-owned bytes"
     );
+    assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_range_driver_returns_published_result_after_runtime_stop_without_reading() {
+    struct ReadCountingInput(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl magika::AsyncInput for ReadCountingInput {
+        fn length(&self) -> impl Future<Output = Result<u64, MagikaError>> {
+            std::future::ready(Ok(1))
+        }
+
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), MagikaError>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        }
+    }
+
+    let state = Arc::new(super::super::task_state::TaskState::new(9001, None));
+    state.finish_business(
+        Ok(Some("application/x-published".to_owned())),
+        ChildOutcomeKind::Succeeded,
+    );
+    state.request_stop();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
+    let result = block_on(super::drive_async_input(
+        ProviderDriverGuard::new(
+            ReadCountingInput(Arc::clone(&reads)),
+            bridge.driver(),
+            Arc::clone(&state),
+        ),
+        InferenceFuture::new(state),
+    ));
+
+    assert_eq!(Some("application/x-published".to_owned()), result.unwrap());
+    assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_poll() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let gate_for_worker = Arc::clone(&gate);
+    let (engine_started_tx, engine_started_rx) = mpsc::sync_channel(1);
+    let (engine_release_tx, engine_release_rx) = mpsc::sync_channel(1);
+    let (published_tx, published_rx) = mpsc::sync_channel(1);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor.clone(),
+        128,
+        Box::new(move |_| {
+            engine_started_tx.send(()).unwrap();
+            engine_release_rx.recv().unwrap();
+            Ok(Some("application/x-published-range".to_owned()))
+        }),
+        Box::new(move || {
+            published_tx.send(()).unwrap();
+            let (lock, changed) = &*gate_for_worker;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+        }),
+    ));
+    let _release_gate = ReleaseWorkerGate(Arc::clone(&gate));
+    let operation_runtime = Arc::clone(&runtime);
+    let mut operation = supervisor
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            let admission = operation_runtime.reserve_for_provider(Some(&scope), 128)?;
+            let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+                vec![b'x'; 128],
+            )
+            .with_range();
+            let input = crate::internal::AsyncProviderInput::new_owned(
+                provider.async_file_system(),
+                qubit_fs::Path::parse("/published.py").unwrap(),
+                128,
+                None,
+                128,
+            );
+            let mut detection = Box::pin(operation_runtime.detect_async_input_admitted(
+                &scope,
+                admission,
+                input,
+                128,
+                map_provider_test_error,
+            ));
+            let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+            let mut context = Context::from_waker(&waker);
+            assert!(detection.as_mut().poll(&mut context).is_pending());
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match engine_started_rx.try_recv() {
+                    Ok(()) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => panic!("worker exited before engine start"),
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+                assert!(std::time::Instant::now() < deadline, "provider range did not reach the worker");
+                assert!(detection.as_mut().poll(&mut context).is_pending());
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            engine_release_tx.send(()).unwrap();
+            published_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+            let shutdown_runtime = Arc::clone(&operation_runtime);
+            let shutdown = std::thread::spawn(move || {
+                shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !operation_runtime.snapshot().cancelling {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "runtime Cancel was not requested"
+                );
+                std::thread::yield_now();
+            }
+            let result = match detection.as_mut().poll(&mut context) {
+                Poll::Ready(result) => result,
+                Poll::Pending => panic!("published range result should be observable after Cancel"),
+            };
+            drop(detection);
+            let (lock, changed) = &*gate;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+            assert!(shutdown.join().unwrap().worker_stopped);
+            Ok::<_, MimeError>(result)
+        })
+        .unwrap();
+
+    let outcome = block_on(operation.wait_outcome()).unwrap();
+    let OperationOutcome::Succeeded(result) = outcome else {
+        panic!("outer operation should return the managed result observation: {outcome:?}");
+    };
+    assert_eq!(
+        Some("application/x-published-range".to_owned()),
+        result.unwrap()
+    );
+}
+
+#[test]
+fn test_worker_fault_closes_an_unsubmitted_request_handoff() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        supervisor,
+        8,
+        Box::new(|_| panic!("configured worker fault")),
+        Box::new(|| {}),
+    ));
+    let admission = runtime.reserve_for_provider(None, 4).unwrap();
+    let state = admission.task_state();
+    let (_handoff, _guard) = RequestAdmissionHandoff::new(admission);
+    let inference = runtime
+        .submit(None, WorkerInput::Bytes(vec![1].into()))
+        .unwrap();
+
+    assert!(block_on(inference).is_err());
+    let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+
+    assert!(state.stop_requested());
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
     assert!(report.worker_stopped);
 }
 

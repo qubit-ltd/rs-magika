@@ -49,7 +49,8 @@ pub(crate) struct TaskState {
     /// Weak shutdown gate shared with admission and provider-operation starts.
     admission_gate: Option<Weak<Mutex<AdmissionGate>>>,
     /// Weak pending admission handoff closed synchronously on request stop.
-    admission_handoff: Mutex<Option<Weak<super::request_admission_handoff::RequestAdmissionHandoff>>>,
+    admission_handoff:
+        Mutex<Option<Weak<super::request_admission_handoff::RequestAdmissionHandoff>>>,
 }
 
 impl TaskState {
@@ -189,9 +190,6 @@ impl TaskState {
             inner.stop_requested = true;
             std::mem::take(&mut inner.wakers)
         };
-        for waker in wakers {
-            waker.wake();
-        }
         let handoff = self
             .admission_handoff
             .lock()
@@ -200,6 +198,9 @@ impl TaskState {
             .and_then(Weak::upgrade);
         if let Some(handoff) = handoff {
             handoff.close_for_stop();
+        }
+        for waker in wakers {
+            waker.wake();
         }
         if let Some(bridge) = self
             .bridge
@@ -226,6 +227,32 @@ impl TaskState {
         {
             handoff.close_for_stop();
         }
+    }
+
+    /// Clears this request's stop notification after the handoff closes or is
+    /// delivered to its child.
+    pub(super) fn detach_admission_handoff(
+        &self,
+        handoff: &Arc<super::request_admission_handoff::RequestAdmissionHandoff>,
+    ) {
+        let mut attached = self
+            .admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if attached
+            .as_ref()
+            .is_some_and(|current| Weak::ptr_eq(current, &Arc::downgrade(handoff)))
+        {
+            *attached = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_pending_admission_handoff(&self) -> bool {
+        self.admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
     }
 
     /// Attaches the bridge created after request admission.

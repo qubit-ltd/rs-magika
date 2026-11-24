@@ -23,4 +23,6 @@ pub(super) enum DriveEvent {
         /// MIME inference result observed by the managed caller.
         MimeResult<Option<String>>,
     ),
+    /// A stop signal won after no worker result was available.
+    Stopped,
 }
