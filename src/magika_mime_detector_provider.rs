@@ -145,13 +145,29 @@ impl ServiceProvider<MimeDetectorSpec> for MagikaMimeDetectorProvider {
     ///
     /// # Errors
     ///
-    /// Returns [`ProviderFailure`] if `config` sets a MIME buffer limit larger
-    /// than the byte budget of this provider's managed runtime. Also returns
-    /// an initialization failure if Magika or ONNX Runtime cannot initialize.
-    /// The failure preserves the underlying [`MimeError`] source; Magika's
-    /// upstream error does not reliably distinguish a missing runtime from an
-    /// invalid model or configuration, so `OnAbsence` fallback does not
-    /// suppress initialization failures.
+    /// Returns an initialization failure if `config` sets a MIME buffer limit
+    /// larger than the byte budget of this provider's managed runtime, the
+    /// default operation manager or service group cannot be created, the
+    /// worker cannot start, or Magika cannot initialize. The failure preserves
+    /// the underlying [`MimeError`] source, including the existing mapping of
+    /// Magika initialization I/O failures to [`MimeError::Io`] and manager,
+    /// group, worker-start, and non-I/O Magika failures to
+    /// [`MimeError::DetectorBackend`]. Magika's upstream error does not
+    /// reliably distinguish a missing runtime from an invalid model or
+    /// configuration, so `OnAbsence` fallback does not suppress initialization
+    /// failures.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use qubit_magika::MagikaMimeDetectorProvider;
+    /// use qubit_mime::MimeConfig;
+    /// use qubit_spi::ServiceProvider;
+    ///
+    /// let provider = MagikaMimeDetectorProvider::new();
+    /// let detector = provider.create_configured(&MimeConfig::default())?;
+    /// # Ok::<(), qubit_spi::error::ProviderFailure<qubit_mime::MimeError>>(())
+    /// ```
     fn create_configured(&self, config: &MimeConfig) -> Result<Arc<dyn MimeDetector>, ProviderFailure<MimeError>> {
         let mut builder = MagikaMimeDetector::builder()
             .mime_config(config.clone())

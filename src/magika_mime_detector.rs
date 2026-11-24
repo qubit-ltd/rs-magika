@@ -103,9 +103,10 @@ impl MagikaMimeDetector {
     ///
     /// # Errors
     ///
-    /// Returns [`MimeError::Io`] for runtime I/O failures or
-    /// [`MimeError::DetectorBackend`] when Magika or ONNX Runtime cannot
-    /// initialize.
+    /// Returns [`MimeError::DetectorBackend`] when the default operation
+    /// manager or its service group cannot be created, when the worker cannot
+    /// start, or when Magika reports a non-I/O initialization failure.
+    /// Magika initialization I/O failures are returned as [`MimeError::Io`].
     pub fn new() -> MimeResult<Self> {
         Self::from_mime_config(MimeConfig::default())
     }
@@ -120,6 +121,16 @@ impl MagikaMimeDetector {
     /// when media refinement is required. Magika's embedded model and runtime
     /// configuration remain owned by the upstream Magika session.
     ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use qubit_magika::MagikaMimeDetector;
+    /// use qubit_mime::MimeConfig;
+    ///
+    /// let detector = MagikaMimeDetector::from_mime_config(MimeConfig::default())?;
+    /// # Ok::<(), qubit_mime::MimeError>(())
+    /// ```
+    ///
     /// # Parameters
     ///
     /// * `config` - MIME configuration used for result selection and filename
@@ -131,9 +142,10 @@ impl MagikaMimeDetector {
     ///
     /// # Errors
     ///
-    /// Returns [`MimeError::Io`] for runtime I/O failures or
-    /// [`MimeError::DetectorBackend`] when Magika or ONNX Runtime cannot
-    /// initialize.
+    /// Returns [`MimeError::DetectorBackend`] when the default operation
+    /// manager or its service group cannot be created, when the worker cannot
+    /// start, or when Magika reports a non-I/O initialization failure.
+    /// Magika initialization I/O failures are returned as [`MimeError::Io`].
     #[inline]
     pub fn from_mime_config(config: MimeConfig) -> MimeResult<Self> {
         Self::builder().mime_config(config).build()
