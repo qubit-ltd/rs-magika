@@ -120,8 +120,8 @@ fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut
 /// * `offset` - Fixed resource offset used for every attempt.
 /// * `output` - Buffer filled by a successful attempt.
 /// * `should_stop` - Predicate checked before each provider attempt.
-/// * `completed_steps` - Number of provider futures that returned `Ready`
-///   since the last cooperative yield.
+/// * `completed_steps` - Number of provider futures that returned `Ready` since
+///   the last cooperative yield.
 /// * `io_in_flight` - Optional marker set only while polling the provider
 ///   future; it remains false during cooperative yields.
 ///

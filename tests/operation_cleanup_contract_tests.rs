@@ -30,9 +30,7 @@ use qubit_operation::ResourceScopeOptions;
 use qubit_operation::ScopeLimits;
 use qubit_operation::ShutdownWait;
 
-#[path = "support/async_test_driver.rs"]
-#[allow(dead_code)]
-mod async_test_driver;
+use crate::support::run_until;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -40,13 +38,8 @@ fn wait_until_stage<F: std::future::Future>(future: F, stage: &str) -> F::Output
     wait_until_stage_for(future, stage, WAIT_TIMEOUT)
 }
 
-fn wait_until_stage_for<F: std::future::Future>(
-    future: F,
-    stage: &str,
-    timeout: Duration,
-) -> F::Output {
-    async_test_driver::run_until(future, timeout)
-        .unwrap_or_else(|()| panic!("timed out waiting for cleanup test stage={stage}"))
+fn wait_until_stage_for<F: std::future::Future>(future: F, stage: &str, timeout: Duration) -> F::Output {
+    run_until(future, timeout).unwrap_or_else(|()| panic!("timed out waiting for cleanup test stage={stage}"))
 }
 
 struct FailingCleanup {
@@ -144,10 +137,7 @@ fn test_locked_operation_api_keeps_failed_cleanup_in_parent_report_until_release
     assert_eq!(repeated_failure.recovery.phase, RecoveryPhase::Pending);
     assert_eq!(recovery.snapshot().failures_total, 1);
 
-    let confirmed_release = wait_until_stage(
-        recovery.try_retry().unwrap().wait_async(),
-        "recovery release retry",
-    );
+    let confirmed_release = wait_until_stage(recovery.try_retry().unwrap().wait_async(), "recovery release retry");
     assert_eq!(confirmed_release.recovery.phase, RecoveryPhase::Resolved);
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert!(!settlement.all_released());

@@ -195,9 +195,7 @@ impl AsyncInput for AsyncProviderInput {
                             stop_state
                                 .as_ref()
                                 .is_some_and(|state| !state.try_start_provider_operation())
-                                || stop_watcher
-                                    .as_ref()
-                                    .is_some_and(|watcher| watcher.is_stopped())
+                                || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
                         },
                         io_in_flight: Some(io_in_flight.as_ref()),
                     },

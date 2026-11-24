@@ -582,13 +582,11 @@ fn test_async_session_yields_after_sixty_four_ready_short_reads() {
 #[test]
 fn test_async_session_io_marker_tracks_pending_and_ready_provider_poll() {
     let gate = Arc::new(TestAsyncReadGate::new());
-    let fixture =
-        Fixture::new(b"x", FileSystemLimit::Maximum(1)).with_async_read_gate(Arc::clone(&gate));
+    let fixture = Fixture::new(b"x", FileSystemLimit::Maximum(1)).with_async_read_gate(Arc::clone(&gate));
     let filesystem = AsyncFileSystem::from_spi(fixture).unwrap();
-    let mut reader = block_on(filesystem.open_random_access_reader(
-        &Path::parse("/session-io-marker").unwrap(),
-        ReadOptions::default(),
-    ))
+    let mut reader = block_on(
+        filesystem.open_random_access_reader(&Path::parse("/session-io-marker").unwrap(), ReadOptions::default()),
+    )
     .unwrap();
     let mut budget = crate::internal::read_budget::ReadBudget::new(1);
     let mut output = [0; 1];

@@ -247,9 +247,7 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
         // Since we check only at complete segment boundaries, a prior segment
         // can leave at most 63 events before the next segment adds at most 65:
         // no poll therefore completes more than 128 provider operations.
-        if completed < buffer.len()
-            && budgeted_observer.completed_events() >= READ_STEPS_PER_POLL
-        {
+        if completed < buffer.len() && budgeted_observer.completed_events() >= READ_STEPS_PER_POLL {
             budgeted_observer.reset();
             yield_once().await;
         }

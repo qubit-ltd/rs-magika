@@ -171,10 +171,7 @@ fn test_legacy_async_provider_yields_within_completed_io_budget_for_short_reads(
     assert_eq!(65, max_completed_this_poll);
     assert_eq!(4160, event_count.load(Ordering::SeqCst));
     assert_eq!(64, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(
-        4096,
-        observations.read_bytes.load(std::sync::atomic::Ordering::SeqCst)
-    );
+    assert_eq!(4096, observations.read_bytes.load(std::sync::atomic::Ordering::SeqCst));
     drop(future);
     assert_eq!(content, output);
 }
@@ -255,10 +252,7 @@ fn test_legacy_yield_clears_actual_io_before_observing_cancellation() {
     assert!(wake.notified.swap(false, Ordering::AcqRel));
     assert!(!in_flight.load(Ordering::Acquire));
     assert!(!stop_seen.load(Ordering::Acquire));
-    assert!(matches!(
-        future.as_mut().poll(&mut context),
-        Poll::Ready(Err(_))
-    ));
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Ready(Err(_))));
     assert!(stop_seen.load(Ordering::Acquire));
     assert_eq!(1, observations.opens.load(Ordering::SeqCst));
     assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));

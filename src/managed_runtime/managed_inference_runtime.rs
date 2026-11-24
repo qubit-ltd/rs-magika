@@ -693,10 +693,8 @@ impl ManagedInferenceRuntime {
                     Arc::clone(&state),
                     Some(io_in_flight),
                 );
-                let inference = setup_runtime.dispatch(
-                    owner.admission,
-                    WorkerInput::Bridge(bridge, max_bytes, map_error),
-                )?;
+                let inference =
+                    setup_runtime.dispatch(owner.admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
                 Ok::<_, MimeError>((guard, inference))
             };
             let mut setup = Box::pin(setup);
