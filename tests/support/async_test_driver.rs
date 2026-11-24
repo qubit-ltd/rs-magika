@@ -53,12 +53,15 @@ pub(crate) fn run_until<F: Future>(future: F, timeout: Duration) -> Result<F::Ou
         match Future::poll(Pin::as_mut(&mut future), &mut context) {
             Poll::Ready(value) => return Ok(value),
             Poll::Pending => loop {
-                if wake.notified.swap(false, Ordering::AcqRel) {
-                    break;
-                }
                 let now = Instant::now();
                 if now >= deadline {
                     return Err(());
+                }
+                if wake.notified.swap(false, Ordering::AcqRel) {
+                    if Instant::now() >= deadline {
+                        return Err(());
+                    }
+                    break;
                 }
                 std::thread::park_timeout(deadline.saturating_duration_since(now));
             },
