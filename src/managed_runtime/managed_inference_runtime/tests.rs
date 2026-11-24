@@ -1497,7 +1497,10 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
                     }
                     // Keep the public caller future alive but do not poll it again.
                     operation_gate.wait().await;
-                    drop(detection);
+                    assert!(
+                        detection.await.is_err(),
+                        "a closed managed handoff must return its stop result when polled again"
+                    );
                     Ok::<_, MimeError>(())
                 })
                 .unwrap();
@@ -1689,6 +1692,129 @@ fn test_managed_public_handoffs_cancel_before_child_body_starts() {
         assert!(runtime.tasks.lock().unwrap().is_empty());
         assert_eq!(0, observations.opens.load(Ordering::SeqCst));
         assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    }
+}
+
+#[test]
+fn test_single_executor_blocked_handoff_returns_stop_without_provider_io() {
+    struct ReleaseExecutor {
+        release: mpsc::SyncSender<()>,
+    }
+    impl Drop for ReleaseExecutor {
+        fn drop(&mut self) {
+            let _ = self.release.send(());
+        }
+    }
+
+    for provider_entry in [false, true] {
+        for worker_fault in [false, true] {
+            let mut options = ManagerOptions::default();
+            options.async_executor.worker_count = 1;
+            let scope_manager = OperationManager::new(options).unwrap();
+            let (scope_tx, scope_rx) = mpsc::sync_channel(1);
+            let (release_tx, release_rx) = mpsc::sync_channel(1);
+            let _release_executor = ReleaseExecutor {
+                release: release_tx,
+            };
+            let mut blocker = scope_manager
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
+                    scope_tx.send(scope).unwrap();
+                    release_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("test must release the only executor worker");
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            let scope = scope_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+            let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+                OperationManager::new(ManagerOptions::default()).unwrap(),
+                qubit_mime::MimeConfig::default().max_buffer_size(),
+                Box::new(|bytes| {
+                    if bytes == [0xff] {
+                        panic!("injected worker fault");
+                    }
+                    Ok(Some("application/x-handoff-stop".to_owned()))
+                }),
+                Box::new(|| {}),
+            ));
+            let detector = crate::MagikaMimeDetector::builder()
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .unwrap();
+            let provider =
+                crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+                    b"provider contents".to_vec(),
+                )
+                .with_range();
+            let observations = provider.observations();
+            let file_system = provider.async_file_system();
+            let path = qubit_fs::Path::parse("/single-executor-stop.py").unwrap();
+            let mut detection = if provider_entry {
+                Box::pin(detector.detect_async_provider_path_managed(
+                    &scope,
+                    &file_system,
+                    &path,
+                    32,
+                ))
+                    as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
+            } else {
+                Box::pin(detector.detect_bytes_managed(&scope, b"managed bytes".to_vec()))
+            };
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            assert!(detection.as_mut().poll(&mut context).is_pending());
+            assert_eq!(1, runtime.snapshot().admitted_not_started);
+
+            if worker_fault {
+                let fault = runtime
+                    .submit(None, WorkerInput::Bytes(vec![0xff].into()))
+                    .unwrap();
+                assert!(block_on(fault).is_err());
+            } else {
+                let stopping_runtime = Arc::clone(&runtime);
+                let stop = std::thread::spawn(move || {
+                    stopping_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+                });
+                assert!(stop.join().unwrap().worker_stopped);
+            }
+
+            let result = match detection.as_mut().poll(&mut context) {
+                Poll::Ready(result) => result,
+                Poll::Pending => {
+                    panic!("closed handoff must return while its executor remains blocked")
+                }
+            };
+            assert!(result.is_err());
+            assert_eq!(
+                0,
+                observations
+                    .opens
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            assert_eq!(
+                0,
+                observations
+                    .read_bytes
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            assert_eq!(0, runtime.snapshot().reserved_bytes);
+            drop(detection);
+            if worker_fault {
+                assert!(
+                    runtime
+                        .shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+                        .worker_stopped
+                );
+            }
+
+            drop(_release_executor);
+            assert!(matches!(
+                block_on(blocker.wait_outcome()).unwrap(),
+                OperationOutcome::Succeeded(())
+            ));
+        }
     }
 }
 
