@@ -137,6 +137,10 @@ impl ProviderReadCompletionGate {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).released = true;
         self.changed.notify_all();
     }
+
+    pub(crate) fn is_entered(&self) -> bool {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entered
+    }
 }
 
 pub(crate) struct AsyncProviderGate {
