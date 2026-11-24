@@ -50,6 +50,7 @@ impl RequestAdmissionHandoff {
     /// The shared handoff and a guard that closes it if the caller abandons
     /// the registration step.
     pub(crate) fn new(admission: RequestAdmission) -> (Arc<Self>, RequestAdmissionHandoffGuard) {
+        let task_state = admission.task_state();
         let handoff = Arc::new(Self {
             state: Mutex::new(HandoffState {
                 caller_admission: Some(admission),
@@ -64,7 +65,13 @@ impl RequestAdmissionHandoff {
             handoff: Arc::clone(&handoff),
             active: true,
         };
+        task_state.attach_admission_handoff(Arc::downgrade(&handoff));
         (handoff, guard)
+    }
+
+    /// Closes this pending handoff when its request is stopped.
+    pub(super) fn close_for_stop(&self) {
+        self.close();
     }
 
     /// Notifies the caller that the accepted child body has begun.
@@ -389,6 +396,31 @@ mod tests {
             OperationOutcome::Succeeded(())
         ));
         assert!(block_on(operation.wait_settlement()).all_released());
+    }
+
+    #[test]
+    fn test_runtime_stop_closes_handoff_without_caller_or_child_polling() {
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let admission = RequestAdmission::new(
+            Arc::new(TaskState::new(802, None)),
+            ServicePermit::try_acquire(&active_requests, 1).unwrap(),
+            byte_budget.try_acquire(8).unwrap(),
+        );
+        let state = admission.task_state();
+        let (_handoff, _guard) = RequestAdmissionHandoff::new(admission);
+
+        state.request_stop();
+
+        assert_eq!(
+            active_requests.load(Ordering::SeqCst),
+            0,
+            "runtime stop must return an admission that has not reached the child"
+        );
+        assert!(
+            byte_budget.try_acquire(8).is_some(),
+            "runtime stop must return the admission byte reservation"
+        );
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {

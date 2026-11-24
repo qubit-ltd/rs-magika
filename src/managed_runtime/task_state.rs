@@ -48,6 +48,8 @@ pub(crate) struct TaskState {
     active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
     /// Weak shutdown gate shared with admission and provider-operation starts.
     admission_gate: Option<Weak<Mutex<AdmissionGate>>>,
+    /// Weak pending admission handoff closed synchronously on request stop.
+    admission_handoff: Mutex<Option<Weak<super::request_admission_handoff::RequestAdmissionHandoff>>>,
 }
 
 impl TaskState {
@@ -92,11 +94,12 @@ impl TaskState {
             request_scope: std::sync::Mutex::new(None),
             active_tasks,
             admission_gate,
+            admission_handoff: Mutex::new(None),
         }
     }
 
     /// Linearizes provider-operation start against cancellation and shutdown.
-    pub(super) fn try_start_provider_operation(&self) -> bool {
+    pub(crate) fn try_start_provider_operation(&self) -> bool {
         let gate = self.admission_gate.as_ref().and_then(Weak::upgrade);
         if self.admission_gate.is_some() && gate.is_none() {
             return false;
@@ -189,6 +192,15 @@ impl TaskState {
         for waker in wakers {
             waker.wake();
         }
+        let handoff = self
+            .admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(handoff) = handoff {
+            handoff.close_for_stop();
+        }
         if let Some(bridge) = self
             .bridge
             .lock()
@@ -197,6 +209,22 @@ impl TaskState {
             .and_then(Weak::upgrade)
         {
             bridge.close();
+        }
+    }
+
+    /// Registers a pending handoff for immediate closure on stop.
+    pub(super) fn attach_admission_handoff(
+        &self,
+        handoff: Weak<super::request_admission_handoff::RequestAdmissionHandoff>,
+    ) {
+        *self
+            .admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(handoff.clone());
+        if self.stop_requested()
+            && let Some(handoff) = handoff.upgrade()
+        {
+            handoff.close_for_stop();
         }
     }
 
