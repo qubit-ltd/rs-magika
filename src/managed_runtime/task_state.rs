@@ -48,6 +48,9 @@ pub(crate) struct TaskState {
     active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
     /// Weak shutdown gate shared with admission and provider-operation starts.
     admission_gate: Option<Weak<Mutex<AdmissionGate>>>,
+    /// Weak pending admission handoff closed synchronously on request stop.
+    admission_handoff:
+        Mutex<Option<Weak<super::request_admission_handoff::RequestAdmissionHandoff>>>,
 }
 
 impl TaskState {
@@ -92,11 +95,12 @@ impl TaskState {
             request_scope: std::sync::Mutex::new(None),
             active_tasks,
             admission_gate,
+            admission_handoff: Mutex::new(None),
         }
     }
 
     /// Linearizes provider-operation start against cancellation and shutdown.
-    pub(super) fn try_start_provider_operation(&self) -> bool {
+    pub(crate) fn try_start_provider_operation(&self) -> bool {
         let gate = self.admission_gate.as_ref().and_then(Weak::upgrade);
         if self.admission_gate.is_some() && gate.is_none() {
             return false;
@@ -186,6 +190,15 @@ impl TaskState {
             inner.stop_requested = true;
             std::mem::take(&mut inner.wakers)
         };
+        let handoff = self
+            .admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(handoff) = handoff {
+            handoff.close_for_stop();
+        }
         for waker in wakers {
             waker.wake();
         }
@@ -198,6 +211,48 @@ impl TaskState {
         {
             bridge.close();
         }
+    }
+
+    /// Registers a pending handoff for immediate closure on stop.
+    pub(super) fn attach_admission_handoff(
+        &self,
+        handoff: Weak<super::request_admission_handoff::RequestAdmissionHandoff>,
+    ) {
+        *self
+            .admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(handoff.clone());
+        if self.stop_requested()
+            && let Some(handoff) = handoff.upgrade()
+        {
+            handoff.close_for_stop();
+        }
+    }
+
+    /// Clears this request's stop notification after the handoff closes or is
+    /// delivered to its child.
+    pub(super) fn detach_admission_handoff(
+        &self,
+        handoff: &Arc<super::request_admission_handoff::RequestAdmissionHandoff>,
+    ) {
+        let mut attached = self
+            .admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if attached
+            .as_ref()
+            .is_some_and(|current| Weak::ptr_eq(current, &Arc::downgrade(handoff)))
+        {
+            *attached = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_pending_admission_handoff(&self) -> bool {
+        self.admission_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
     }
 
     /// Attaches the bridge created after request admission.

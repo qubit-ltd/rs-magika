@@ -8,9 +8,9 @@
 //! Cancellation and actual-I/O tracking for aggregate provider reads.
 
 use std::ops::ControlFlow;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use qubit_fs::read::ReadIoEvent;
 use qubit_fs::read::ReadIoObserver;
@@ -67,8 +67,14 @@ impl ReadIoObserver for ManagedReadObserver {
     ///
     /// `Break(())` after cancellation, otherwise `Continue(())`.
     fn before_io(&mut self, _phase: ReadIoPhase) -> ControlFlow<()> {
-        let stopped = self.state.as_ref().is_some_and(|state| state.stop_requested())
-            || self.stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped());
+        let stopped = self
+            .state
+            .as_ref()
+            .is_some_and(|state| !state.try_start_provider_operation())
+            || self
+                .stop_watcher
+                .as_ref()
+                .is_some_and(|watcher| watcher.is_stopped());
         if stopped {
             ControlFlow::Break(())
         } else {

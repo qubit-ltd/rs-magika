@@ -12,6 +12,7 @@ use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
@@ -35,6 +36,8 @@ pub(crate) use internal::RequestAdmissionHandoffGuard;
 pub(crate) struct RequestAdmissionHandoff {
     /// Admission transfer and body-start notifications.
     state: Mutex<HandoffState>,
+    /// Request state notified until this handoff closes or reaches its child.
+    task_state: Weak<super::task_state::TaskState>,
 }
 
 impl RequestAdmissionHandoff {
@@ -50,6 +53,7 @@ impl RequestAdmissionHandoff {
     /// The shared handoff and a guard that closes it if the caller abandons
     /// the registration step.
     pub(crate) fn new(admission: RequestAdmission) -> (Arc<Self>, RequestAdmissionHandoffGuard) {
+        let task_state = admission.task_state();
         let handoff = Arc::new(Self {
             state: Mutex::new(HandoffState {
                 caller_admission: Some(admission),
@@ -59,12 +63,19 @@ impl RequestAdmissionHandoff {
                 caller_waker: None,
                 child_waker: None,
             }),
+            task_state: Arc::downgrade(&task_state),
         });
         let guard = RequestAdmissionHandoffGuard {
             handoff: Arc::clone(&handoff),
             active: true,
         };
+        task_state.attach_admission_handoff(Arc::downgrade(&handoff));
         (handoff, guard)
+    }
+
+    /// Closes this pending handoff when its request is stopped.
+    pub(super) fn close_for_stop(self: &Arc<Self>) {
+        self.close();
     }
 
     /// Notifies the caller that the accepted child body has begun.
@@ -192,7 +203,7 @@ impl RequestAdmissionHandoff {
     /// The registered admission or registration error, or `None` if the
     /// handoff closes before the child receives it.
     pub(crate) async fn wait_for_child_admission(
-        &self,
+        self: &Arc<Self>,
         child_scope: &OperationScope,
     ) -> Option<Result<RequestAdmission, MimeError>> {
         let mut stopped = Box::pin(child_scope.context().stop_requested());
@@ -201,14 +212,24 @@ impl RequestAdmissionHandoff {
                 self.close();
                 return Poll::Ready(None);
             }
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(admission) = state.child_admission.take() {
+            let (admission, closed) = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(admission) = state.child_admission.take() {
+                    (Some(admission), false)
+                } else if state.closed {
+                    (None, true)
+                } else {
+                    register_waker(&mut state.child_waker, context.waker());
+                    (None, false)
+                }
+            };
+            if let Some(admission) = admission {
+                self.detach_task_state_notification();
                 return Poll::Ready(Some(admission));
             }
-            if state.closed {
+            if closed {
                 return Poll::Ready(None);
             }
-            register_waker(&mut state.child_waker, context.waker());
             Poll::Pending
         })
         .await
@@ -255,7 +276,7 @@ impl RequestAdmissionHandoff {
     }
 
     /// Closes the gate, releases untransferred admission, and wakes both sides.
-    fn close(&self) {
+    fn close(self: &Arc<Self>) {
         let (caller_admission, child_admission, caller_waker, child_waker) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.closed = true;
@@ -268,11 +289,19 @@ impl RequestAdmissionHandoff {
         };
         drop(caller_admission);
         drop(child_admission);
+        self.detach_task_state_notification();
         if let Some(waker) = caller_waker {
             waker.wake();
         }
         if let Some(waker) = child_waker {
             waker.wake();
+        }
+    }
+
+    /// Removes the weak stop callback when the handoff is no longer pending.
+    fn detach_task_state_notification(self: &Arc<Self>) {
+        if let Some(task_state) = self.task_state.upgrade() {
+            task_state.detach_admission_handoff(self);
         }
     }
 }
@@ -389,6 +418,192 @@ mod tests {
             OperationOutcome::Succeeded(())
         ));
         assert!(block_on(operation.wait_settlement()).all_released());
+    }
+
+    #[test]
+    fn test_runtime_stop_closes_handoff_without_caller_or_child_polling() {
+        struct WakeAfterRelease {
+            active_requests: Arc<AtomicUsize>,
+            observed_active: Arc<AtomicUsize>,
+        }
+
+        impl std::task::Wake for WakeAfterRelease {
+            fn wake(self: Arc<Self>) {
+                self.observed_active.store(
+                    self.active_requests.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.observed_active.store(
+                    self.active_requests.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+            }
+        }
+
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let admission = RequestAdmission::new(
+            Arc::new(TaskState::new(802, None)),
+            ServicePermit::try_acquire(&active_requests, 1).unwrap(),
+            byte_budget.try_acquire(8).unwrap(),
+        );
+        let state = admission.task_state();
+        let (_handoff, _guard) = RequestAdmissionHandoff::new(admission);
+        let observed_active = Arc::new(AtomicUsize::new(usize::MAX));
+        let waker = std::task::Waker::from(Arc::new(WakeAfterRelease {
+            active_requests: Arc::clone(&active_requests),
+            observed_active: Arc::clone(&observed_active),
+        }));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut stopped = Box::pin(state.wait_stopped());
+        assert!(std::future::Future::poll(stopped.as_mut(), &mut context).is_pending());
+
+        state.request_stop();
+
+        assert_eq!(
+            active_requests.load(Ordering::SeqCst),
+            0,
+            "runtime stop must return an admission that has not reached the child"
+        );
+        assert!(
+            byte_budget.try_acquire(8).is_some(),
+            "runtime stop must return the admission byte reservation"
+        );
+        assert_eq!(0, observed_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_runtime_stop_during_registration_leaves_local_admission_for_registrar() {
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let admission = RequestAdmission::new(
+            Arc::new(TaskState::new(803, None)),
+            ServicePermit::try_acquire(&active_requests, 1).unwrap(),
+            byte_budget.try_acquire(8).unwrap(),
+        );
+        let state = admission.task_state();
+        let (handoff, _guard) = RequestAdmissionHandoff::new(admission);
+        let admission = handoff.take_caller_admission().unwrap();
+
+        state.request_stop();
+
+        assert_eq!(1, active_requests.load(Ordering::SeqCst));
+        assert!(byte_budget.try_acquire(8).is_none());
+        assert!(!handoff.provide_to_child(Ok(admission)));
+        assert_eq!(0, active_requests.load(Ordering::SeqCst));
+        assert!(byte_budget.try_acquire(8).is_some());
+    }
+
+    #[test]
+    fn test_runtime_stop_closes_child_waiting_for_registration_while_parent_is_unpolled() {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (state_tx, state_rx) = std::sync::mpsc::sync_channel(1);
+        let active_for_parent = Arc::clone(&active_requests);
+        let budget_for_parent = Arc::clone(&byte_budget);
+        let mut parent = manager
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let state = Arc::new(TaskState::new(804, None));
+                let admission = RequestAdmission::new(
+                    Arc::clone(&state),
+                    ServicePermit::try_acquire(&active_for_parent, 1).unwrap(),
+                    budget_for_parent.try_acquire(8).unwrap(),
+                );
+                let (handoff, guard) = RequestAdmissionHandoff::new(admission);
+                let body_handoff = Arc::clone(&handoff);
+                let mut child = scope
+                    .manager()
+                    .as_async()
+                    .try_submit(OperationOptions::default(), move |child_scope| async move {
+                        body_handoff.body_started();
+                        started_tx.send(()).unwrap();
+                        assert!(body_handoff.wait_for_child_admission(&child_scope).await.is_none());
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                state_tx.send(state).unwrap();
+                let _guard = guard;
+                assert!(matches!(
+                    child.wait_outcome().await.unwrap(),
+                    OperationOutcome::Succeeded(())
+                ));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        let state = state_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        started_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(1, active_requests.load(Ordering::SeqCst));
+
+        state.request_stop();
+
+        assert_eq!(0, active_requests.load(Ordering::SeqCst));
+        assert!(byte_budget.try_acquire(8).is_some());
+        assert!(matches!(
+            block_on(parent.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
+    }
+
+    #[test]
+    fn test_child_receiving_admission_detaches_request_stop_notification() {
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let active_for_parent = Arc::clone(&active_requests);
+        let budget_for_parent = Arc::clone(&byte_budget);
+        let mut parent = manager
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let state = Arc::new(TaskState::new(805, None));
+                let admission = RequestAdmission::new(
+                    Arc::clone(&state),
+                    ServicePermit::try_acquire(&active_for_parent, 1).unwrap(),
+                    budget_for_parent.try_acquire(8).unwrap(),
+                );
+                let (handoff, mut guard) = RequestAdmissionHandoff::new(admission);
+                let body_handoff = Arc::clone(&handoff);
+                let body_state = Arc::clone(&state);
+                let mut child = scope
+                    .manager()
+                    .as_async()
+                    .try_submit(OperationOptions::default(), move |child_scope| async move {
+                        body_handoff.body_started();
+                        let admission = body_handoff
+                            .wait_for_child_admission(&child_scope)
+                            .await
+                            .expect("parent should provide the registered admission")
+                            .expect("scope registration should succeed");
+                        assert!(!body_state.has_pending_admission_handoff());
+                        drop(admission);
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                let mut outcome = Box::pin(child.wait_outcome());
+                assert!(handoff
+                    .register_on_parent(&scope, &mut guard, &mut outcome)
+                    .await
+                    .is_none());
+                assert!(matches!(
+                    outcome.await.unwrap(),
+                    OperationOutcome::Succeeded(())
+                ));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        assert!(matches!(
+            block_on(parent.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
+        assert_eq!(0, active_requests.load(Ordering::SeqCst));
+        assert!(byte_budget.try_acquire(8).is_some());
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {

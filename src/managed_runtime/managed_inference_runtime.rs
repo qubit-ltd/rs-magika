@@ -604,7 +604,11 @@ impl ManagedInferenceRuntime {
     ) -> MimeResult<Option<String>> {
         let state = Arc::clone(&admission.state);
         let state_for_stop = Arc::clone(&state);
-        let worker = async move {
+        let mut scope_stop = Box::pin(scope.context().stop_requested());
+        let mut request_stop = Box::pin(state_for_stop.wait_stopped());
+        let stop_state = Arc::clone(&state_for_stop);
+        let setup_runtime = self;
+        let setup = async move {
             admission.begin_provider_operation()?;
             let length_result = input.length().await;
             admission.provider_operation_completed();
@@ -617,22 +621,24 @@ impl ManagedInferenceRuntime {
             };
             let bridge = AsyncSampleBridge::new(length);
             let driver = bridge.driver();
-            let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
+            let inference = setup_runtime.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
             let io_in_flight = input.io_in_flight();
             let guard = ProviderDriverGuard::new_with_io_status(input, driver, state, io_in_flight);
-            drive_async_input(guard, inference).await
+            Ok::<_, MimeError>((guard, inference))
         };
-        let mut worker = Box::pin(worker);
-        let mut stop = Box::pin(scope.context().stop_requested());
-        let mut request_stop = Box::pin(state_for_stop.wait_stopped());
-        poll_fn(|cx: &mut Context<'_>| {
-            if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
-                state_for_stop.request_stop();
+        let mut setup = Box::pin(setup);
+        let (guard, inference) = poll_fn(|context| {
+            if scope_stop.as_mut().poll(context).is_ready() {
+                stop_state.request_stop();
                 return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
             }
-            worker.as_mut().poll(cx)
+            if request_stop.as_mut().poll(context).is_ready() {
+                return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+            }
+            setup.as_mut().poll(context)
         })
-        .await
+        .await?;
+        drive_async_input_with_stops(guard, inference, scope_stop, request_stop).await
     }
 
     #[cfg(test)]
@@ -1134,20 +1140,62 @@ fn identify_features(
 /// # Returns
 ///
 /// The worker's MIME inference result.
+#[cfg(test)]
 async fn drive_async_input<I>(
-    mut guard: ProviderDriverGuard<I>,
+    guard: ProviderDriverGuard<I>,
     inference: InferenceFuture,
 ) -> MimeResult<Option<String>>
 where
     I: AsyncInput,
 {
+    drive_async_input_with_stops(
+        guard,
+        inference,
+        std::future::pending::<()>(),
+        std::future::pending::<()>(),
+    )
+    .await
+}
+
+/// Serves provider requests while observing a stop signal after the worker
+/// result has had the first chance to win.
+async fn drive_async_input_with_stops<I, S, R>(
+    mut guard: ProviderDriverGuard<I>,
+    inference: InferenceFuture,
+    scope_stop: S,
+    request_stop: R,
+) -> MimeResult<Option<String>>
+where
+    I: AsyncInput,
+    S: Future,
+    R: Future,
+{
+    enum ProviderReadEvent {
+        Result(MimeResult<Option<String>>),
+        Stopped,
+        Closed,
+        Read(Result<(), MagikaError>),
+    }
+
     let mut inference = Box::pin(inference);
+    let mut scope_stop = Box::pin(scope_stop);
+    let mut request_stop = Box::pin(request_stop);
     loop {
-        let next_request = guard.driver.as_ref().expect("driver remains owned").next_request();
+        let next_request = guard
+            .driver
+            .as_ref()
+            .expect("driver remains owned")
+            .next_request();
         let mut next_request = Box::pin(next_request);
         let event = poll_fn(|cx| {
+            if scope_stop.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(DriveEvent::Stopped);
+            }
             if let Poll::Ready(result) = inference.as_mut().poll(cx) {
                 return Poll::Ready(DriveEvent::Result(result));
+            }
+            if request_stop.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(DriveEvent::Stopped);
             }
             match next_request.as_mut().poll(cx) {
                 Poll::Ready(request) => Poll::Ready(DriveEvent::Request(request)),
@@ -1157,6 +1205,10 @@ where
         .await;
         match event {
             DriveEvent::Result(result) => return result,
+            DriveEvent::Stopped => {
+                guard.state.request_stop();
+                return Err(MimeError::detector_backend("magika", "provider inference stopped"));
+            }
             DriveEvent::Request(None) => return inference.await,
             DriveEvent::Request(Some(request)) => {
                 if !guard.state.try_start_provider_operation() {
@@ -1172,11 +1224,18 @@ where
                         .read_at(&mut buffer, request.offset()),
                 );
                 let mut closed = Box::pin(guard.driver.as_ref().expect("driver remains owned").closed());
-                let state_for_stop = Arc::clone(&guard.state);
-                let mut stopped = Box::pin(state_for_stop.wait_stopped());
                 let read_result = poll_fn(|cx| {
-                    if stopped.as_mut().poll(cx).is_ready() || closed.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(None);
+                    if scope_stop.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(ProviderReadEvent::Stopped);
+                    }
+                    if let Poll::Ready(result) = inference.as_mut().poll(cx) {
+                        return Poll::Ready(ProviderReadEvent::Result(result));
+                    }
+                    if request_stop.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(ProviderReadEvent::Stopped);
+                    }
+                    if closed.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(ProviderReadEvent::Closed);
                     }
                     if guard.io_in_flight.is_none() {
                         guard.unconfirmed_io.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1184,7 +1243,7 @@ where
                     match read.as_mut().poll(cx) {
                         Poll::Ready(result) => {
                             guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
-                            Poll::Ready(Some(result))
+                            Poll::Ready(ProviderReadEvent::Read(result))
                         }
                         Poll::Pending => {
                             let pending = guard
@@ -1199,12 +1258,22 @@ where
                     }
                 })
                 .await;
-                let Some(read_result) = read_result else {
-                    // The read future was dropped on bridge close. rs-fs does
-                    // not expose whether provider-native work has completed.
-                    drop(read);
-                    drop(closed);
-                    return inference.await;
+                let read_result = match read_result {
+                    ProviderReadEvent::Result(result) => return result,
+                    ProviderReadEvent::Stopped => {
+                        guard.state.request_stop();
+                        drop(read);
+                        drop(closed);
+                        return Err(MimeError::detector_backend("magika", "provider inference stopped"));
+                    }
+                    ProviderReadEvent::Closed => {
+                        // The read future was dropped on bridge close. rs-fs
+                        // does not expose whether provider-native work completed.
+                        drop(read);
+                        drop(closed);
+                        return inference.await;
+                    }
+                    ProviderReadEvent::Read(result) => result,
                 };
                 drop(read);
                 drop(closed);

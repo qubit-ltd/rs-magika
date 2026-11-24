@@ -195,7 +195,9 @@ impl AsyncInput for AsyncProviderInput {
                         offset,
                         *max_segment,
                         move || {
-                            stop_state.as_ref().is_some_and(|state| state.stop_requested())
+                            stop_state
+                                .as_ref()
+                                .is_some_and(|state| !state.try_start_provider_operation())
                                 || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
                         },
                     )

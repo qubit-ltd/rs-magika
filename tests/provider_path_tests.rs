@@ -2401,6 +2401,116 @@ fn test_magika_managed_and_legacy_cancel_before_second_legacy_range() {
     }
 }
 
+#[test]
+fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
+    for managed in [false, true] {
+        for session in [false, true] {
+            let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+            let config = qubit_mime::MimeConfig::default();
+            let runtime = Arc::new(
+                ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+                    .expect("managed inference runtime should initialize"),
+            );
+            let detector = Arc::new(
+                qubit_magika::MagikaMimeDetector::builder()
+                    .mime_config(config)
+                    .managed_runtime(Arc::clone(&runtime))
+                    .build()
+                    .expect("bundled ONNX Runtime should initialize"),
+            );
+            let completion_gate = ProviderReadCompletionGate::new(1);
+            let mut provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+                .short_reads()
+                .with_read_completion_gate(Arc::clone(&completion_gate));
+            if session {
+                provider = provider.with_random_access();
+            } else {
+                provider = provider
+                    .with_range()
+                    .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation);
+            }
+            let observations = provider.observations();
+            let file_system = provider.async_file_system();
+
+            let (mut managed_operation, legacy_hook) = if managed {
+                let service = supervisor
+                    .group(qubit_operation::GroupOptions { capacity: 2 })
+                    .unwrap();
+                let request_detector = Arc::clone(&detector);
+                (
+                    Some(
+                        service
+                            .as_async()
+                            .try_submit(OperationOptions::default(), move |scope| async move {
+                                request_detector
+                                    .detect_async_provider_path_managed(
+                                        &scope,
+                                        &file_system,
+                                        &path("/ready-cancel.py"),
+                                        4096,
+                                    )
+                                    .await
+                            })
+                            .unwrap(),
+                    ),
+                    None,
+                )
+            } else {
+                let hook_detector = Arc::clone(&detector);
+                (
+                    None,
+                    Some(std::thread::spawn(move || {
+                        run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+                            &*hook_detector,
+                            &file_system,
+                            &path("/ready-cancel.py"),
+                            4096,
+                        ))
+                    })),
+                )
+            };
+
+            completion_gate.wait_until_entered(Duration::from_secs(5));
+            let provider_bytes = || {
+                if session {
+                    observations.random_reads.load(Ordering::SeqCst)
+                } else {
+                    observations.read_bytes.load(Ordering::SeqCst)
+                }
+            };
+            assert_eq!(1, provider_bytes());
+            let shutdown_runtime = Arc::clone(&runtime);
+            let shutdown = std::thread::spawn(move || {
+                shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !runtime.snapshot().cancelling {
+                assert!(
+                    Instant::now() < deadline,
+                    "runtime Cancel was not requested"
+                );
+                std::thread::yield_now();
+            }
+            completion_gate.release();
+
+            if let Some(mut operation) = managed_operation.take() {
+                let _ = run_ready(operation.wait_outcome());
+            }
+            if let Some(hook) = legacy_hook {
+                let _ = hook.join().unwrap();
+            }
+            let report = shutdown.join().unwrap();
+            assert!(report.worker_stopped);
+            assert_eq!(
+                1,
+                provider_bytes(),
+                "runtime Cancel must block the session retry or following legacy read"
+            );
+            assert_eq!(0, runtime.snapshot().reserved_bytes);
+        }
+    }
+}
+
 /// A runtime-only Cancel must wake either async Provider entrance while the
 /// Provider future is Pending. Always release the fixture gate before joining
 /// the shutdown thread so a regression cannot strand the test process.
