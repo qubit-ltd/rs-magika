@@ -224,8 +224,9 @@ Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求
 `Unknown` 或 `Undefined` 时结果为
 `Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
 Provider 原生异步 I/O 由调用方 future 等待；若 Provider 一直不完成，future 也可能一直
-Pending。采样就绪后，Magika 采样与推理由 session-owning worker 执行。旧 hooks 不提供
-parent-scope 生命周期观察；需要 scope 跟踪时使用 managed API。
+Pending。对于 session 和旧范围读取路由，worker 会在采样期间请求样本，并等待调用方 future
+完成每次读取；`read_all` 则先读取完整内容，再提交拥有的缓冲区。旧 hooks 不提供 parent-scope
+生命周期观察；需要 scope 跟踪时使用 managed API。
 
 
 ## 延伸阅读

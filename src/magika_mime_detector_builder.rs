@@ -183,7 +183,10 @@ impl MagikaMimeDetectorBuilder {
     /// initialization I/O failures are returned as
     /// [`qubit_mime::MimeError::Io`]. Errors creating a service group from an
     /// application-owned [`OperationManager`] are mapped
-    /// to [`qubit_mime::MimeError::DetectorBackend`].
+    /// to [`qubit_mime::MimeError::DetectorBackend`]. A zero
+    /// `MimeConfig::max_buffer_size()` is rejected when this builder creates a
+    /// new runtime; a supplied shared runtime may be reused with that zero
+    /// per-request limit.
     pub fn build(self) -> MimeResult<MagikaMimeDetector> {
         let max_buffer_size = self.mime_config.max_buffer_size();
         let runtime = match self.runtime {
