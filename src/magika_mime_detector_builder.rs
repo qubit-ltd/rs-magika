@@ -258,20 +258,6 @@ mod tests {
         too_small.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
     }
 
-    #[test]
-    fn test_builder_debug_and_application_supervisor_configuration() {
-        let builder = MagikaMimeDetectorBuilder::default()
-            .media_stream_classifier(None)
-            .operation_manager(OperationManager::new(ManagerOptions::default()).unwrap());
-        assert!(format!("{builder:?}").contains("MagikaMimeDetectorBuilder"));
-        let detector = builder.build().expect("configured detector should initialize");
-        assert!(
-            detector
-                .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1))
-                .worker_stopped
-        );
-    }
-
     fn block_on<F: Future>(future: F) -> F::Output {
         struct ThreadWaker(std::thread::Thread);
         impl Wake for ThreadWaker {

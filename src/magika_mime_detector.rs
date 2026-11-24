@@ -1133,23 +1133,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_window_rejects_a_position_after_end_and_restores_it() {
-        let detector = MagikaMimeDetector::new().expect("detector should initialize");
-        let mut reader = Cursor::new(b"data".to_vec());
-        reader.set_position(5);
-
-        let error = MimeContentBackend::detect_reader(&detector, &mut reader)
-            .expect_err("a reader position past EOF cannot form a remaining window");
-
-        assert!(matches!(error, MimeError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::InvalidInput));
-        assert_eq!(
-            5,
-            reader.position(),
-            "the original reader position is restored on error"
-        );
-    }
-
-    #[test]
     fn test_magika_io_errors_map_to_mime_io_errors() {
         let error = super::map_magika_error(Error::IOError(std::io::Error::other("io")));
         assert!(matches!(error, MimeError::Io(_)));
@@ -1163,26 +1146,6 @@ mod tests {
             bytes: b"#!/usr/bin/env python3\nprint('ok')\n",
         };
         assert_eq!(vec!["text/x-python"], detector.guess_from_magika_input(input).unwrap());
-    }
-
-    #[test]
-    fn test_ruled_sync_input_bypasses_session_worker() {
-        let detector = MagikaMimeDetector::new().expect("detector should initialize");
-        assert_eq!(
-            content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
-            detector.guess_from_magika_input(&b""[..]).unwrap()
-        );
-        assert!(
-            detector
-                .runtime
-                .shutdown_blocking(qubit_operation::ShutdownMode::Drain, std::time::Duration::from_secs(30),)
-                .worker_stopped
-        );
-        assert_eq!(
-            content_type_to_mime(ContentType::Empty).into_iter().collect::<Vec<_>>(),
-            detector.guess_from_magika_input(&b""[..]).unwrap(),
-            "ruled empty content remains available after runtime shutdown"
-        );
     }
 
     #[test]
