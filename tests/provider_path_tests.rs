@@ -944,8 +944,9 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     let first_result = run_ready(first.wait_outcome());
     assert!(matches!(
         first_result,
-        Ok(qubit_operation::OperationOutcome::Stopped(_))
-    ));
+        Ok(qubit_operation::OperationOutcome::Stopped(ref report))
+            if report.reason == StopReason::UserCancelled
+    ), "managed cancellation should preserve its business stop outcome: {first_result:?}");
 
     // Cancellation may settle the local scope immediately, but the gated
     // Provider read still lacks completion evidence. Accept only a real
@@ -1624,6 +1625,52 @@ fn test_provider_gate_watchdog_failure_releases_lock_and_allows_cleanup() {
     }));
     assert!(completion_timeout.is_err(), "an unentered completion gate must trip its watchdog");
     completion_gate.release();
+}
+
+#[test]
+fn test_provider_completion_gate_observes_notification_before_wait_registration() {
+    let completion_gate = ProviderReadCompletionGate::new(1);
+    let _release_gate = ReleaseReadCompletionGateOnDrop(Arc::clone(&completion_gate));
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_random_access()
+        .with_read_completion_gate(Arc::clone(&completion_gate));
+    let file_system = provider.file_system();
+    let worker = std::thread::spawn(move || {
+        let mut reader = file_system
+            .open_random_access_reader(&path("/completion-notify.py"), qubit_fs::read::ReadOptions::default())
+            .expect("session should open before completion gate");
+        reader.read_at(0, &mut [0; 1])
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !completion_gate.is_entered() {
+        assert!(Instant::now() < deadline, "provider read did not notify the completion gate");
+        std::thread::yield_now();
+    }
+    let wait_started = Instant::now();
+    completion_gate.wait_until_entered(Duration::from_secs(2));
+    assert!(
+        wait_started.elapsed() < Duration::from_secs(1),
+        "wait registration after notification should observe the predicate immediately"
+    );
+    completion_gate.release();
+    assert_eq!(1, worker.join().unwrap().expect("provider read should resume after gate release"));
+}
+
+#[test]
+fn test_async_provider_gate_release_before_wait_registration_is_observed() {
+    let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Stat);
+    gate.release();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_async_gate(Arc::clone(&gate));
+    let file_system = provider.async_file_system();
+    let wait_started = Instant::now();
+    run_until(file_system.stat(&path("/released-before-poll.py")), Duration::from_secs(2))
+        .expect("release before waiter registration should remain observable")
+        .expect("provider stat should complete after the gate was released");
+    assert!(
+        wait_started.elapsed() < Duration::from_secs(1),
+        "pre-registration release should not wait for the watchdog deadline"
+    );
 }
 
 #[test]
@@ -2609,6 +2656,7 @@ fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
                     .expect("bundled ONNX Runtime should initialize"),
             );
             let completion_gate = ProviderReadCompletionGate::new(1);
+            let _release_gate = ReleaseReadCompletionGateOnDrop(Arc::clone(&completion_gate));
             let mut provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
                 .short_reads()
                 .with_read_completion_gate(Arc::clone(&completion_gate));
@@ -2865,10 +2913,16 @@ fn test_legacy_async_hook_returns_cancel_result_while_provider_resources_remain_
     let result_before_provider_release = result_rx.recv_timeout(Duration::from_secs(2));
     let retained = runtime.snapshot();
 
-    assert!(
-        matches!(result_before_provider_release, Ok(Err(_))),
-        "legacy hook should publish its cancellation error before the provider gate opens: {result_before_provider_release:?}"
-    );
+    let cancellation_error = result_before_provider_release
+        .expect("legacy hook should return before the provider gate opens")
+        .expect_err("legacy hook should report cancellation before the provider gate opens");
+    match cancellation_error {
+        MimeError::DetectorBackend { backend, reason } => {
+            assert_eq!("magika", backend);
+            assert_eq!("provider inference stopped", reason);
+        }
+        error => panic!("legacy cancellation should map to the provider stop error: {error:?}"),
+    }
     assert!(
         retained.reserved_bytes >= 4096,
         "request bytes must remain owned while provider I/O is unconfirmed: {retained:?}"
@@ -3261,8 +3315,12 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
             "runtime worker did not stop before gate release: {shutdown_report:?}"
         ));
     }
-    if operation_outcome.is_err() {
-        failures.push("bridge operation did not finish after gate cleanup".to_owned());
+    match operation_outcome {
+        Ok(Ok(qubit_operation::OperationOutcome::Failed(MimeError::DetectorBackend {
+            backend,
+            reason,
+        }))) if backend == "magika" && reason == "provider inference stopped" => {}
+        outcome => failures.push(format!("last-runtime drop should return the provider stop error: {outcome:?}")),
     }
     match settlement_after_last_runtime_drop {
         Ok(report) if report.all_released() => {
@@ -3275,6 +3333,25 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
                 .as_ref()
                 .map(|report| report.all_released())
         )),
+    }
+    let recovery_record = settlement_after_gate_release.as_ref().is_ok_and(|report| {
+        report.recovery_count > 0
+            || report.recoveries_total > 0
+            || report.cleanup_failures_total > 0
+            || report.transferred_count > 0
+    });
+    if !recovery_record {
+        failures.push(format!(
+            "post-drop settlement should retain a concrete recovery record: {settlement_after_gate_release:?}"
+        ));
+    }
+    if !shutdown_report
+        .as_ref()
+        .is_some_and(|report| report.admission.snapshot.service_resources > 0)
+    {
+        failures.push(format!(
+            "shutdown should report service resources retained for recovery: {shutdown_report:?}"
+        ));
     }
     assert!(
         failures.is_empty(),
