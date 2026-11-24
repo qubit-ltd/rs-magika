@@ -1035,6 +1035,191 @@ fn test_range_driver_returns_published_result_after_runtime_stop_without_reading
 }
 
 #[test]
+fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
+    struct PendingInput(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl magika::AsyncInput for PendingInput {
+        fn length(&self) -> impl Future<Output = Result<u64, MagikaError>> {
+            std::future::ready(Ok(1))
+        }
+
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), MagikaError>> {
+            let reads = Arc::clone(&self.0);
+            std::future::poll_fn(move |_| {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Poll::Pending
+            })
+        }
+    }
+
+    // The worker remains pending in native inference. A runtime Cancel while
+    // the driver waits for its first range request must be observable without
+    // that worker being released or any provider read being started.
+    let state = Arc::new(super::super::task_state::TaskState::new(9101, None));
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
+    state.attach_bridge(Arc::downgrade(&bridge));
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut driver = Box::pin(super::drive_async_input_with_stops(
+        ProviderDriverGuard::new(
+            PendingInput(Arc::clone(&reads)),
+            bridge.driver(),
+            Arc::clone(&state),
+        ),
+        InferenceFuture::new(Arc::clone(&state)),
+        state.wait_stopped(),
+        std::future::pending::<()>(),
+    ));
+    let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    assert!(driver.as_mut().poll(&mut context).is_pending());
+    state.request_stop();
+    let stopped = loop {
+        if let Poll::Ready(result) = driver.as_mut().poll(&mut context) {
+            break result;
+        }
+        std::thread::park_timeout(Duration::from_millis(1));
+    };
+    assert!(
+        stopped.is_err(),
+        "runtime Cancel must be reported before native inference completes"
+    );
+    assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
+
+    // A stop during an active provider read must also finish the business
+    // future while the worker remains pending. Closing the bridge wakes the
+    // worker; the provider read itself is polled only once.
+    let state = Arc::new(super::super::task_state::TaskState::new(9103, None));
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
+    state.attach_bridge(Arc::downgrade(&bridge));
+    let worker_bridge = Arc::clone(&bridge);
+    let worker = std::thread::spawn(move || {
+        let mut bytes = [0];
+        worker_bridge.read_at(0, &mut bytes)
+    });
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut driver = Box::pin(super::drive_async_input_with_stops(
+        ProviderDriverGuard::new(
+            PendingInput(Arc::clone(&reads)),
+            bridge.driver(),
+            Arc::clone(&state),
+        ),
+        InferenceFuture::new(Arc::clone(&state)),
+        state.wait_stopped(),
+        std::future::pending::<()>(),
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while reads.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(driver.as_mut().poll(&mut context).is_pending());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not reach the active read"
+        );
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
+    state.request_stop();
+    let stopped = loop {
+        if let Poll::Ready(result) = driver.as_mut().poll(&mut context) {
+            break result;
+        }
+        std::thread::park_timeout(Duration::from_millis(1));
+    };
+    assert!(
+        stopped.is_err(),
+        "runtime Cancel must end an active range read"
+    );
+    assert!(worker.join().unwrap().is_err());
+    assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Linearize cancellation at the provider-start gate after the worker has
+    // published a range. The inference stays pending, so the driver must
+    // report rejection itself and must not poll provider input.
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
+    let worker_bridge = Arc::clone(&bridge);
+    let worker = std::thread::spawn(move || {
+        let mut bytes = [0];
+        worker_bridge.read_at(0, &mut bytes)
+    });
+    let admission_gate = Arc::new(Mutex::new(super::super::task_state::AdmissionGate::new()));
+    admission_gate.lock().unwrap().cancelling = true;
+    let state = Arc::new(super::super::task_state::TaskState::new_registered(
+        9104,
+        Some(Arc::downgrade(&bridge)),
+        None,
+        Some(Arc::downgrade(&admission_gate)),
+    ));
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut driver = Box::pin(super::drive_async_input_with_stops(
+        ProviderDriverGuard::new(
+            PendingInput(Arc::clone(&reads)),
+            bridge.driver(),
+            Arc::clone(&state),
+        ),
+        InferenceFuture::new(Arc::clone(&state)),
+        std::future::pending::<()>(),
+        std::future::pending::<()>(),
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !bridge.wait_for_test_waiters(0, 1, Duration::from_millis(1)) {
+        assert!(driver.as_mut().poll(&mut context).is_pending());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker request was not delivered to driver"
+        );
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let rejected = loop {
+        if let Poll::Ready(result) = driver.as_mut().poll(&mut context) {
+            break Some(result);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::park_timeout(Duration::from_millis(1));
+    };
+    assert!(
+        rejected.is_some(),
+        "provider-start rejection must end business waiting"
+    );
+    assert!(rejected.unwrap().is_err());
+    assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
+    drop(driver);
+    assert!(worker.join().unwrap().is_err());
+
+    // If a completed result is already published when cancellation arrives,
+    // the range driver returns it without opening a provider operation.
+    let state = Arc::new(super::super::task_state::TaskState::new(9102, None));
+    let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
+    state.attach_bridge(Arc::downgrade(&bridge));
+    state.finish_business(
+        Ok(Some("application/x-scope-result".to_owned())),
+        ChildOutcomeKind::Succeeded,
+    );
+    state.request_stop();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let result = block_on(super::drive_async_input_with_stops(
+        ProviderDriverGuard::new(
+            PendingInput(Arc::clone(&reads)),
+            bridge.driver(),
+            Arc::clone(&state),
+        ),
+        InferenceFuture::new(Arc::clone(&state)),
+        state.wait_stopped(),
+        std::future::pending::<()>(),
+    ));
+    assert_eq!(
+        Some("application/x-scope-result".to_owned()),
+        result.unwrap()
+    );
+    assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+
+#[test]
 fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_poll() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
