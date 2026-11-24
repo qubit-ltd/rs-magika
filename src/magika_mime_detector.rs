@@ -189,9 +189,11 @@ impl MagikaMimeDetector {
     ///
     /// Dropping a pending provider future cancels local polling only. A
     /// provider's native or remote operation may continue, and this API has no
-    /// completion observer for that work. In that case resource release and
-    /// child settlement remain pending, potentially indefinitely; future
-    /// cancellation does not prove that underlying I/O was interrupted.
+    /// completion observer for that work. Resource release therefore remains
+    /// unconfirmed until completion evidence is available; bounded settlement
+    /// observation can still produce a terminal report with unreleased
+    /// resources. Future cancellation does not prove that underlying I/O was
+    /// interrupted.
     /// The returned future reports the child business outcome; the parent
     /// scope observer separately reports settlement. A bounded observation
     /// can return `Pending(snapshot)` or terminal `Ready(report)` with

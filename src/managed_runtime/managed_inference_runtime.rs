@@ -115,7 +115,8 @@ const SERVICE_CAPACITY: usize = 2;
 /// }
 /// ```
 pub struct ManagedInferenceRuntime {
-    /// Admission queue whose capacity is shared with the supervisor group.
+    /// Bounded worker-job queue with the same slot count as the scope-less
+    /// service group; runtime request and byte limits are separate.
     sender: Mutex<Option<SyncSender<Job>>>,
     /// Session-owning worker; join completion is independent of resource release.
     worker: Mutex<WorkerState>,

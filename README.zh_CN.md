@@ -153,7 +153,8 @@ cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtu
 受管请求会在访问 Provider 之前预留 runtime 容量、逻辑上的 `max_bytes` 采样预算，
 并提交 scope 子操作；runtime 已关闭、容量已满或请求已取消时，不会调用 Provider。
 如果 Provider future 尚处于 Pending 就被丢弃，只能确认本地轮询停止。无法观察 native
-或远端操作何时完成时，子操作释放和容量会继续保持 Pending，甚至可能一直如此。详见
+或远端操作何时完成时，容量会继续保留；结算观察仍可能到达终态 `Ready(report)`，但
+`all_released()` 为 false。详见
 [受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)中的边界、worker 错误和关闭超时。
 
 Magika 返回 `Unknown` 或 `Undefined` 时没有 MIME 候选，结果为 `Ok(None)`，由选定的
