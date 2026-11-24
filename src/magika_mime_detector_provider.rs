@@ -26,8 +26,10 @@ use crate::managed_runtime::ManagedInferenceRuntime;
 /// Provider for [`MagikaMimeDetector`].
 ///
 /// A configured classifier is used by eligible high-level complete-content,
-/// reader, and local-file detections. `detect_path` and `detect_async_path`
-/// do not invoke it, including when those paths use a full-read fallback.
+/// reader detections and local-file refinement for ordinary files. Directories
+/// and symbolic links retain their filename candidate. `detect_path` and
+/// `detect_async_path` do not invoke it, including when those paths use a
+/// full-read fallback.
 ///
 /// # Examples
 ///
@@ -84,7 +86,8 @@ impl MagikaMimeDetectorProvider {
     /// # Parameters
     ///
     /// * `classifier` - Shared classifier used to refine detected media
-    ///   streams.
+    ///   streams. For local paths, only ordinary files reach it; directories
+    ///   and symbolic links retain their filename candidate.
     ///
     /// # Returns
     ///

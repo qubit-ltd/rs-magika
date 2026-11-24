@@ -18,12 +18,15 @@ use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 
 use crate::MagikaMimeDetector;
+use crate::internal::regular_file_media_stream_classifier::RegularFileMediaStreamClassifier;
 use crate::managed_runtime::ManagedInferenceRuntime;
 
 /// Builder for a [`MagikaMimeDetector`].
 ///
 /// The configured media-stream classifier refines eligible high-level
-/// complete-content, reader, and local-file detections. It is not invoked by
+/// complete-content and reader detections. Local-file refinement is limited
+/// to ordinary files; directories and symbolic links retain their filename
+/// candidate. It is not invoked by
 /// `detect_path` or `detect_async_path`, including their full-read fallback;
 /// those provider routes return Magika candidates to `qubit-mime` without
 /// media refinement.
@@ -92,9 +95,11 @@ impl MagikaMimeDetectorBuilder {
 
     /// Sets the optional classifier used for precise media refinement.
     ///
-    /// This setting applies to eligible high-level complete-content, reader,
-    /// and local-file detections. Provider-path detection does not invoke the
-    /// classifier, even when its filesystem fallback reads the whole file.
+    /// This setting applies to eligible high-level complete-content and reader
+    /// detections. Local-file refinement is limited to ordinary files;
+    /// directories and symbolic links retain their filename candidate.
+    /// Provider-path detection does not invoke the classifier, even when its
+    /// filesystem fallback reads the whole file.
     ///
     /// # Parameters
     ///
@@ -188,7 +193,10 @@ impl MagikaMimeDetectorBuilder {
             }
         };
         let mut core = MimeDetectorCore::from_mime_config(self.mime_config.clone());
-        core.set_media_stream_classifier(self.media_stream_classifier);
+        core.set_media_stream_classifier(self.media_stream_classifier.map(|classifier| {
+            Arc::new(RegularFileMediaStreamClassifier::new(classifier))
+                as Arc<dyn MediaStreamClassifier>
+        }));
         Ok(MagikaMimeDetector {
             core,
             filename_detector: RepositoryMimeDetector::from_mime_config(self.mime_config),
