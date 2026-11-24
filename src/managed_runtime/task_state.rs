@@ -201,13 +201,13 @@ impl TaskState {
         for waker in wakers {
             waker.wake();
         }
-        if let Some(bridge) = self
+        let bridge = self
             .bridge
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .as_ref()
-            .and_then(Weak::upgrade)
-        {
+            .and_then(Weak::upgrade);
+        if let Some(bridge) = bridge {
             bridge.close();
         }
     }
@@ -273,15 +273,16 @@ impl TaskState {
     /// * `bridge` - Weak reference to the sampling bridge.
     pub(super) fn attach_bridge(&self, bridge: Weak<AsyncSampleBridge>) {
         *self.bridge.lock().unwrap_or_else(|error| error.into_inner()) = Some(bridge);
-        if self.stop_requested()
-            && let Some(bridge) = self
+        if self.stop_requested() {
+            let bridge = self
                 .bridge
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .as_ref()
-                .and_then(Weak::upgrade)
-        {
-            bridge.close();
+                .and_then(Weak::upgrade);
+            if let Some(bridge) = bridge {
+                bridge.close();
+            }
         }
     }
 
@@ -492,6 +493,7 @@ fn wake_all(wakers: Vec<Waker>) {
 mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::Weak;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::task::Wake;
@@ -500,6 +502,28 @@ mod tests {
     use qubit_operation::ChildOutcomeKind;
 
     use super::TaskState;
+
+    struct BridgeLockProbe {
+        state: Weak<TaskState>,
+        wakes: AtomicUsize,
+        lock_available: AtomicUsize,
+    }
+
+    impl Wake for BridgeLockProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            let Some(state) = self.state.upgrade() else {
+                return;
+            };
+            if state.bridge.try_lock().is_ok() {
+                self.lock_available.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
 
     fn poison_mutex<T>(mutex: &Mutex<T>) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -562,18 +586,36 @@ mod tests {
     #[test]
     fn test_stop_closes_existing_and_late_attached_sampling_bridges() {
         let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
-        let state = TaskState::new(8, Some(Arc::downgrade(&bridge)));
+        let state = Arc::new(TaskState::new(8, Some(Arc::downgrade(&bridge))));
+        let probe = Arc::new(BridgeLockProbe {
+            state: Arc::downgrade(&state),
+            wakes: AtomicUsize::new(0),
+            lock_available: AtomicUsize::new(0),
+        });
+        let waker = Waker::from(Arc::clone(&probe));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut closed = std::pin::pin!(bridge.closed());
+        assert!(std::future::Future::poll(closed.as_mut(), &mut context).is_pending());
 
         state.request_stop();
-        let waker = std::task::Waker::noop();
-        let mut context = std::task::Context::from_waker(waker);
-        let mut closed = std::pin::pin!(bridge.closed());
         assert!(std::future::Future::poll(closed.as_mut(), &mut context).is_ready());
+        assert_eq!(probe.wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.lock_available.load(Ordering::SeqCst), 1);
 
-        let late_bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
-        state.attach_bridge(Arc::downgrade(&late_bridge));
-        let mut closed = std::pin::pin!(late_bridge.closed());
-        assert!(std::future::Future::poll(closed.as_mut(), &mut context).is_ready());
+        let late_bridge_arc = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
+        let late_probe = Arc::new(BridgeLockProbe {
+            state: Arc::downgrade(&state),
+            wakes: AtomicUsize::new(0),
+            lock_available: AtomicUsize::new(0),
+        });
+        let late_waker = Waker::from(Arc::clone(&late_probe));
+        let mut late_context = std::task::Context::from_waker(&late_waker);
+        let mut late_closed = std::pin::pin!(late_bridge_arc.closed());
+        assert!(std::future::Future::poll(late_closed.as_mut(), &mut late_context).is_pending());
+        state.attach_bridge(Arc::downgrade(&late_bridge_arc));
+        assert!(std::future::Future::poll(late_closed.as_mut(), &mut late_context).is_ready());
+        assert_eq!(late_probe.wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(late_probe.lock_available.load(Ordering::SeqCst), 1);
     }
 
     #[test]
