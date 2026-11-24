@@ -62,6 +62,8 @@ impl RequestAdmissionHandoff {
                 closed: false,
                 caller_waker: None,
                 child_waker: None,
+                #[cfg(test)]
+                child_waiting: false,
             }),
             task_state: Arc::downgrade(&task_state),
         });
@@ -76,6 +78,14 @@ impl RequestAdmissionHandoff {
     /// Closes this pending handoff when its request is stopped.
     pub(super) fn close_for_stop(self: &Arc<Self>) {
         self.close();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn child_waiting_for_admission(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .child_waiting
     }
 
     /// Notifies the caller that the accepted child body has begun.
@@ -220,6 +230,10 @@ impl RequestAdmissionHandoff {
                     (None, true)
                 } else {
                     register_waker(&mut state.child_waker, context.waker());
+                    #[cfg(test)]
+                    {
+                        state.child_waiting = true;
+                    }
                     (None, false)
                 }
             };

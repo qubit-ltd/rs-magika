@@ -28,4 +28,7 @@ pub(in crate::managed_runtime::request_admission_handoff) struct HandoffState {
     pub(in crate::managed_runtime::request_admission_handoff) caller_waker: Option<Waker>,
     /// Child future waiting for the caller to finish registration.
     pub(in crate::managed_runtime::request_admission_handoff) child_waker: Option<Waker>,
+    /// Test observation that the child has registered while awaiting admission.
+    #[cfg(test)]
+    pub(in crate::managed_runtime::request_admission_handoff) child_waiting: bool,
 }
