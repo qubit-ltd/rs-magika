@@ -31,6 +31,7 @@ use self::bridge_state::BridgeState;
 use self::internal::BridgeClosed;
 use self::response::Response;
 use self::response::set_response;
+use super::waker_notify;
 
 /// Coordinates one synchronous worker with one asynchronous range driver.
 ///
@@ -139,7 +140,7 @@ impl AsyncSampleBridge {
             state.driver_waker.take()
         };
         if let Some(waker) = wake {
-            waker.wake();
+            waker_notify::wake(waker);
         }
 
         let mut result = response.result.lock().unwrap_or_else(|error| error.into_inner());
@@ -272,11 +273,9 @@ impl AsyncSampleBridge {
         }
         self.changed.notify_all();
         if let Some(waker) = waker {
-            waker.wake();
+            waker_notify::wake(waker);
         }
-        for waker in close_wakers {
-            waker.wake();
-        }
+        waker_notify::wake_all(close_wakers);
     }
 }
 

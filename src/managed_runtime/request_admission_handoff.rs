@@ -19,6 +19,7 @@ use std::task::Waker;
 
 use qubit_mime::MimeError;
 use qubit_operation::OperationScope;
+use crate::internal::waker_notify;
 
 use super::request_admission::RequestAdmission;
 use super::worker_input::WorkerInput;
@@ -126,7 +127,7 @@ impl RequestAdmissionHandoff {
             state.caller_waker.take()
         };
         if let Some(waker) = caller_waker {
-            waker.wake();
+            waker_notify::wake(waker);
         }
     }
 
@@ -263,7 +264,7 @@ impl RequestAdmissionHandoff {
             ((payload.admission, payload.input.take()), state.caller_waker.take())
         };
         if let Some(waker) = caller_waker {
-            waker.wake();
+            waker_notify::wake(waker);
         }
         self.detach_task_state_notification();
         Some(payload)
@@ -447,7 +448,7 @@ impl RequestAdmissionHandoff {
             drop(rejected);
         }
         if let Some(waker) = child_waker {
-            waker.wake();
+            waker_notify::wake(waker);
         }
         accepted
     }
@@ -487,10 +488,10 @@ impl RequestAdmissionHandoff {
         }
         self.detach_task_state_notification();
         if let Some(waker) = caller_waker {
-            waker.wake();
+            waker_notify::wake(waker);
         }
         if let Some(waker) = child_waker {
-            waker.wake();
+            waker_notify::wake(waker);
         }
     }
 

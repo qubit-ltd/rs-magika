@@ -1079,13 +1079,24 @@ impl ManagedInferenceRuntime {
     /// Joins the worker when its thread has already finished and returns the
     /// facts retained across concurrent and subsequent shutdown calls.
     fn observe_finished_worker(&self) -> (bool, bool) {
-        let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
-        if worker.handle.as_ref().is_some_and(|handle| handle.is_finished()) {
-            let handle = worker.handle.take().expect("finished worker handle is present");
-            worker.panicked = handle.join().is_err();
-            worker.stopped = true;
-        }
-        (worker.stopped, worker.panicked)
+        let (report, panic_payload) = {
+            let mut worker = self.worker.lock().unwrap_or_else(|error| error.into_inner());
+            let panic_payload = if worker.handle.as_ref().is_some_and(|handle| handle.is_finished()) {
+                let handle = worker.handle.take().expect("finished worker handle is present");
+                let result = handle.join();
+                worker.panicked = result.is_err();
+                worker.stopped = true;
+                result.err()
+            } else {
+                None
+            };
+            ((worker.stopped, worker.panicked), panic_payload)
+        };
+        // A panic payload has user-defined destruction behavior. Release the
+        // worker mutex before dropping it so that cleanup cannot deadlock
+        // concurrent shutdown observers.
+        drop(panic_payload);
+        report
     }
 
     /// Captures the runtime group and local request counts.

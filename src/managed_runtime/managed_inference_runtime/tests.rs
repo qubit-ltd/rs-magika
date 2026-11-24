@@ -12,9 +12,13 @@ use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
+use std::task::Wake;
 use std::time::Duration;
 
 use magika::Error as MagikaError;
@@ -50,6 +54,50 @@ impl std::task::Wake for ThreadWake {
 }
 
 struct SignalWake(mpsc::SyncSender<()>);
+
+struct PanicWake;
+
+impl Wake for PanicWake {
+    fn wake(self: Arc<Self>) {
+        panic!("injected external waker panic");
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        panic!("injected external waker panic");
+    }
+}
+
+struct CountWake(AtomicUsize);
+
+impl Wake for CountWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct WorkerPanicPayloadProbe {
+    runtime: Arc<Mutex<Option<std::sync::Weak<ManagedInferenceRuntime>>>>,
+    observed_updated_state: Arc<AtomicBool>,
+}
+
+impl Drop for WorkerPanicPayloadProbe {
+    fn drop(&mut self) {
+        let observed = self
+            .runtime
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|runtime| {
+                runtime.worker.try_lock().is_ok_and(|worker| worker.stopped && worker.panicked)
+            });
+        self.observed_updated_state.store(observed, Ordering::SeqCst);
+    }
+}
 
 impl std::task::Wake for SignalWake {
     fn wake(self: Arc<Self>) {
@@ -3678,6 +3726,64 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
 }
 
 #[test]
+fn test_normal_worker_result_survives_panicking_waiter_and_releases_capacity() {
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_wait = Arc::new(Mutex::new(release_rx));
+    let engine_release = Arc::clone(&release_wait);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(move |bytes| {
+            if bytes.first() == Some(&1) {
+                entered_tx.send(()).unwrap();
+                engine_release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("normal inference release barrier");
+                Ok(Some("text/plain".to_owned()))
+            } else {
+                Ok(Some("application/x-second".to_owned()))
+            }
+        }),
+        Box::new(|| {}),
+    ));
+    let first = runtime.submit(None, WorkerInput::Bytes(vec![1].into())).unwrap();
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first inference must enter the engine");
+    let state = runtime.tasks.lock().unwrap()[0].clone();
+    let normal_wake = Arc::new(CountWake(AtomicUsize::new(0)));
+    for waker in [Waker::from(Arc::new(PanicWake)), Waker::from(Arc::clone(&normal_wake))] {
+        let mut context = Context::from_waker(&waker);
+        assert!(state.poll_stop_requested(&mut context).is_pending());
+    }
+
+    release_tx.send(()).unwrap();
+    let first_result = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || first.wait_blocking_settled()),
+        "first normal inference result and release",
+        Duration::from_secs(2),
+    );
+    assert_eq!(Some("text/plain"), first_result.unwrap().as_deref());
+    assert!(normal_wake.0.load(Ordering::SeqCst) > 0, "ordinary result waiter must be notified");
+    assert_eq!(0, runtime.snapshot().reserved_bytes, "first request capacity must be released");
+
+    let second = runtime.submit(None, WorkerInput::Bytes(vec![2].into())).unwrap();
+    let second_result = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || second.wait_blocking_settled()),
+        "second normal inference result and release",
+        Duration::from_secs(2),
+    );
+    assert_eq!(Some("application/x-second"), second_result.unwrap().as_deref());
+    let shutdown = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(shutdown.worker_stopped);
+    assert!(!shutdown.worker_panicked);
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+}
+
+#[test]
 fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -3718,8 +3824,17 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
     let states = runtime.tasks.lock().unwrap().clone();
     assert_eq!(states.len(), 2);
 
+    // A faulty external notification must not prevent later waiters from
+    // being notified during worker fault settlement.
+    let normal_wake = Arc::new(CountWake(AtomicUsize::new(0)));
+    for waker in [Waker::from(Arc::new(PanicWake)), Waker::from(Arc::clone(&normal_wake))] {
+        let mut context = Context::from_waker(&waker);
+        assert!(states[0].poll_stop_requested(&mut context).is_pending());
+    }
+
     panic_tx.send(()).unwrap();
     assert!(states[0].wait_worker_done_blocking(Duration::from_secs(2)));
+    assert!(normal_wake.0.load(Ordering::SeqCst) > 0, "ordinary waiter must be notified after panic");
     assert!(states[1].wait_worker_done_blocking(Duration::from_secs(2)));
     assert!(states[0].wait_released_blocking(Duration::from_secs(2)));
     assert!(
@@ -4275,4 +4390,43 @@ fn test_shutdown_timeout_observes_joinable_worker_while_admission_is_held() {
     assert!(resumed.worker_panicked);
     assert_eq!(0, resumed.admission.snapshot.service_resources);
     assert_eq!(0, runtime.snapshot().reserved_bytes);
+}
+
+#[test]
+fn test_worker_panic_payload_drops_after_worker_report_and_unlock() {
+    let runtime_ref = Arc::new(Mutex::new(None));
+    let observed_updated_state = Arc::new(AtomicBool::new(false));
+    let worker_runtime_ref = Arc::clone(&runtime_ref);
+    let worker_observed = Arc::clone(&observed_updated_state);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(|_| Ok(None)),
+        Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            std::panic::panic_any(WorkerPanicPayloadProbe {
+                runtime: worker_runtime_ref,
+                observed_updated_state: worker_observed,
+            });
+        }),
+    ));
+    *runtime_ref.lock().unwrap() = Some(Arc::downgrade(&runtime));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    release_tx.send(()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !runtime.worker.lock().unwrap().handle.as_ref().unwrap().is_finished() {
+        assert!(std::time::Instant::now() < deadline, "worker did not finish panic");
+        std::thread::yield_now();
+    }
+
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(1));
+    assert!(report.worker_stopped);
+    assert!(report.worker_panicked);
+    assert!(
+        observed_updated_state.load(Ordering::SeqCst),
+        "panic payload destructor must observe updated report with the worker mutex unlocked"
+    );
 }

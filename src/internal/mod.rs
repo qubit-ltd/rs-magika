@@ -22,6 +22,7 @@ mod session_read;
 mod stop_watcher;
 mod sync_provider_input;
 mod sync_route;
+pub(crate) mod waker_notify;
 
 pub(crate) use async_provider_input::AsyncProviderInput;
 pub(crate) use managed_read_observer::ManagedReadObserver;

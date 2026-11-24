@@ -22,6 +22,7 @@ use qubit_operation::ResourceRef;
 pub(super) use super::admission_gate::AdmissionGate;
 use super::request_resource_scope_guard::RequestResourceScopeGuard;
 use super::task_control::register_waker;
+use crate::internal::waker_notify;
 use super::task_inner::TaskInner;
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 
@@ -203,9 +204,7 @@ impl TaskState {
         if let Some(handoff) = handoff {
             handoff.close_for_stop();
         }
-        for waker in wakers {
-            waker.wake();
-        }
+        waker_notify::wake_all(wakers);
         let bridge = self
             .bridge
             .lock()
@@ -489,9 +488,7 @@ impl TaskState {
 ///
 /// * `wakers` - Notifications collected while holding the task lock.
 fn wake_all(wakers: Vec<Waker>) {
-    for waker in wakers {
-        waker.wake();
-    }
+    waker_notify::wake_all(wakers);
 }
 
 #[cfg(test)]
