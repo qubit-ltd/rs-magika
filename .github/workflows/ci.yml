@@ -69,7 +69,7 @@ jobs:
       - name: Prepare pinned local path dependencies
         run: .infra/lib/prepare-local-path-dependencies.sh
       - name: Verify pinned local path dependencies
-        run: .infra/lib/prepare-local-path-dependencies.sh --check-locked
+        run: .infra/lib/check-locked-local-path-dependencies.sh
       - name: Install Rust
         run: rustup toolchain install 1.94.0 --profile minimal
       - name: Download and verify ONNX Runtime 1.24.2 wheel
