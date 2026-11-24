@@ -74,9 +74,10 @@ impl<I> ProviderDriverGuard<I> {
     ///
     /// # Returns
     ///
-    /// A guard that retains input resources while provider I/O is unconfirmed
-    /// and drops both local values before publishing driver completion. A
-    /// pending provider read remains unconfirmed; dropping its local future
+    /// A guard that owns the input and driver until sampling ends. When
+    /// dropped, it destroys both local values before publishing driver
+    /// completion. If provider I/O is still unconfirmed, it records that fact
+    /// and keeps request capacity reserved; dropping the local read future
     /// does not establish native I/O completion.
     pub(super) fn new_with_io_status(
         input: I,
