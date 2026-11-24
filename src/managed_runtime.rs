@@ -18,6 +18,7 @@ mod managed_inference_runtime;
 mod managed_inference_shutdown_report;
 mod managed_inference_snapshot;
 pub(super) mod provider_driver_guard;
+pub(super) mod provider_read_event;
 pub(super) mod request_admission;
 pub(crate) mod request_admission_handoff;
 mod request_resource_cleanup;

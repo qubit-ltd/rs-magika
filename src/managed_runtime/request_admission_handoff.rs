@@ -443,17 +443,13 @@ mod tests {
 
         impl std::task::Wake for WakeAfterRelease {
             fn wake(self: Arc<Self>) {
-                self.observed_active.store(
-                    self.active_requests.load(Ordering::SeqCst),
-                    Ordering::SeqCst,
-                );
+                self.observed_active
+                    .store(self.active_requests.load(Ordering::SeqCst), Ordering::SeqCst);
             }
 
             fn wake_by_ref(self: &Arc<Self>) {
-                self.observed_active.store(
-                    self.active_requests.load(Ordering::SeqCst),
-                    Ordering::SeqCst,
-                );
+                self.observed_active
+                    .store(self.active_requests.load(Ordering::SeqCst), Ordering::SeqCst);
             }
         }
 
@@ -600,14 +596,13 @@ mod tests {
                     })
                     .unwrap();
                 let mut outcome = Box::pin(child.wait_outcome());
-                assert!(handoff
-                    .register_on_parent(&scope, &mut guard, &mut outcome)
-                    .await
-                    .is_none());
-                assert!(matches!(
-                    outcome.await.unwrap(),
-                    OperationOutcome::Succeeded(())
-                ));
+                assert!(
+                    handoff
+                        .register_on_parent(&scope, &mut guard, &mut outcome)
+                        .await
+                        .is_none()
+                );
+                assert!(matches!(outcome.await.unwrap(), OperationOutcome::Succeeded(())));
                 Ok::<_, ()>(())
             })
             .unwrap();

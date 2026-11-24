@@ -43,6 +43,7 @@ use super::job::Job;
 use super::managed_inference_shutdown_report::ManagedInferenceShutdownReport;
 use super::managed_inference_snapshot::ManagedInferenceSnapshot;
 use super::provider_driver_guard::ProviderDriverGuard;
+use super::provider_read_event::ProviderReadEvent;
 use super::request_admission::RequestAdmission;
 use super::service_permit::ServicePermit;
 use super::task_state::AdmissionGate;
@@ -1137,10 +1138,7 @@ fn identify_features(
 ///
 /// The worker's MIME inference result.
 #[cfg(test)]
-async fn drive_async_input<I>(
-    guard: ProviderDriverGuard<I>,
-    inference: InferenceFuture,
-) -> MimeResult<Option<String>>
+async fn drive_async_input<I>(guard: ProviderDriverGuard<I>, inference: InferenceFuture) -> MimeResult<Option<String>>
 where
     I: AsyncInput,
 {
@@ -1155,6 +1153,19 @@ where
 
 /// Serves provider requests while observing a stop signal after the worker
 /// result has had the first chance to win.
+///
+/// # Type Parameters
+///
+/// * `I` - Async provider input used to service worker requests.
+/// * `S` - Future that resolves when the owning runtime scope stops.
+/// * `R` - Future that resolves when this inference request stops.
+///
+/// # Parameters
+///
+/// * `guard` - Provider driver and lifecycle state owned by this request.
+/// * `inference` - Worker inference future whose result takes precedence.
+/// * `scope_stop` - Owning scope stop notification.
+/// * `request_stop` - Request-specific stop notification.
 async fn drive_async_input_with_stops<I, S, R>(
     mut guard: ProviderDriverGuard<I>,
     inference: InferenceFuture,
@@ -1166,22 +1177,11 @@ where
     S: Future,
     R: Future,
 {
-    enum ProviderReadEvent {
-        Result(MimeResult<Option<String>>),
-        Stopped,
-        Closed,
-        Read(Result<(), MagikaError>),
-    }
-
     let mut inference = Box::pin(inference);
     let mut scope_stop = Box::pin(scope_stop);
     let mut request_stop = Box::pin(request_stop);
     loop {
-        let next_request = guard
-            .driver
-            .as_ref()
-            .expect("driver remains owned")
-            .next_request();
+        let next_request = guard.driver.as_ref().expect("driver remains owned").next_request();
         let mut next_request = Box::pin(next_request);
         let event = poll_fn(|cx| {
             if scope_stop.as_mut().poll(cx).is_ready() {

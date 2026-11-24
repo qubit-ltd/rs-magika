@@ -673,13 +673,14 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// not a settlement observer. Ordinary completion waits for the internal
     /// operation to settle; runtime `Cancel` may return its stop error first
     /// while the worker still retains input and byte capacity. It uses both
-    /// this detector's per-request owned-payload limit and the shared runtime's aggregate
-    /// owned-payload byte budget. These logical byte budgets do not bound all
-    /// process memory, provider buffers, or transient allocations. Successful
-    /// return reports the hook's MIME result; the hook has no public operation
-    /// handle or separate settlement result. Its internal unmanaged path waits
-    /// for resource settlement on ordinary completion, but runtime
-    /// cancellation may win the result race and return before release.
+    /// this detector's per-request owned-payload limit and the shared runtime's
+    /// aggregate owned-payload byte budget. These logical byte budgets do
+    /// not bound all process memory, provider buffers, or transient
+    /// allocations. Successful return reports the hook's MIME result; the
+    /// hook has no public operation handle or separate settlement result.
+    /// Its internal unmanaged path waits for resource settlement on
+    /// ordinary completion, but runtime cancellation may win the result
+    /// race and return before release.
     ///
     /// # Parameters
     ///

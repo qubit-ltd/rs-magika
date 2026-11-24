@@ -2307,16 +2307,26 @@ fn test_magika_managed_and_legacy_cancel_at_sixty_fourth_read_completion() {
             );
             let outcome = run_until(operation.wait_outcome(), Duration::from_secs(5))
                 .expect("cancelled managed operation should finish while the read gate is closed");
-            assert!(matches!(
-                outcome,
-                Ok(qubit_operation::OperationOutcome::Stopped(ref report))
-                    if report.reason == StopReason::UserCancelled
-            ), "managed cancellation should preserve its stop reason: {outcome:?}");
-            assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst), "cancellation must not start a 65th read");
+            assert!(
+                matches!(
+                    outcome,
+                    Ok(qubit_operation::OperationOutcome::Stopped(ref report))
+                        if report.reason == StopReason::UserCancelled
+                ),
+                "managed cancellation should preserve its stop reason: {outcome:?}"
+            );
+            assert_eq!(
+                64,
+                observations.read_bytes.load(Ordering::SeqCst),
+                "cancellation must not start a 65th read"
+            );
             completion_gate.release();
             let settlement = run_until(operation.wait_settlement(), Duration::from_secs(5))
                 .expect("managed cancellation settlement should be observable");
-            assert!(settlement.all_released(), "managed cancellation should settle cleanly: {settlement:?}");
+            assert!(
+                settlement.all_released(),
+                "managed cancellation should settle cleanly: {settlement:?}"
+            );
         } else {
             let hook_detector = Arc::clone(&detector);
             let hook_file_system = file_system.clone();
@@ -2339,12 +2349,22 @@ fn test_magika_managed_and_legacy_cancel_at_sixty_fourth_read_completion() {
                 assert!(Instant::now() < deadline, "runtime Cancel did not close admission");
                 std::thread::yield_now();
             }
-            assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst), "cancellation must not start a 65th read");
+            assert_eq!(
+                64,
+                observations.read_bytes.load(Ordering::SeqCst),
+                "cancellation must not start a 65th read"
+            );
             completion_gate.release();
             let business_result = hook.join().unwrap();
-            assert!(business_result.is_err(), "legacy cancellation should fail the business request: {business_result:?}");
+            assert!(
+                business_result.is_err(),
+                "legacy cancellation should fail the business request: {business_result:?}"
+            );
             let report = shutdown.join().unwrap();
-            assert!(report.worker_stopped, "legacy runtime should stop after cancellation: {report:?}");
+            assert!(
+                report.worker_stopped,
+                "legacy runtime should stop after cancellation: {report:?}"
+            );
         }
 
         assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
@@ -2402,17 +2422,31 @@ fn test_magika_managed_and_legacy_cancel_before_second_legacy_range() {
             );
             let outcome = run_until(operation.wait_outcome(), Duration::from_secs(5))
                 .expect("cancelled managed operation should finish while the range gate is closed");
-            assert!(matches!(
-                outcome,
-                Ok(qubit_operation::OperationOutcome::Stopped(ref report))
-                    if report.reason == StopReason::UserCancelled
-            ), "managed cancellation should preserve its stop reason: {outcome:?}");
-            assert_eq!(2, observations.read_bytes.load(Ordering::SeqCst), "cancellation must not start a second range");
-            assert_eq!(1, observations.options.lock().unwrap().len(), "cancellation must not open another legacy range");
+            assert!(
+                matches!(
+                    outcome,
+                    Ok(qubit_operation::OperationOutcome::Stopped(ref report))
+                        if report.reason == StopReason::UserCancelled
+                ),
+                "managed cancellation should preserve its stop reason: {outcome:?}"
+            );
+            assert_eq!(
+                2,
+                observations.read_bytes.load(Ordering::SeqCst),
+                "cancellation must not start a second range"
+            );
+            assert_eq!(
+                1,
+                observations.options.lock().unwrap().len(),
+                "cancellation must not open another legacy range"
+            );
             completion_gate.release();
             let settlement = run_until(operation.wait_settlement(), Duration::from_secs(5))
                 .expect("managed range cancellation settlement should be observable");
-            assert!(settlement.all_released(), "managed range cancellation should settle cleanly: {settlement:?}");
+            assert!(
+                settlement.all_released(),
+                "managed range cancellation should settle cleanly: {settlement:?}"
+            );
         } else {
             let hook_detector = Arc::clone(&detector);
             let hook_file_system = file_system.clone();
@@ -2435,13 +2469,27 @@ fn test_magika_managed_and_legacy_cancel_before_second_legacy_range() {
                 assert!(Instant::now() < deadline, "runtime Cancel did not close admission");
                 std::thread::yield_now();
             }
-            assert_eq!(2, observations.read_bytes.load(Ordering::SeqCst), "cancellation must not start a second range");
-            assert_eq!(1, observations.options.lock().unwrap().len(), "cancellation must not open another legacy range");
+            assert_eq!(
+                2,
+                observations.read_bytes.load(Ordering::SeqCst),
+                "cancellation must not start a second range"
+            );
+            assert_eq!(
+                1,
+                observations.options.lock().unwrap().len(),
+                "cancellation must not open another legacy range"
+            );
             completion_gate.release();
             let business_result = hook.join().unwrap();
-            assert!(business_result.is_err(), "legacy range cancellation should fail the business request: {business_result:?}");
+            assert!(
+                business_result.is_err(),
+                "legacy range cancellation should fail the business request: {business_result:?}"
+            );
             let report = shutdown.join().unwrap();
-            assert!(report.worker_stopped, "legacy runtime should stop after range cancellation: {report:?}");
+            assert!(
+                report.worker_stopped,
+                "legacy runtime should stop after range cancellation: {report:?}"
+            );
         }
 
         assert_eq!(2, observations.read_bytes.load(Ordering::SeqCst));
@@ -2485,9 +2533,7 @@ fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
             let file_system = provider.async_file_system();
 
             let (mut managed_operation, legacy_hook) = if managed {
-                let service = supervisor
-                    .group(qubit_operation::GroupOptions { capacity: 2 })
-                    .unwrap();
+                let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
                 let request_detector = Arc::clone(&detector);
                 (
                     Some(
@@ -2537,10 +2583,7 @@ fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
             });
             let deadline = Instant::now() + Duration::from_secs(5);
             while !runtime.snapshot().cancelling {
-                assert!(
-                    Instant::now() < deadline,
-                    "runtime Cancel was not requested"
-                );
+                assert!(Instant::now() < deadline, "runtime Cancel was not requested");
                 std::thread::yield_now();
             }
             completion_gate.release();

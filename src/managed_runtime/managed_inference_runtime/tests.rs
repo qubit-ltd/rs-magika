@@ -29,10 +29,10 @@ use qubit_operation::ScopeLimits;
 use qubit_operation::ShutdownMode;
 use qubit_operation::StopReason;
 
-use super::super::worker_input::WorkerBytes;
 use super::super::inference_future::InferenceFuture;
 use super::super::provider_driver_guard::ProviderDriverGuard;
 use super::super::request_admission_handoff::RequestAdmissionHandoff;
+use super::super::worker_input::WorkerBytes;
 use super::ManagedInferenceRuntime;
 use super::WorkerInput;
 use super::worker_loop::execute_classified;
@@ -963,11 +963,7 @@ fn test_range_driver_returns_published_result_after_runtime_stop_without_reading
             std::future::ready(Ok(1))
         }
 
-        fn read_at(
-            &mut self,
-            _buffer: &mut [u8],
-            _offset: u64,
-        ) -> impl Future<Output = Result<(), MagikaError>> {
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), MagikaError>> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::future::ready(Ok(()))
         }
@@ -1025,10 +1021,8 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
             let admission = operation_runtime.reserve_for_provider(Some(&scope), 128)?;
-            let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
-                vec![b'x'; 128],
-            )
-            .with_range();
+            let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(vec![b'x'; 128])
+                .with_range();
             let input = crate::internal::AsyncProviderInput::new_owned(
                 provider.async_file_system(),
                 qubit_fs::Path::parse("/published.py").unwrap(),
@@ -1053,7 +1047,10 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
                     Err(mpsc::TryRecvError::Disconnected) => panic!("worker exited before engine start"),
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
-                assert!(std::time::Instant::now() < deadline, "provider range did not reach the worker");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "provider range did not reach the worker"
+                );
                 assert!(detection.as_mut().poll(&mut context).is_pending());
                 std::thread::park_timeout(Duration::from_millis(1));
             }
@@ -1066,10 +1063,7 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
             });
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while !operation_runtime.snapshot().cancelling {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "runtime Cancel was not requested"
-                );
+                assert!(std::time::Instant::now() < deadline, "runtime Cancel was not requested");
                 std::thread::yield_now();
             }
             let result = match detection.as_mut().poll(&mut context) {
@@ -1089,10 +1083,7 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
     let OperationOutcome::Succeeded(result) = outcome else {
         panic!("outer operation should return the managed result observation: {outcome:?}");
     };
-    assert_eq!(
-        Some("application/x-published-range".to_owned()),
-        result.unwrap()
-    );
+    assert_eq!(Some("application/x-published-range".to_owned()), result.unwrap());
 }
 
 #[test]
@@ -1141,7 +1132,8 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
                             &request_file_system,
                             &request_path,
                             64,
-                        )) as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
+                        ))
+                            as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
                     } else {
                         Box::pin(request_detector.detect_bytes_managed(&scope, b"managed bytes".to_vec()))
                     };
@@ -1172,9 +1164,7 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
             }
             assert_eq!(1, runtime.snapshot().admitted_not_started);
             if worker_fault {
-                let fault = runtime
-                    .submit(None, WorkerInput::Bytes(vec![0xff].into()))
-                    .unwrap();
+                let fault = runtime.submit(None, WorkerInput::Bytes(vec![0xff].into())).unwrap();
                 assert!(block_on(fault).is_err());
             } else {
                 let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
@@ -1186,12 +1176,18 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
                 || runtime.active_requests.load(Ordering::SeqCst) != 0
                 || !runtime.tasks.lock().unwrap().is_empty()
             {
-                assert!(std::time::Instant::now() < deadline, "stopped handoff did not release admission");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "stopped handoff did not release admission"
+                );
                 std::thread::yield_now();
             }
             assert_eq!(0, runtime.snapshot().reserved_bytes);
             assert_eq!(0, runtime.active_requests.load(Ordering::SeqCst));
-            assert!(runtime.tasks.lock().unwrap().is_empty(), "stopped child did not release its runtime task");
+            assert!(
+                runtime.tasks.lock().unwrap().is_empty(),
+                "stopped child did not release its runtime task"
+            );
             assert_eq!(0, observations.opens.load(Ordering::SeqCst));
             assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
             release_tx.send(()).unwrap();
@@ -1290,10 +1286,9 @@ fn test_managed_public_handoffs_cancel_before_child_body_starts() {
                 .build()
                 .unwrap(),
         );
-        let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
-            b"not reached".to_vec(),
-        )
-        .with_range();
+        let provider =
+            crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(b"not reached".to_vec())
+                .with_range();
         let observations = provider.observations();
         let file_system = provider.async_file_system();
         let path = qubit_fs::Path::parse("/managed-before-start.py").unwrap();
@@ -1303,12 +1298,8 @@ fn test_managed_public_handoffs_cancel_before_child_body_starts() {
             .as_async()
             .try_submit(OperationOptions::default(), move |scope| async move {
                 let mut detection = if provider_entry {
-                    Box::pin(request_detector.detect_async_provider_path_managed(
-                        &scope,
-                        &file_system,
-                        &path,
-                        64,
-                    )) as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
+                    Box::pin(request_detector.detect_async_provider_path_managed(&scope, &file_system, &path, 64))
+                        as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
                 } else {
                     Box::pin(request_detector.detect_bytes_managed(&scope, b"not reached".to_vec()))
                 };
@@ -1347,9 +1338,7 @@ fn test_worker_fault_closes_an_unsubmitted_request_handoff() {
     let admission = runtime.reserve_for_provider(None, 4).unwrap();
     let state = admission.task_state();
     let (_handoff, _guard) = RequestAdmissionHandoff::new(admission);
-    let inference = runtime
-        .submit(None, WorkerInput::Bytes(vec![1].into()))
-        .unwrap();
+    let inference = runtime.submit(None, WorkerInput::Bytes(vec![1].into())).unwrap();
 
     assert!(block_on(inference).is_err());
     let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
