@@ -321,15 +321,20 @@ impl RequestAdmissionHandoff {
     /// payload, `Some(false)` when the handoff is closed, and `None` while it
     /// remains pending.
     fn poll_body_started(&self, context: &mut Context<'_>) -> Option<bool> {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.body_started {
-            return Some(true);
-        }
-        if state.closed {
-            return Some(false);
-        }
-        register_waker(&mut state.caller_waker, context.waker());
-        None
+        let mut candidate = Some(context.waker().clone());
+        let (result, old) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.body_started {
+                (Some(true), None)
+            } else if state.closed {
+                (Some(false), None)
+            } else {
+                (None, register_waker(&mut state.caller_waker, &mut candidate))
+            }
+        };
+        drop(old);
+        drop(candidate);
+        result
     }
 
     /// Waits for the parent to register this request, or for the child to stop.
@@ -352,21 +357,24 @@ impl RequestAdmissionHandoff {
                 self.close_for_stop();
                 return Poll::Ready(None);
             }
-            let (admission, closed) = {
+            let mut candidate = Some(context.waker().clone());
+            let (admission, closed, old) = {
                 let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                 if let Some(admission) = state.child_admission.take() {
-                    (Some(admission), false)
+                    (Some(admission), false, None)
                 } else if state.closed {
-                    (None, true)
+                    (None, true, None)
                 } else {
-                    register_waker(&mut state.child_waker, context.waker());
+                    let old = register_waker(&mut state.child_waker, &mut candidate);
                     #[cfg(test)]
                     {
                         state.child_waiting = true;
                     }
-                    (None, false)
+                    (None, false, old)
                 }
             };
+            drop(old);
+            drop(candidate);
             if let Some(admission) = admission {
                 self.detach_task_state_notification();
                 return Poll::Ready(Some(admission));
@@ -499,17 +507,28 @@ impl RequestAdmissionHandoff {
 /// # Parameters
 ///
 /// * `slot` - Stored waker slot updated for the current task.
-/// * `waker` - Current task waker to store when it differs from the existing
-///   registration.
-fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
+/// * `candidate` - Cloned task waker to store when it differs from the
+///   existing registration.
+///
+/// # Returns
+///
+/// The replaced waker, which must be dropped after releasing the state lock.
+fn register_waker(slot: &mut Option<Waker>, candidate: &mut Option<Waker>) -> Option<Waker> {
+    let Some(waker) = candidate.as_ref() else {
+        return None;
+    };
     if slot.as_ref().is_none_or(|registered| !registered.will_wake(waker)) {
-        *slot = Some(waker.clone());
+        candidate.take().and_then(|waker| slot.replace(waker))
+    } else {
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::Weak;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
@@ -518,6 +537,8 @@ mod tests {
     use qubit_operation::OperationOptions;
     use qubit_operation::OperationOutcome;
     use qubit_operation::ScopeLimits;
+    use std::task::Wake;
+    use std::task::Waker;
 
     use super::super::byte_budget::ByteBudget;
     use super::super::request_admission::RequestAdmission;
@@ -528,6 +549,102 @@ mod tests {
     use super::RequestAdmissionHandoff;
     use crate::managed_runtime::worker_input::WorkerBytes;
     use crate::managed_runtime::worker_input::WorkerInput;
+
+    #[test]
+    fn test_handoff_waker_replacements_drop_after_state_unlock() {
+        struct DropProbe {
+            handoff: Weak<RequestAdmissionHandoff>,
+            lock_available: Arc<AtomicBool>,
+        }
+        impl Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let available = self
+                    .handoff
+                    .upgrade()
+                    .is_some_and(|handoff| handoff.state.try_lock().is_ok());
+                self.lock_available.store(available, Ordering::SeqCst);
+            }
+        }
+
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let admission = RequestAdmission::new(
+            Arc::new(TaskState::new(799, None)),
+            ServicePermit::try_acquire(&active_requests, 1).unwrap(),
+            byte_budget.try_acquire(8).unwrap(),
+        );
+        let (handoff, _guard) = RequestAdmissionHandoff::new(admission);
+
+        let caller_unlocked = Arc::new(AtomicBool::new(false));
+        let caller_probe = Arc::new(DropProbe {
+            handoff: Arc::downgrade(&handoff),
+            lock_available: Arc::clone(&caller_unlocked),
+        });
+        let caller_waker = Waker::from(Arc::clone(&caller_probe));
+        {
+            let mut context = std::task::Context::from_waker(&caller_waker);
+            assert_eq!(None, handoff.poll_body_started(&mut context));
+        }
+        drop(caller_waker);
+        drop(caller_probe);
+        let mut context = std::task::Context::from_waker(Waker::noop());
+        assert_eq!(None, handoff.poll_body_started(&mut context));
+        assert!(
+            caller_unlocked.load(Ordering::SeqCst),
+            "caller waker destructor must run after handoff unlock"
+        );
+
+        let child_unlocked = Arc::new(AtomicBool::new(false));
+        let child_unlocked_for_task = Arc::clone(&child_unlocked);
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let mut operation = manager
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let active_requests = Arc::new(AtomicUsize::new(0));
+                let byte_budget = Arc::new(ByteBudget::new(8));
+                let admission = RequestAdmission::new(
+                    Arc::new(TaskState::new(800, None)),
+                    ServicePermit::try_acquire(&active_requests, 1).unwrap(),
+                    byte_budget.try_acquire(8).unwrap(),
+                );
+                let (handoff, _guard) = RequestAdmissionHandoff::new(admission);
+                let child_probe = Arc::new(DropProbe {
+                    handoff: Arc::downgrade(&handoff),
+                    lock_available: child_unlocked_for_task,
+                });
+                let child_waker = Waker::from(Arc::clone(&child_probe));
+                let mut child_wait = Box::pin(handoff.wait_for_child_admission(&scope));
+                {
+                    let mut context = std::task::Context::from_waker(&child_waker);
+                    assert!(std::future::Future::poll(child_wait.as_mut(), &mut context).is_pending());
+                }
+                drop(child_waker);
+                drop(child_probe);
+
+                let task_state = handoff.task_state.upgrade().unwrap();
+                let old_stop_wakers = {
+                    let mut inner = task_state.inner.lock().unwrap();
+                    std::mem::take(&mut inner.wakers)
+                };
+                drop(old_stop_wakers);
+                let mut context = std::task::Context::from_waker(Waker::noop());
+                assert!(std::future::Future::poll(child_wait.as_mut(), &mut context).is_pending());
+                assert!(
+                    child_unlocked.load(Ordering::SeqCst),
+                    "child waker destructor must run after handoff unlock"
+                );
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            block_on(operation.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
+    }
 
     #[test]
     fn test_child_outcome_before_body_start_releases_admission() {

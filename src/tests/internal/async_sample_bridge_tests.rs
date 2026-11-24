@@ -8,6 +8,8 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
@@ -187,8 +189,18 @@ fn test_empty_reads_and_closed_driver_finish_without_range_requests() {
 #[test]
 fn test_bridge_close_wakes_pending_request_and_close_waiters() {
     let bridge = AsyncSampleBridge::new(1);
-    let waker = std::task::Waker::noop();
-    let mut context = Context::from_waker(waker);
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    let mut context = Context::from_waker(&waker);
     let mut request = std::pin::pin!(bridge.next_request());
     assert!(Future::poll(request.as_mut(), &mut context).is_pending());
     let mut closed = std::pin::pin!(bridge.closed());
@@ -199,6 +211,10 @@ fn test_bridge_close_wakes_pending_request_and_close_waiters() {
     );
 
     bridge.close();
+    assert!(
+        counter.0.load(Ordering::SeqCst) >= 2,
+        "close must notify both registered bridge waits"
+    );
 
     assert!(matches!(
         Future::poll(request.as_mut(), &mut context),
@@ -239,6 +255,94 @@ fn test_closed_wakes_registered_waiter_and_deduplicates_proven_identity() {
             "a waker proven equivalent to its clone should be registered once"
         );
     }
+}
+
+#[test]
+fn test_next_request_drops_replaced_waker_after_releasing_bridge_lock() {
+    struct DropProbe {
+        bridge: Weak<AsyncSampleBridge>,
+        lock_available: Arc<AtomicBool>,
+    }
+    impl Wake for DropProbe {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let available = self
+                .bridge
+                .upgrade()
+                .is_some_and(|bridge| bridge.test_state_lock_available());
+            self.lock_available.store(available, Ordering::SeqCst);
+        }
+    }
+
+    let bridge = AsyncSampleBridge::new(0);
+    let lock_available = Arc::new(AtomicBool::new(false));
+    let probe = Arc::new(DropProbe {
+        bridge: Arc::downgrade(&bridge),
+        lock_available: Arc::clone(&lock_available),
+    });
+    let old_waker = std::task::Waker::from(Arc::clone(&probe));
+    let mut request = std::pin::pin!(bridge.next_request());
+    {
+        let mut context = Context::from_waker(&old_waker);
+        assert!(Future::poll(request.as_mut(), &mut context).is_pending());
+        assert!(Future::poll(request.as_mut(), &mut context).is_pending());
+        assert!(
+            bridge.test_driver_waker_matches(&old_waker),
+            "equivalent polls retain the registered driver waker"
+        );
+    }
+    drop(old_waker);
+    drop(probe);
+
+    let new_waker = std::task::Waker::noop();
+    let mut context = Context::from_waker(new_waker);
+    assert!(Future::poll(request.as_mut(), &mut context).is_pending());
+    assert!(
+        lock_available.load(Ordering::SeqCst),
+        "replaced driver waker must drop after lock release"
+    );
+}
+
+#[test]
+fn test_range_publication_wakes_registered_driver() {
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let bridge = Arc::new(AsyncSampleBridge::new(1));
+    let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    let mut context = Context::from_waker(&waker);
+    let mut next_request = std::pin::pin!(bridge.next_request());
+    assert!(Future::poll(next_request.as_mut(), &mut context).is_pending());
+    let worker_bridge = Arc::clone(&bridge);
+    let worker = std::thread::spawn(move || {
+        let mut byte = [0; 1];
+        worker_bridge.read_at(0, &mut byte).unwrap();
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while counter.0.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        counter.0.load(Ordering::SeqCst) >= 1,
+        "publishing a range must wake the registered driver"
+    );
+    let request = match Future::poll(next_request.as_mut(), &mut context) {
+        Poll::Ready(Some(request)) => request,
+        _ => panic!("expected published range request"),
+    };
+    request.respond(Ok(vec![1]));
+    join_before(worker, "published range", Duration::from_secs(2));
 }
 
 #[test]

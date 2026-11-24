@@ -14,9 +14,15 @@ use std::task::Waker;
 /// # Parameters
 ///
 /// * `wakers` - Registered task wakers.
-/// * `waker` - Waker to register when not already present.
-pub(super) fn register_waker(wakers: &mut Vec<Waker>, waker: &Waker) {
+/// * `candidate` - Cloned waker to register when not already present. It is
+///   taken only when a new registration is required.
+pub(super) fn register_waker(wakers: &mut Vec<Waker>, candidate: &mut Option<Waker>) {
+    let Some(waker) = candidate.as_ref() else {
+        return;
+    };
     if !wakers.iter().any(|registered| registered.will_wake(waker)) {
-        wakers.push(waker.clone());
+        if let Some(waker) = candidate.take() {
+            wakers.push(waker);
+        }
     }
 }

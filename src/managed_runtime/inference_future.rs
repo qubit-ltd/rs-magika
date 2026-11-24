@@ -100,14 +100,16 @@ impl Future for InferenceFuture {
     ///
     /// `Ready` with the result, or `Pending` until the result is published.
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut candidate = Some(cx.waker().clone());
         let result = {
             let mut inner = self.state.inner.lock().unwrap_or_else(|error| error.into_inner());
             let result = inner.result.take();
             if result.is_none() {
-                register_waker(&mut inner.wakers, cx.waker());
+                register_waker(&mut inner.wakers, &mut candidate);
             }
             result
         };
+        drop(candidate);
         if let Some(result) = result {
             self.completed = true;
             return Poll::Ready(result);
@@ -142,6 +144,15 @@ mod tests {
 
     #[test]
     fn test_future_registers_until_result_is_published() {
+        struct WakeCounter(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for WakeCounter {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         let state = Arc::new(TaskState::new(99, None));
         let poisoned_state = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
@@ -150,11 +161,16 @@ mod tests {
         })
         .join();
         let mut future = Box::pin(InferenceFuture::new(Arc::clone(&state)));
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
+        let wake_counter = Arc::new(WakeCounter(std::sync::atomic::AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_counter));
+        let mut context = Context::from_waker(&waker);
 
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
         state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
+        assert!(
+            wake_counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "result publication must wake its registered observer"
+        );
         assert!(matches!(
             future.as_mut().poll(&mut context),
             Poll::Ready(Ok(Some(mime))) if mime == "text/plain"
