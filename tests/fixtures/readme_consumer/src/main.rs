@@ -9,29 +9,52 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use qubit_magika::MagikaMimeDetectorProvider;
-use qubit_mime::MimeConfig;
-use qubit_mime::MimeDetector;
-use qubit_mime::MimeDetectorRegistry;
+use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
+use qubit_mime::{MimeConfig, MimeDetectionPolicy, MimeDetector, MimeDetectorRegistry};
+use qubit_operation::{ManagerOptions, OperationManager, ShutdownMode};
 use qubit_spi::ProviderSelection;
 
-fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
-    let registry = MimeDetectorRegistry::global();
-    registry.register(MagikaMimeDetectorProvider::new())?;
+fn create_detector() -> Result<
+    (
+        MimeDetectorRegistry,
+        Arc<ManagedInferenceRuntime>,
+        Arc<dyn MimeDetector>,
+    ),
+    Box<dyn Error>,
+> {
+    let config = MimeConfig::default();
+    let manager = OperationManager::new(ManagerOptions::default())?;
+    let runtime = Arc::new(ManagedInferenceRuntime::new(
+        manager,
+        config.max_buffer_size(),
+    )?);
+    let registry = MimeDetectorRegistry::default();
+    registry.register(MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)))?;
     let selection = ProviderSelection::named("magika")?;
-    registry
-        .set_default_selection(selection.clone())
-        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
-    Ok(provider.create_configured(&MimeConfig::default())?)
-}
-
-fn library_x(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
-    detector.detect_by_content(b"#!/usr/bin/env python3\nprint('hello')\n")
+    let detector = provider.create_configured(&config)?;
+    Ok((registry, runtime, detector))
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let detector = create_detector()?;
-    assert_eq!(Some("text/x-python".to_owned()), library_x(detector.as_ref())?);
+    let library = std::env::var_os("ORT_LIBRARY_PATH")
+        .map(std::path::PathBuf::from)
+        .ok_or("ORT_LIBRARY_PATH must name the ONNX Runtime shared library")?;
+    ort::init_from(library)?.commit();
+    let (_registry, runtime, detector) = create_detector()?;
+    assert_eq!(
+        Some("text/x-python".to_owned()),
+        detector.detect(
+            b"#!/usr/bin/env python3\nprint('hello')\n",
+            Some("upload.txt"),
+            MimeDetectionPolicy::VerifyContent,
+        )?,
+    );
+    assert_eq!(
+        Some("application/pdf".to_owned()),
+        detector.detect_by_filename("document.pdf")?,
+    );
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, std::time::Duration::from_secs(5));
+    assert!(report.worker_stopped);
     Ok(())
 }

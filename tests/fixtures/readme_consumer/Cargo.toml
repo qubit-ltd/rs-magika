@@ -6,9 +6,14 @@ publish = false
 
 [workspace]
 
+[features]
+default = []
+inventory = ["qubit-magika/inventory"]
+
 [dependencies]
 qubit-magika = { path = "../../..", default-features = false }
 qubit-mime = { version = "^0.22", path = "../../../../rs-mime" }
+qubit-operation = { version = "^0.3.2", path = "../../../../rs-operation" }
 qubit-spi = "^0.14"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 

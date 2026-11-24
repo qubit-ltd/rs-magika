@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -194,18 +193,6 @@ def validate_registry_metadata(
     )
 
 
-def example_dependencies(
-    dependencies: dict[str, object], project_root: Path
-) -> dict[str, object]:
-    result = dict(dependencies)
-    manifest = tomllib.loads((project_root / "Cargo.toml").read_text(encoding="utf-8"))
-    declaration = manifest.get("dependencies", {}).get("qubit-fs")
-    if not isinstance(declaration, dict) or dependency_version(declaration) is None:
-        raise ValueError("Cargo.toml has no versioned qubit-fs dependency for the current example")
-    result["qubit-fs"] = {key: value for key, value in declaration.items() if key != "path"}
-    return result
-
-
 def run_self_tests() -> None:
     expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-spi": "0.14", "qubit-operation": "0.3.2"}
     fixtures = {
@@ -347,11 +334,9 @@ def main() -> int:
     parser.add_argument(
         "--run-example",
         action="store_true",
-        help="run the current examples/basic.rs against resolved registry releases (requires native ONNX Runtime support)",
+        help="run both extracted README consumers with default and inventory features",
     )
     args = parser.parse_args()
-    if args.run_example and not args.registry_only:
-        parser.error("--run-example requires --registry-only")
     if args.self_test:
         run_self_tests()
         print("README extraction and dependency self-tests passed.")
@@ -370,8 +355,6 @@ def main() -> int:
             for filename in READMES:
                 readme_path = project_root / filename
                 dependencies, example = extract_readme(readme_path.read_text(encoding="utf-8"), filename)
-                if args.run_example:
-                    dependencies = example_dependencies(dependencies, project_root)
                 validate_dependencies(dependencies, expected, filename)
                 consumer_root = Path(temporary) / filename.replace(".md", "")
                 consumer_root.mkdir(parents=True, exist_ok=True)
@@ -420,25 +403,71 @@ def main() -> int:
                 if result.returncode:
                     print(f"{filename}: cargo check exited with {result.returncode}", file=sys.stderr)
                     return result.returncode if result.returncode > 0 else 1
-                if args.run_example and filename == "README.md":
-                    example_path = consumer_root / "examples" / "basic.rs"
-                    example_path.parent.mkdir(parents=True)
-                    shutil.copy2(project_root / "examples/basic.rs", example_path)
-                    print(
-                        "Running current examples/basic.rs with crates.io dependencies "
-                        "and bundled ONNX Runtime...",
-                        flush=True,
-                    )
-                    result = subprocess.run(
-                        ["cargo", "run", "--locked", "--example", "basic", "--manifest-path", str(manifest_path)],
-                        cwd=consumer_root,
-                        env=cargo_env,
-                        check=False,
-                    )
-                    if result.returncode:
-                        print(f"examples/basic.rs: cargo run exited with {result.returncode}", file=sys.stderr)
-                        return result.returncode if result.returncode > 0 else 1
-        print("Both README consumer examples compiled successfully.")
+                if args.run_example:
+                    for feature_set in ("default", "inventory"):
+                        run_root = consumer_root
+                        run_manifest = manifest_path
+                        run_env = cargo_env
+                        if feature_set == "inventory":
+                            inventory_dependencies = dict(dependencies)
+                            magika = inventory_dependencies["qubit-magika"]
+                            if isinstance(magika, dict):
+                                magika = dict(magika)
+                            else:
+                                magika = {"version": magika}
+                            magika["features"] = ["inventory"]
+                            inventory_dependencies["qubit-magika"] = magika
+                            run_root = Path(temporary) / f"{filename.replace('.md', '')}-inventory"
+                            run_root.mkdir(parents=True, exist_ok=True)
+                            (run_root / "src").mkdir()
+                            (run_root / "src/main.rs").write_text(example + "\n", encoding="utf-8")
+                            run_manifest = run_root / "Cargo.toml"
+                            inventory_manifest = consumer_manifest(
+                                inventory_dependencies,
+                                project_root,
+                                filename if not args.registry_only else None,
+                            )
+                            if args.registry_only:
+                                validate_registry_manifest(inventory_manifest)
+                            run_manifest.write_text(inventory_manifest, encoding="utf-8")
+                            if args.registry_only:
+                                metadata_result = subprocess.run(
+                                    ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(run_manifest)],
+                                    cwd=run_root,
+                                    env=cargo_env,
+                                    capture_output=True,
+                                    text=True,
+                                    check=False,
+                                )
+                                if metadata_result.returncode:
+                                    print(metadata_result.stderr, file=sys.stderr, end="")
+                                    print(
+                                        f"{filename} (inventory): registry-only cargo metadata exited with {metadata_result.returncode}",
+                                        file=sys.stderr,
+                                    )
+                                    return metadata_result.returncode if metadata_result.returncode > 0 else 1
+                                validate_registry_metadata(json.loads(metadata_result.stdout), run_root)
+                        command = ["cargo", "run"]
+                        if args.registry_only:
+                            command.append("--locked")
+                        command.extend(["--manifest-path", str(run_manifest)])
+                        print(
+                            f"Running extracted {filename} consumer ({feature_set})...",
+                            flush=True,
+                        )
+                        result = subprocess.run(
+                            command,
+                            cwd=run_root,
+                            env=run_env,
+                            check=False,
+                        )
+                        if result.returncode:
+                            print(
+                                f"{filename} ({feature_set}): cargo run exited with {result.returncode}",
+                                file=sys.stderr,
+                            )
+                            return result.returncode if result.returncode > 0 else 1
+        print("Both README consumer examples passed their requested checks.")
     except (OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
         print(f"README example check failed: {error}", file=sys.stderr)
         return 1
