@@ -24,8 +24,8 @@ use super::request_admission::RequestAdmission;
 use super::worker_input::WorkerInput;
 mod internal;
 
-use internal::BodyStartOr;
-use internal::HandoffCloseReason;
+pub(crate) use internal::BodyStartOr;
+pub(crate) use internal::HandoffCloseReason;
 use internal::HandoffState;
 pub(crate) use internal::RequestAdmissionHandoffGuard;
 use internal::RequestAdmissionPayload;
@@ -89,7 +89,13 @@ impl RequestAdmissionHandoff {
 
     /// Closes this pending handoff when its request is stopped.
     pub(super) fn close_for_stop(self: &Arc<Self>) {
-        self.close_with_reason(HandoffCloseReason::RequestStopped);
+        let reason = self
+            .task_state
+            .upgrade()
+            .map_or("request admission stopped", |state| {
+                state.provider_stop_reason()
+            });
+        self.close_with_reason(HandoffCloseReason::RequestStopped(reason));
     }
 
     #[cfg(test)]
@@ -141,7 +147,7 @@ impl RequestAdmissionHandoff {
         parent: &OperationScope,
         guard: &mut RequestAdmissionHandoffGuard,
         outcome: &mut F,
-    ) -> Option<T>
+    ) -> BodyStartOr<T>
     where
         F: Future<Output = T> + Unpin,
     {
@@ -149,12 +155,12 @@ impl RequestAdmissionHandoff {
             BodyStartOr::Outcome(outcome) => {
                 self.close();
                 guard.finish();
-                Some(outcome)
+                BodyStartOr::Outcome(outcome)
             }
             BodyStartOr::BodyStarted => {
                 let Some(mut payload) = self.take_caller_payload() else {
                     guard.finish();
-                    return None;
+                    return BodyStartOr::Closed(self.closed_reason());
                 };
                 let result = match payload.admission.retain_in_scope(parent) {
                     Ok(()) => Ok((payload.admission, payload.input.take())),
@@ -164,13 +170,16 @@ impl RequestAdmissionHandoff {
                         Err(error)
                     }
                 };
-                let _ = self.provide_to_child(result);
+                if !self.provide_to_child(result) {
+                    guard.finish();
+                    return BodyStartOr::Closed(self.closed_reason());
+                }
                 guard.finish();
-                None
+                BodyStartOr::BodyStarted
             }
-            BodyStartOr::Closed => {
+            BodyStartOr::Closed(_) => {
                 guard.finish();
-                None
+                BodyStartOr::Closed(self.closed_reason())
             }
         }
     }
@@ -200,7 +209,7 @@ impl RequestAdmissionHandoff {
             }
             match self.poll_body_started(context) {
                 Some(true) => Poll::Ready(BodyStartOr::BodyStarted),
-                Some(false) => Poll::Ready(BodyStartOr::Closed),
+                Some(false) => Poll::Ready(BodyStartOr::Closed(self.closed_reason())),
                 None => Poll::Pending,
             }
         })
@@ -288,6 +297,14 @@ impl RequestAdmissionHandoff {
             .unwrap_or_else(|error| error.into_inner())
             .caller_payload
             .take()
+    }
+
+    fn closed_reason(&self) -> HandoffCloseReason {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .close_reason
+            .unwrap_or(HandoffCloseReason::Abandoned)
     }
 
     #[cfg(test)]
@@ -429,12 +446,12 @@ mod tests {
                 );
                 let (handoff, mut guard) = RequestAdmissionHandoff::new(admission);
                 let mut outcome = std::future::ready(());
-                assert!(
+                assert!(matches!(
                     handoff
                         .register_on_parent(&scope, &mut guard, &mut outcome)
-                        .await
-                        .is_some()
-                );
+                        .await,
+                    BodyStartOr::Outcome(())
+                ));
                 assert_eq!(active_requests_for_parent.load(Ordering::SeqCst), 0);
                 assert!(byte_budget_for_parent.try_acquire(8).is_some());
                 Ok::<_, ()>(())
@@ -465,7 +482,7 @@ mod tests {
 
         assert!(matches!(
             block_on(handoff.wait_for_body_start_or(&mut outcome)),
-            BodyStartOr::Closed
+            BodyStartOr::Closed(HandoffCloseReason::RequestStopped(_))
         ));
         assert_eq!(0, active_requests.load(Ordering::SeqCst));
         assert!(byte_budget.try_acquire(8).is_some());
@@ -594,7 +611,9 @@ mod tests {
         state.request_stop();
 
         assert_eq!(
-            Some(HandoffCloseReason::RequestStopped),
+            Some(HandoffCloseReason::RequestStopped(
+                "provider operation stopped before start"
+            )),
             handoff.state.lock().unwrap().close_reason
         );
 
@@ -731,12 +750,12 @@ mod tests {
                     })
                     .unwrap();
                 let mut outcome = Box::pin(child.wait_outcome());
-                assert!(
+                assert!(matches!(
                     handoff
                         .register_on_parent(&scope, &mut guard, &mut outcome)
-                        .await
-                        .is_none()
-                );
+                        .await,
+                    BodyStartOr::BodyStarted
+                ));
                 assert!(matches!(
                     outcome.await.unwrap(),
                     OperationOutcome::Succeeded(())

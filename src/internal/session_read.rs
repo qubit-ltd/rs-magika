@@ -127,7 +127,7 @@ async fn read_async_at_retry(
     loop {
         if should_stop() {
             return Err(FsError::new(
-                FsErrorKind::Interrupted,
+                FsErrorKind::Cancelled,
                 qubit_fs::error::FsOperation::Read,
                 "provider session read stopped",
             ));
@@ -215,7 +215,7 @@ pub(crate) async fn read_async_session_with_stop(
     let mut filled = 0;
     while filled < buffer.len() {
         if should_stop() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "provider session read stopped").into());
+            return Err(session_read_stopped_io_error().into());
         }
         let step = (buffer.len() - filled).min(segment_limit);
         let read_offset = offset
@@ -230,4 +230,25 @@ pub(crate) async fn read_async_session_with_stop(
         filled += count;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct SessionReadStopped;
+
+impl std::fmt::Display for SessionReadStopped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("provider session read stopped")
+    }
+}
+
+impl std::error::Error for SessionReadStopped {}
+
+pub(crate) fn is_session_stop_error(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|source| source.is::<SessionReadStopped>())
+        || error.get_ref().and_then(|source| source.downcast_ref::<FsError>())
+            .is_some_and(|source| source.kind() == FsErrorKind::Cancelled)
+}
+
+pub(crate) fn session_read_stopped_io_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, SessionReadStopped)
 }

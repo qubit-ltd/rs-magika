@@ -33,6 +33,9 @@ pub(crate) use provider_path_route::is_unsupported_provider_error;
 pub(crate) use provider_path_route::select_provider_path_route;
 pub(crate) use read_seek_input::ReadSeekInput;
 pub(crate) use reader_scope::ReaderScope;
+pub(crate) use session_read::is_session_stop_error;
+#[cfg(test)]
+pub(crate) use session_read::session_read_stopped_io_error;
 #[cfg(test)]
 pub(crate) use session_read::read_async_session_with_stop;
 pub(crate) use stop_watcher::StopWatcher;
