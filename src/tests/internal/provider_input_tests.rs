@@ -20,6 +20,9 @@ use std::time::Instant;
 use magika::AsyncInput;
 use magika::Error;
 use magika::SyncInput;
+use qubit_fs::error::FsError;
+use qubit_fs::error::FsErrorKind;
+use qubit_fs::error::FsOperation;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::ReadIoObserver;
@@ -37,6 +40,8 @@ use crate::internal::provider_input::read_async_segments_observed;
 use crate::internal::provider_input::read_options;
 use crate::internal::provider_input::read_sync_segments;
 use crate::internal::provider_input::validate_request;
+use crate::internal::is_session_stop_error;
+use crate::internal::session_read_stopped_io_error;
 use crate::internal::read_budget::ReadBudget;
 
 fn run_ready<F: Future>(future: F) -> F::Output {
@@ -137,6 +142,27 @@ fn test_provider_input_validation_and_copy_errors_are_mapped() {
         ),
         "provider budget failures should retain their requested and allowed byte counts"
     );
+}
+
+#[test]
+fn test_provider_cancellation_is_not_classified_as_session_stop() {
+    let provider_error = FsError::new(FsErrorKind::Cancelled, FsOperation::Read, "provider cancelled");
+    let io_error = provider_error.into_io_error();
+    assert!(!is_session_stop_error(&io_error));
+
+    let mapped = map_provider_magika_error(Error::IOError(io_error));
+    let MimeError::Io(error) = mapped else {
+        panic!("provider cancellation must remain a MIME I/O error");
+    };
+    let source = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<FsError>())
+        .expect("provider FsError must remain available in the source chain");
+    assert_eq!(source.kind(), FsErrorKind::Cancelled);
+
+    let interrupted = FsError::new(FsErrorKind::Interrupted, FsOperation::Read, "provider interrupted").into_io_error();
+    assert!(!is_session_stop_error(&interrupted));
+    assert!(is_session_stop_error(&session_read_stopped_io_error()));
 }
 
 #[test]

@@ -241,14 +241,9 @@ pub(crate) async fn read_async_session_with_stop(
 ///
 /// # Returns
 ///
-/// `true` when the error carries the session-stop marker or a cancelled
-/// filesystem error.
+/// `true` when the error carries the private session-stop marker.
 pub(crate) fn is_session_stop_error(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|source| source.is::<SessionReadStopped>())
-        || error
-            .get_ref()
-            .and_then(|source| source.downcast_ref::<FsError>())
-            .is_some_and(|source| source.kind() == FsErrorKind::Cancelled)
 }
 
 /// Creates an interruption marker for an actively stopped session read.
