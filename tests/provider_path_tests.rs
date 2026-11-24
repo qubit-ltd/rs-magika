@@ -31,6 +31,7 @@ use qubit_mime::MimeError;
 use qubit_operation::ManagerOptions;
 use qubit_operation::OperationManager;
 use qubit_operation::OperationOptions;
+use qubit_operation::OperationScope;
 use qubit_operation::ScopeLimits;
 use qubit_operation::ShutdownMode;
 use qubit_operation::StopReason;
@@ -56,6 +57,43 @@ impl Drop for ReleaseProviderGateOnDrop {
 
 fn path(value: &str) -> Path {
     Path::parse(value).expect("test path should be valid")
+}
+
+async fn detect_managed_provider_child(
+    scope: &OperationScope,
+    detector: Arc<qubit_magika::MagikaMimeDetector>,
+    file_system: qubit_fs::AsyncFileSystem,
+    file_path: Path,
+) -> Result<Option<String>, MimeError> {
+    let mut operation = scope
+        .manager()
+        .as_async()
+        .try_submit(OperationOptions::default(), move |child_scope| async move {
+            let result = detector
+                .detect_async_provider_path_managed(&child_scope, &file_system, &file_path, 4096)
+                .await;
+            Ok::<_, MimeError>(result)
+        })
+        .expect("provider request wrapper should be admitted");
+    let result = match operation
+        .wait_outcome()
+        .await
+        .expect("provider request wrapper outcome should be available")
+    {
+        qubit_operation::OperationOutcome::Succeeded(result) => result,
+        qubit_operation::OperationOutcome::Failed(error) => Err(error),
+        other => panic!("provider request wrapper did not finish: {other:?}"),
+    };
+    let settlement = operation.wait_settlement().await;
+    assert!(
+        settlement.all_released()
+            && settlement
+                .children
+                .iter()
+                .all(|child| child.settlement.all_released()),
+        "provider request and nested inference resources must be released before reuse: {settlement:?}"
+    );
+    result
 }
 
 fn large_provider(range: bool) -> ProviderFileSystemSpi {
@@ -2578,6 +2616,142 @@ fn test_managed_provider_routes_fit_single_resource_scope_quota() {
         failures.is_empty(),
         "single-resource provider quota failures: {failures:#?}"
     );
+}
+
+#[test]
+fn test_parent_resource_and_scope_quotas_are_reused_across_provider_routes() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+    let file_systems = vec![
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_random_access()
+            .async_file_system(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .async_file_system(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .without_range()
+            .async_file_system(),
+    ];
+    let request_detector = Arc::clone(&detector);
+    let mut parent = service
+        .as_async()
+        .try_submit(
+            OperationOptions {
+                limits: ScopeLimits {
+                    resources: 1,
+                    resource_scopes: 1,
+                    ..ScopeLimits::default()
+                },
+                ..OperationOptions::default()
+            },
+            move |scope| async move {
+                for (index, file_system) in file_systems.into_iter().enumerate() {
+                    let result = detect_managed_provider_child(
+                        &scope,
+                        Arc::clone(&request_detector),
+                        file_system,
+                        path(&format!("/quota/reuse-{index}.py")),
+                    )
+                    .await?;
+                    assert_eq!(Some("text/x-python".to_owned()), result);
+                }
+                Ok::<_, MimeError>(())
+            },
+        )
+        .unwrap();
+    let outcome = run_ready(parent.wait_outcome()).unwrap();
+    assert!(
+        matches!(outcome, qubit_operation::OperationOutcome::Succeeded(())),
+        "parent quota reuse across provider routes failed: {outcome:?}"
+    );
+    assert!(run_ready(parent.wait_settlement()).all_released());
+    assert!(detector
+        .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+        .worker_stopped);
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+}
+
+#[test]
+fn test_managed_provider_retries_after_parent_resource_capacity_is_released() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let config = qubit_mime::MimeConfig::default();
+    let runtime = Arc::new(
+        ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap(),
+    );
+    let detector = Arc::new(
+        qubit_magika::MagikaMimeDetector::builder()
+            .mime_config(config)
+            .managed_runtime(runtime)
+            .build()
+            .unwrap(),
+    );
+    let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let request_detector = Arc::clone(&detector);
+    let mut parent = service
+        .as_async()
+        .try_submit(
+            OperationOptions {
+                limits: ScopeLimits {
+                    resources: 1,
+                    resource_scopes: 1,
+                    ..ScopeLimits::default()
+                },
+                ..OperationOptions::default()
+            },
+            move |scope| async move {
+                let held_resource = scope
+                    .reserve_resource()
+                    .expect("parent resource quota should admit its temporary reservation");
+                let rejected = detect_managed_provider_child(
+                    &scope,
+                    Arc::clone(&request_detector),
+                    file_system.clone(),
+                    path("/quota/retry.py"),
+                )
+                .await;
+                assert!(
+                    rejected.is_err(),
+                    "a full parent resource quota must reject the request"
+                );
+                assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+                assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+                assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+                assert_eq!(0, observations.random_reads.load(Ordering::SeqCst));
+                assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+                assert!(observations.options.lock().unwrap().is_empty());
+                drop(held_resource);
+
+                let result = detect_managed_provider_child(
+                    &scope,
+                    Arc::clone(&request_detector),
+                    file_system,
+                    path("/quota/retry.py"),
+                )
+                .await?;
+                assert_eq!(Some("text/x-python".to_owned()), result);
+                assert!(observations.random_opens.load(Ordering::SeqCst) > 0);
+                assert!(observations.random_reads.load(Ordering::SeqCst) > 0);
+                Ok::<_, MimeError>(())
+            },
+        )
+        .unwrap();
+    let outcome = run_ready(parent.wait_outcome()).unwrap();
+    assert!(
+        matches!(outcome, qubit_operation::OperationOutcome::Succeeded(())),
+        "retry after releasing parent capacity failed: {outcome:?}"
+    );
+    assert!(run_ready(parent.wait_settlement()).all_released());
+    assert!(detector
+        .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+        .worker_stopped);
+    let _ = service.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+    let _ = supervisor.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
 }
 
 #[test]
