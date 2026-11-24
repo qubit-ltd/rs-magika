@@ -52,6 +52,21 @@ pub(crate) struct AsyncSampleBridge {
 }
 
 impl AsyncSampleBridge {
+    #[cfg(test)]
+    pub(crate) fn test_state_lock_available(&self) -> bool {
+        self.state.try_lock().is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_driver_waker_matches(&self, candidate: &std::task::Waker) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .driver_waker
+            .as_ref()
+            .is_some_and(|waker| waker.will_wake(candidate))
+    }
+
     /// Creates a bridge for a resource with the supplied length.
     ///
     /// # Parameters
@@ -155,16 +170,25 @@ impl AsyncSampleBridge {
     /// The next request, or `None` after bridge shutdown.
     pub(crate) async fn next_request(self: &Arc<Self>) -> Option<ReadRequest> {
         poll_fn(|cx| {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(request) = state.pending.take() {
-                state.active = Some(Arc::clone(&request.response));
-                return Poll::Ready(Some(request));
-            }
-            if state.closed {
-                return Poll::Ready(None);
-            }
-            state.driver_waker = Some(cx.waker().clone());
-            Poll::Pending
+            let mut candidate = Some(cx.waker().clone());
+            let (result, old) = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(request) = state.pending.take() {
+                    state.active = Some(Arc::clone(&request.response));
+                    (Poll::Ready(Some(request)), None)
+                } else if state.closed {
+                    (Poll::Ready(None), None)
+                } else if state.driver_waker.as_ref().is_none_or(|waker| {
+                    !candidate.as_ref().is_some_and(|candidate| waker.will_wake(candidate))
+                }) {
+                    (Poll::Pending, candidate.take().and_then(|waker| state.driver_waker.replace(waker)))
+                } else {
+                    (Poll::Pending, None)
+                }
+            };
+            drop(old);
+            drop(candidate);
+            result
         })
         .await
     }
@@ -172,14 +196,24 @@ impl AsyncSampleBridge {
     /// Waits until worker cancellation or completion closes the bridge.
     pub(crate) async fn closed(&self) {
         poll_fn(|cx| {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if state.closed {
-                return Poll::Ready(());
-            }
-            if !state.close_wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-                state.close_wakers.push(cx.waker().clone());
-            }
-            Poll::Pending
+            let mut candidate = Some(cx.waker().clone());
+            let result = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if state.closed {
+                    Poll::Ready(())
+                } else if !state.close_wakers.iter().any(|waker| {
+                    candidate.as_ref().is_some_and(|candidate| waker.will_wake(candidate))
+                }) {
+                    if let Some(waker) = candidate.take() {
+                        state.close_wakers.push(waker);
+                    }
+                    Poll::Pending
+                } else {
+                    Poll::Pending
+                }
+            };
+            drop(candidate);
+            result
         })
         .await
     }

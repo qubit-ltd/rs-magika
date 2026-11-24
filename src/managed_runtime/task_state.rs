@@ -168,13 +168,18 @@ impl TaskState {
     /// * `context` - Task context whose waker is registered while stop is
     ///   pending.
     pub(super) fn poll_stop_requested(&self, context: &mut Context<'_>) -> Poll<()> {
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        if inner.stop_requested {
-            Poll::Ready(())
-        } else {
-            register_waker(&mut inner.wakers, context.waker());
-            Poll::Pending
-        }
+        let mut candidate = Some(context.waker().clone());
+        let result = {
+            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            if inner.stop_requested {
+                Poll::Ready(())
+            } else {
+                register_waker(&mut inner.wakers, &mut candidate);
+                Poll::Pending
+            }
+        };
+        drop(candidate);
+        result
     }
 
     /// Waits for a stop request without missing a concurrent state change.
