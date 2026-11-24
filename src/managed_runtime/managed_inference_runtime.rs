@@ -11,6 +11,7 @@ use std::future::Future;
 use std::future::poll_fn;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
@@ -456,16 +457,25 @@ impl ManagedInferenceRuntime {
         before_submit: impl FnOnce(),
     ) -> MimeResult<Option<String>> {
         let runtime = Arc::clone(self);
+        let cancellation_won = Arc::new(AtomicBool::new(false));
+        let body_cancellation_won = Arc::clone(&cancellation_won);
+        let state = Arc::clone(&admission.state);
         let body = move |scope| async move {
             let mut admission = admission;
             admission.retain_in_scope(&scope)?;
             let mut inference = Box::pin(runtime.dispatch(admission, input)?);
             let mut stop = Box::pin(scope.context().stop_requested());
+            let mut request_stop = Box::pin(state.wait_stopped());
             poll_fn(|cx: &mut Context<'_>| {
-                if let Poll::Ready(_reason) = stop.as_mut().poll(cx) {
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", "inference stopped")));
+                if let Poll::Ready(result) = inference.as_mut().poll(cx) {
+                    return Poll::Ready(result);
                 }
-                inference.as_mut().poll(cx)
+                if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
+                    body_cancellation_won.store(true, std::sync::atomic::Ordering::Release);
+                    state.request_stop();
+                    return Poll::Ready(Err(MimeError::detector_backend("magika", state.provider_stop_reason())));
+                }
+                Poll::Pending
             })
             .await
         };
@@ -485,7 +495,7 @@ impl ManagedInferenceRuntime {
         let outcome = operation.wait_outcome().await.map_err(|error| {
             MimeError::detector_backend("magika", format!("operation outcome unavailable: {error:?}"))
         })?;
-        if parent.is_none() {
+        if parent.is_none() && !cancellation_won.load(std::sync::atomic::Ordering::Acquire) {
             // Legacy unmanaged calls have no public handle through which a
             // caller can observe eventual settlement, so return only after
             // this operation's resources have actually been released.
@@ -633,8 +643,9 @@ impl ManagedInferenceRuntime {
         admission: RequestAdmission,
         bytes: Vec<u8>,
     ) -> MimeResult<Option<String>> {
-        self.dispatch(admission, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?
-            .await
+        let state = Arc::clone(&admission.state);
+        let inference = self.dispatch(admission, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))?;
+        await_inference_or_runtime_stop(inference, state).await
     }
 
     /// Maximum total byte payload retained by running and queued jobs.
@@ -955,6 +966,28 @@ impl ManagedInferenceRuntime {
             },
         }
     }
+}
+
+/// Observes a published worker result or runtime cancellation, whichever is
+/// observed first. The inference future retains its stop control; dropping it
+/// on cancellation requests worker stop while the worker continues to own its
+/// input and admission resources until access is complete.
+async fn await_inference_or_runtime_stop(
+    inference: InferenceFuture,
+    state: Arc<TaskState>,
+) -> MimeResult<Option<String>> {
+    let mut inference = Box::pin(inference);
+    let mut stopped = Box::pin(state.wait_stopped());
+    poll_fn(|context| {
+        if let Poll::Ready(result) = inference.as_mut().poll(context) {
+            return Poll::Ready(result);
+        }
+        if stopped.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Err(MimeError::detector_backend("magika", state.provider_stop_reason())));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// Computes the time left before a shared shutdown deadline.
