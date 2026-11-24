@@ -200,8 +200,14 @@ def _guide_relative_path(value: str, guide_name: str, key: str) -> str:
     windows_path = PureWindowsPath(value)
     if Path(value).is_absolute() or windows_path.is_absolute():
         raise ValueError(f"{guide_name}: {key} must use a relative guide path, got {value!r}")
-    normalized = windows_path.as_posix() if "\\" in value else value
-    return posixpath.normpath(normalized)
+    if "\\" in value:
+        raise ValueError(f"{guide_name}: {key} must use '/' separators in a published guide path, got {value!r}")
+    return posixpath.normpath(value)
+
+
+def _local_generation_path(value: str) -> str:
+    """Normalize a generated local path using host-independent Windows semantics."""
+    return PureWindowsPath(value).as_posix() if "\\" in value else Path(value).as_posix()
 
 
 def _validate_toml_value(value: object, guide_name: str, key: str) -> None:
@@ -449,19 +455,18 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
     expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-operation": "0.3.2", "qubit-fs": "0.4"}
     validate_dependencies(guide, parsed, examples, expected)
     registry_consumer = consumer_manifest(dependencies, Path("/project"), None)
-    assert 'qubit-operation = "0.3.2"' in registry_consumer
-    assert 'qubit-operation = {' not in registry_consumer
-    assert "path =" not in registry_consumer
-    assert "[patch." not in registry_consumer
-    assert "[workspace]" in registry_consumer
+    registry_manifest = tomllib.loads(registry_consumer)
+    assert registry_manifest["dependencies"]["qubit-operation"] == "0.3.2"
+    assert "path" not in registry_manifest["dependencies"]
+    assert "patch" not in registry_manifest
+    assert "workspace" in registry_manifest
     sibling_consumer = consumer_manifest(
         dependencies, Path("layout/rs-magika"), Path("layout/rs-operation")
     )
-    assert (
-        'qubit-operation = { version = "0.3.2", path = "layout/rs-operation" }'
-        in sibling_consumer
-    )
     sibling_manifest = tomllib.loads(sibling_consumer)
+    assert sibling_manifest["dependencies"]["qubit-operation"] == {
+        "version": "0.3.2", "path": "layout/rs-operation"
+    }
     assert sibling_manifest["patch"]["crates-io"]["qubit-operation"]["path"] == "layout/rs-operation"
     mime_dependency = {"version": "0.22", "default-features": False, "features": ["inventory"]}
     mime_consumer = tomllib.loads(consumer_manifest(
@@ -538,7 +543,20 @@ qubit-operation = { path = "../rs-operation" }
     windows_relative["dependencies"]["qubit-fs"]["path"] = r"..\rs-fs"
     windows_relative["dependencies"]["qubit-operation"]["path"] = r"..\rs-operation"
     windows_relative["patch"]["crates-io"]["qubit-operation"]["path"] = r"..\rs-operation"
-    windows_rebased = validate_and_rebase_manifest(windows_relative, guide, fixture_root)
+    windows_paths = {
+        "qubit-magika": PureWindowsPath(windows_relative["dependencies"]["qubit-magika"]["path"]),
+        "qubit-mime": PureWindowsPath(windows_relative["dependencies"]["qubit-mime"]["path"]),
+        "qubit-fs": PureWindowsPath(windows_relative["dependencies"]["qubit-fs"]["path"]),
+        "qubit-operation": PureWindowsPath(windows_relative["dependencies"]["qubit-operation"]["path"]),
+        "patch": PureWindowsPath(windows_relative["patch"]["crates-io"]["qubit-operation"]["path"]),
+    }
+    assert windows_paths["qubit-magika"].is_relative_to(PureWindowsPath(".."))
+    assert windows_paths["qubit-operation"].as_posix() == "../rs-operation"
+    for value in (r"..\rs-magika", r"..\rs-mime", r"..\rs-fs", r"..\rs-operation"):
+        assert _local_generation_path(value) == PureWindowsPath(value).as_posix()
+    windows_rebased = validate_and_rebase_manifest(
+        json.loads(json.dumps(parsed_application)), guide, fixture_root
+    )
     windows_roundtrip = tomllib.loads(manifest_text(windows_rebased, add_package=False, add_workspace=False))
     assert windows_roundtrip == windows_rebased
     for name, expected_path in expected_fixture_paths.items():
@@ -653,6 +671,17 @@ qubit-operation = { path = "../rs-operation" }
             assert "relative guide path" in str(error)
         else:
             raise AssertionError(f"accepted absolute guide path in {key}")
+    for key in ("qubit-magika", "patch.crates-io.qubit-operation"):
+        invalid_windows_separator = json.loads(json.dumps(parsed_application))
+        target = (invalid_windows_separator["dependencies"]["qubit-magika"] if key == "qubit-magika"
+                  else invalid_windows_separator["patch"]["crates-io"]["qubit-operation"])
+        target["path"] = r"..\rs-magika" if key == "qubit-magika" else r"..\rs-operation"
+        try:
+            validate_and_rebase_manifest(invalid_windows_separator, guide, Path("/layout/rs-magika"))
+        except ValueError as error:
+            assert "must use '/' separators" in str(error)
+        else:
+            raise AssertionError(f"accepted published Windows separator in {key}")
     inventory_base = json.loads(json.dumps(parsed_application))
     inventory_base["dependencies"]["qubit-magika"]["default-features"] = False
     inventory_base["dependencies"]["qubit-magika"]["optional"] = True
