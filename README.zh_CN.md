@@ -111,15 +111,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 `MagikaMimeDetector::detect_async_provider_path_managed` 或 `detect_bytes_managed` 传入
 `OperationScope`。受管调用会将工作关联到该 scope，使其报告能独立跟踪资源释放和业务结果。
 应用启动时创建 runtime 和 detector，每个受管请求传入 scope，并在应用关闭时 drain runtime。
-检测 future 返回的是业务结果；scope observer 会单独报告资源结算。`Pending(snapshot)` 只表示本次有界等待结束，
-`Ready(report)` 也可能包含未释放资源的负面证据。Provider I/O 完成情况未知时，容量会继续保留；内置清理策略
-不会在没有新完成证据时通过重试释放容量。shutdown report 中的 `worker_stopped` 只记录 worker join，与这两项观察相互独立。
+检测 future 返回的是业务结果；scope observer 会单独报告资源结算。有界等待可能返回 `Pending(snapshot)`，
+也可能返回终态 `Ready(report)`，但 `all_released()` 仍为 false；此时容量继续保留。内置清理没有接收已丢弃
+Provider I/O 完成证据的入口，按当前策略重试也不能释放这笔容量。`RecoveryHandle` 可检查状态、重试策略或转移责任。
+`worker_stopped` 只报告 worker join，与结算和资源释放相互独立。
 
 Inventory 只提交同步 `MimeDetectorSpec` factory，不会向 `qubit-mime` 独立的 async provider
 registry 添加 Provider，也不会附加应用 scope。通过支持 scope 的 async `MimeRuntime` 路由
 选择这个仅支持同步的 `magika` Provider 时，会返回 `AsyncUnsupported`，不会回退到同步推理。
-若需 scope 跟踪，可直接调用 Magika 的 managed API。两个旧 hook 都可能在资源结算确认前返回业务结果。
-受管 API 会单独提供资源报告：有界等待可能返回 `Pending`；`Ready` 报告也可能指出释放尚未确认。
+若需 scope 跟踪，可直接调用 Magika 的 managed API。旧 content hook 通常等待内部操作结算；旧 Provider hook 通常等待业务结果。
+runtime 取消时，两者都可能提前返回停止错误。受管 API 会单独提供资源报告：有界等待可能返回 `Pending`；
+`Ready` 报告也可能指出释放尚未确认。
 本地停止请求不会在 Provider I/O 或 worker 访问尚未确认结束时释放容量。关闭超时时，
 `worker_stopped == false` 表示尚未确认 worker 已 join；`true` 表示已 join，但不代表资源报告中的所有资源都已释放。
 `worker_panicked` 只记录 join 时观察到的未捕获 panic。详见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
