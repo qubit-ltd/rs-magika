@@ -66,19 +66,16 @@ use self::worker_state::WorkerState;
 #[path = "internal/worker_loop.rs"]
 mod worker_loop;
 
+#[path = "managed_inference_runtime/internal/provider_setup_owner.rs"]
+mod provider_setup_owner;
+
+use self::provider_setup_owner::ProviderSetupOwner;
+
 #[cfg(test)]
 mod test_support;
 
 /// Monotonically allocates identifiers for runtime child operations.
 static NEXT_CHILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// Keeps provider setup input ahead of its admission lease during destruction.
-struct ProviderSetupOwner {
-    /// Owned provider input is destroyed before capacity is released.
-    input: AsyncProviderInput,
-    /// Capacity retained until setup input destruction or worker dispatch.
-    admission: RequestAdmission,
-}
 
 /// Maximum number of admitted requests retained by the runtime.
 const SERVICE_CAPACITY: usize = 2;
