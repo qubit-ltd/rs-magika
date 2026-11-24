@@ -34,6 +34,7 @@ use crate::internal::provider_input::copy_exact;
 use crate::internal::provider_input::invalid_input;
 use crate::internal::provider_input::map_provider_magika_error;
 use crate::internal::provider_input::read_async_segments;
+use crate::internal::provider_input::read_options;
 use crate::internal::provider_input::read_sync_segments;
 use crate::internal::provider_input::validate_request;
 use crate::internal::read_budget::ReadBudget;
@@ -232,10 +233,9 @@ fn test_async_legacy_provider_stops_between_completed_ranges() {
         &file_system,
         &path,
         6,
-        None,
+        read_options(0, output.len(), None),
         &mut budget,
         &mut output,
-        0,
         &mut observer,
     ));
 

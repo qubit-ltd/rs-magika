@@ -125,10 +125,10 @@ pub(crate) fn read_sync_segments(
 ///   ranges.
 /// * `path` - Path of the resource within the filesystem.
 /// * `length` - Complete logical resource length reported to Magika.
-/// * `version` - Optional version condition applied to every range.
+/// * `options` - Read options carrying the range offset and optional version
+///   condition.
 /// * `budget` - Per-detection cumulative read budget.
 /// * `buffer` - Destination for the requested bytes.
-/// * `offset` - Start offset of the requested range in the resource.
 /// * `observer` - Receives provider I/O lifecycle events and may stop before
 ///   the next operation.
 ///
@@ -140,17 +140,16 @@ pub(crate) fn read_sync_segments(
 ///
 /// Returns an I/O error when validation, budget reservation, or any provider
 /// range fails or the observer stops the operation.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_async_observed<O: ReadIoObserver>(
     file_system: &qubit_fs::AsyncFileSystem,
     path: &Path,
     length: u64,
-    version: Option<&ResourceVersion>,
+    options: ReadOptions,
     budget: &mut ReadBudget,
     buffer: &mut [u8],
-    offset: u64,
     observer: &mut O,
 ) -> MagikaResult<()> {
+    let offset = options.offset().unwrap_or_default();
     validate_request(length, budget, buffer.len(), offset)?;
     if buffer.is_empty() {
         return Ok(());
@@ -161,7 +160,16 @@ pub(crate) async fn read_async_observed<O: ReadIoObserver>(
         .max_read_range_bytes()
         .maximum()
         .map_or(usize::MAX, |maximum| usize::try_from(maximum).unwrap_or(usize::MAX));
-    read_async_segments_observed(file_system, path, version, buffer, offset, max_segment, observer).await
+    read_async_segments_observed(
+        file_system,
+        path,
+        options.if_match(),
+        buffer,
+        offset,
+        max_segment,
+        observer,
+    )
+    .await
 }
 
 /// Reads a buffer as bounded asynchronous ranges while observing provider I/O.

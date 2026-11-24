@@ -21,6 +21,7 @@ use qubit_fs::read::AsyncRandomAccessReader;
 use super::async_route::AsyncRoute;
 use super::managed_read_observer::ManagedReadObserver;
 use super::provider_input::read_async_observed;
+use super::provider_input::read_options;
 use super::read_budget::ReadBudget;
 use super::session_read::read_async_session;
 use super::session_read::read_async_session_with_stop;
@@ -174,10 +175,9 @@ impl AsyncInput for AsyncProviderInput {
                         file_system,
                         path,
                         self.length,
-                        self.version.as_ref(),
+                        read_options(offset, buffer.len(), self.version.as_ref()),
                         &mut self.budget,
                         buffer,
-                        offset,
                         &mut observer,
                     )
                     .await
