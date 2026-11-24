@@ -8,10 +8,10 @@
 [![中文文档](https://img.shields.io/badge/文档-中文版-blue.svg)](README.zh_CN.md)
 
 `qubit-magika` adds a Magika-backed `qubit_mime::MimeDetector` for applications
-that need content-aware MIME detection without putting Magika and ONNX Runtime
-dependencies into `qubit-mime` itself. It is intended for applications and
-libraries that can initialize one detector during startup and share it across
-their detection calls.
+that inspect uploads whose filename may not match their contents. It provides
+content-aware MIME detection without putting Magika and ONNX Runtime
+dependencies into `qubit-mime` itself. An application can initialize one
+detector during startup and share it across its detection calls.
 
 ## Overview
 
@@ -20,7 +20,7 @@ and run without a separately installed ONNX Runtime. Disable default features if
 your application provides a compatible ONNX Runtime shared library. With `ort`'s
 dynamic loader, initialize that library with `ort::init_from` before creating a
 detector. The Linux CI runs a real Python-content inference with this setup in
-the [`dynamic-loader` job](.github/workflows/ci.yml); see the
+the [`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml); see the
 [user guide](doc/user_guide.md) for the dependency and startup example.
 
 ## Installation
@@ -30,6 +30,7 @@ the [`dynamic-loader` job](.github/workflows/ci.yml); see the
 qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
+qubit-operation = "0.3"
 ```
 
 ## Quick Start
@@ -38,39 +39,57 @@ qubit-spi = "0.14"
 use std::error::Error;
 use std::sync::Arc;
 
-use qubit_magika::MagikaMimeDetectorProvider;
+use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
 use qubit_mime::{
     MimeConfig,
     MimeDetector,
     MimeDetectorRegistry,
+    MimeDetectionPolicy,
 };
+use qubit_operation::{ManagerOptions, OperationManager};
 use qubit_spi::ProviderSelection;
 
-// App startup registers the provider and creates the expensive session once.
-fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
-    let registry = MimeDetectorRegistry::global();
-    registry.register(MagikaMimeDetectorProvider::new())?;
+// Keep the registry and runtime with the application for its lifetime.
+fn create_detector() -> Result<(
+    MimeDetectorRegistry,
+    Arc<ManagedInferenceRuntime>,
+    Arc<dyn MimeDetector>,
+), Box<dyn Error>> {
+    let manager = OperationManager::new(ManagerOptions::default())?;
+    let runtime = Arc::new(ManagedInferenceRuntime::new(
+        manager,
+        MimeConfig::default().max_buffer_size(),
+    )?);
+    let registry = MimeDetectorRegistry::default();
+    registry.register(
+        MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)),
+    )?;
     let selection = ProviderSelection::named("magika")?;
-    registry
-        .set_default_selection(selection.clone())
-        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
-    Ok(provider.create_configured(&MimeConfig::default())?)
+    let detector = provider.create_configured(&MimeConfig::default())?;
+    Ok((registry, runtime, detector))
 }
 
-// Downstream libraries borrow the detector instead of rebuilding the model.
-fn library_x(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
-    detector.detect_by_content(
+// Verify uploaded content when the supplied filename is misleading.
+fn inspect_upload(detector: &dyn MimeDetector) -> Result<Option<String>, qubit_mime::MimeError> {
+    detector.detect(
         b"#!/usr/bin/env python3\nprint('hello')\n",
+        Some("upload.txt"),
+        MimeDetectionPolicy::VerifyContent,
     )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let detector = create_detector()?;
+    let (_registry, runtime, detector) = create_detector()?;
     assert_eq!(
         Some("text/x-python".to_owned()),
-        library_x(detector.as_ref())?,
+        inspect_upload(detector.as_ref())?,
     );
+    let report = runtime.shutdown_blocking(
+        qubit_operation::ShutdownMode::Drain,
+        std::time::Duration::from_secs(5),
+    );
+    assert!(report.worker_stopped);
     Ok(())
 }
 ```
@@ -90,20 +109,42 @@ Magika inference, then return Magika's MIME type mapping.
 ### Operation-aware async provider detection
 
 Applications that need cancellation and release accounting for async provider
-sampling can call `MagikaMimeDetector::detect_async_provider_path_managed` from
-an operation scope. Create one supervisor and detector at startup, pass the
-scope into each managed request, and drain the detector before shutting down
-the application. The legacy `MimeDetector` hooks do not accept an operation
-scope; they keep their existing contract.
+sampling can call `MagikaMimeDetector::detect_async_provider_path_managed` or
+`detect_bytes_managed` with an `OperationScope`. Managed calls attach their
+work to that scope so its report can track release separately from the
+business result. Create the runtime and detector at startup, pass the scope to
+each managed request, and drain the runtime during application shutdown.
 
-The `qubit-mime` async provider registry selects and constructs an async
-backend; its hooks do not receive a parent operation scope. Inventory registers
-the unconfigured provider for that registry. Use the explicit managed entry
-point when a request must attach lifecycle observation to an application scope.
-For a reproducible checkout layout, run
-[`prepare-local-path-dependencies.sh --check-locked`](.infra/bin/prepare-local-path-dependencies.sh)
-and then use the fixed revisions in
-[`local-path-dependencies.tsv`](.infra/ci/local-path-dependencies.tsv) for:
+The inventory submits a synchronous `MimeDetectorSpec` factory only. It does
+not add a provider to `qubit-mime`'s separate async provider registry or attach
+an application scope. Selecting this sync-only `magika` provider through the
+scope-aware async `MimeRuntime` route returns `AsyncUnsupported`; it does not
+fall back to synchronous inference. The legacy content hook waits for ordinary
+inference settlement, but a runtime `Cancel` result can return before the
+worker releases its input and permits. The legacy provider-path hook waits for
+the business result and does not expose settlement or parent-scope
+observation. See the [managed lifecycle guide](doc/user_guide.md#migration-guide)
+for these distinctions.
+
+The inventory-enabled `MimeDetectorRegistry::builtin()` discovers the
+unconfigured sync provider; its default selection remains `repository`, so
+select `magika` explicitly. An independent `MimeDetectorRegistry::default()`
+starts empty and is useful for application-specific registration, as in the
+example above. Registering the same provider name twice is an error. Include
+`use qubit_magika as _;` when relying on inventory so the linker retains its
+submission.
+
+To prepare missing local dependency checkouts in a source repository, use the
+[preparation script](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/lib/prepare-local-path-dependencies.sh).
+Its `--check-locked` mode only checks that existing sibling repositories have
+the pinned revisions and clean worktrees; it reports missing, mismatched, or
+dirty checkouts but does not repair them. Preparation leaves existing Git
+checkouts untouched, so restore a drifted checkout to its pinned revision
+manually before checking again. It refuses to overwrite occupied non-checkout
+paths. Creating a missing checkout requires GNU `mv` with `-Tn` support. The package
+does not ship `.infra`, so its script and [pinned revision list](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
+are linked from the source repository. After preparing the sibling layout, the
+following commands verify the locked manifests:
 
 ```bash
 cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
@@ -119,10 +160,17 @@ child release and capacity remain pending, possibly indefinitely. See the
 [managed lifecycle guide](doc/user_guide.md#migration-guide) for this boundary,
 worker error reporting, and shutdown timeouts.
 
+Unknown and undefined Magika predictions have no MIME candidate and produce
+`Ok(None)`, allowing the selected `MimeDetectionPolicy` to decide filename
+fallback. A shutdown timeout does not forcibly interrupt native inference or
+provider I/O; inspect `worker_stopped` and `worker_panicked` in the report. If
+the worker has not stopped, the runtime retains its handle so a later shutdown
+call can continue observing and joining it.
+
 Provider selection and detector configuration are separate inputs. A
 `ProviderSelection` decides which registered provider may create the service;
 `MimeConfig` controls the detector instance after that provider is resolved.
-By default, the App explicitly registers the provider during startup. Enable
+Without inventory, the app explicitly registers the provider during startup. Enable
 `qubit-magika`'s `inventory` feature to submit
 `MagikaMimeDetectorProvider::new()` to the MIME detector inventory: linked
 applications then discover `magika` through `MimeDetectorRegistry::builtin()`
@@ -201,7 +249,7 @@ required.
 - [中文用户手册](doc/user_guide.zh_CN.md)
 - [API documentation](https://docs.rs/qubit-magika)
 - [中文 README](README.zh_CN.md)
-- [Locked local dependency revisions](.infra/ci/local-path-dependencies.tsv)
+- [Locked local dependency revisions](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 
 ## Testing
 
@@ -212,12 +260,15 @@ cargo test
 # Run tests with all declared features
 cargo test --all-features
 
-# Project CI checks
-./.infra/bin/ci-check.sh
+# Project checks (available in the source repository)
+./.infra/bin/project-ci-check.sh
 
 # Check code coverage
 ./.infra/bin/coverage.sh
 ```
+
+The `.infra` scripts are not included in the published Cargo package. See the
+[source repository](https://github.com/qubit-ltd/rs-magika) for those scripts.
 
 ## License
 
@@ -229,8 +280,10 @@ full license text.
 ## Contributing
 
 Contributions are welcome. Please follow the Rust API guidelines, keep public
-API documentation and tests current, and run `./.infra/bin/align-ci.sh` to format code and
-`./.infra/bin/ci-check.sh` to satisfy CI requirements before submitting a pull request.
+API documentation and tests current, and run the source repository's
+[`align-ci.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/align-ci.sh)
+to format code and [`project-ci-check.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/project-ci-check.sh)
+before submitting a pull request.
 
 ## Author
 
