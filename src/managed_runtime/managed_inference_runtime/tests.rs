@@ -1205,6 +1205,137 @@ fn test_managed_public_handoffs_close_without_repolling_caller() {
 }
 
 #[test]
+fn test_managed_public_handoffs_deliver_admission_and_complete() {
+    use std::sync::atomic::Ordering;
+
+    for provider_entry in [false, true] {
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+        let max_bytes = qubit_mime::MimeConfig::default().max_buffer_size();
+        let engine_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_engine = Arc::clone(&engine_calls);
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor.clone(),
+            max_bytes,
+            Box::new(move |_| {
+                calls_for_engine.fetch_add(1, Ordering::SeqCst);
+                Ok(Some("application/x-managed-delivered".to_owned()))
+            }),
+            Box::new(|| {}),
+        ));
+        let detector = Arc::new(
+            crate::MagikaMimeDetector::builder()
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .unwrap(),
+        );
+        let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+            b"delivered provider contents".to_vec(),
+        )
+        .with_range();
+        let observations = provider.observations();
+        let file_system = provider.async_file_system();
+        let path = qubit_fs::Path::parse("/managed-delivered.py").unwrap();
+        let request_detector = Arc::clone(&detector);
+        let mut operation = supervisor
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                if provider_entry {
+                    request_detector
+                        .detect_async_provider_path_managed(&scope, &file_system, &path, 64)
+                        .await
+                } else {
+                    request_detector
+                        .detect_bytes_managed(&scope, b"managed delivered bytes".to_vec())
+                        .await
+                }
+            })
+            .unwrap();
+        assert!(matches!(
+            block_on(operation.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-managed-delivered"
+        ));
+        assert_eq!(1, engine_calls.load(Ordering::SeqCst));
+        assert_eq!(0, runtime.snapshot().reserved_bytes);
+        assert_eq!(0, runtime.active_requests.load(Ordering::SeqCst));
+        if provider_entry {
+            assert_eq!(1, observations.opens.load(Ordering::SeqCst));
+            assert!(observations.read_bytes.load(Ordering::SeqCst) > 0);
+        } else {
+            assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+            assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+        }
+        let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5));
+        assert!(report.worker_stopped);
+    }
+}
+
+#[test]
+fn test_managed_public_handoffs_cancel_before_child_body_starts() {
+    use std::sync::atomic::Ordering;
+
+    for provider_entry in [false, true] {
+        let mut manager_options = ManagerOptions::default();
+        manager_options.async_executor.worker_count = 1;
+        let supervisor = OperationManager::new(manager_options).unwrap();
+        let max_bytes = qubit_mime::MimeConfig::default().max_buffer_size();
+        let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+            supervisor.clone(),
+            max_bytes,
+            Box::new(|_| Ok(Some("application/x-should-not-run".to_owned()))),
+            Box::new(|| {}),
+        ));
+        let detector = Arc::new(
+            crate::MagikaMimeDetector::builder()
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .unwrap(),
+        );
+        let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
+            b"not reached".to_vec(),
+        )
+        .with_range();
+        let observations = provider.observations();
+        let file_system = provider.async_file_system();
+        let path = qubit_fs::Path::parse("/managed-before-start.py").unwrap();
+        let request_detector = Arc::clone(&detector);
+        let request_runtime = Arc::clone(&runtime);
+        let mut operation = supervisor
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                let mut detection = if provider_entry {
+                    Box::pin(request_detector.detect_async_provider_path_managed(
+                        &scope,
+                        &file_system,
+                        &path,
+                        64,
+                    )) as Pin<Box<dyn Future<Output = Result<Option<String>, MimeError>> + Send>>
+                } else {
+                    Box::pin(request_detector.detect_bytes_managed(&scope, b"not reached".to_vec()))
+                };
+                let waker = Waker::noop();
+                let mut context = Context::from_waker(waker);
+                assert!(detection.as_mut().poll(&mut context).is_pending());
+                assert_eq!(1, request_runtime.snapshot().admitted_not_started);
+                let report = request_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+                assert!(report.worker_stopped);
+                assert_eq!(0, request_runtime.snapshot().reserved_bytes);
+                assert_eq!(0, request_runtime.active_requests.load(Ordering::SeqCst));
+                drop(detection);
+                Ok::<_, MimeError>(())
+            })
+            .unwrap();
+
+        assert!(matches!(
+            block_on(operation.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
+        ));
+        assert!(runtime.tasks.lock().unwrap().is_empty());
+        assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+        assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    }
+}
+
+#[test]
 fn test_worker_fault_closes_an_unsubmitted_request_handoff() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
