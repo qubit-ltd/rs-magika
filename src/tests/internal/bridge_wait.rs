@@ -6,6 +6,10 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 
+use std::future::Future;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Waker;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
@@ -23,5 +27,26 @@ pub(crate) fn join_before<T>(worker: JoinHandle<T>, stage: &str, timeout: Durati
         worker.is_finished(),
         "timed out waiting for bridge worker; stage={stage}"
     );
-    worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    worker
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// Polls a test future until it completes or its absolute deadline expires.
+pub(crate) fn poll_before<F: Future>(future: F, stage: &str, timeout: Duration) -> F::Output {
+    let deadline = Instant::now() + timeout;
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = Box::pin(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out polling bridge future; stage={stage}"
+        );
+        std::thread::park_timeout(remaining.min(Duration::from_millis(1)));
+    }
 }
