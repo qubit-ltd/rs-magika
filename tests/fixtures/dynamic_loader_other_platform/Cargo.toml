@@ -1,0 +1,18 @@
+[package]
+name = "magika-dynamic-loader-other-platform-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+qubit-mime = { version = "^0.22", path = "../../../../rs-mime" }
+qubit-operation = { version = "^0.3.2", path = "../../../../rs-operation" }
+ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
+
+[target.'cfg(windows)'.dependencies]
+qubit-magika = { path = "../../..", default-features = false }
+
+[patch.crates-io]
+qubit-operation = { path = "../../../../rs-operation" }
