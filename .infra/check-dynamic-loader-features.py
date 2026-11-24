@@ -7,35 +7,31 @@ import argparse
 import re
 import sys
 
-
-FORBIDDEN = (
-    "download-binaries",
-    "copy-dylibs",
-    "download-binaries-check",
-    "tls-rustls",
-    "tls-rustls-no-provider",
-)
+from _dynamic_loader_feature_policy import FORBIDDEN, REQUIRED, violations
 
 
 def check(tree: str) -> list[str]:
-    errors: list[str] = []
     feature_lines = [line for line in tree.splitlines() if re.search(r"\bort feature \"", line)]
     if not any(re.search(r"\bort v", line) for line in tree.splitlines()):
         return ["cargo tree output contains no ort package/features"]
-    if not any('feature "load-dynamic"' in line for line in feature_lines):
-        errors.append("ort load-dynamic feature is not enabled")
-    for forbidden in FORBIDDEN:
-        if any(f'feature "{forbidden}"' in line for line in feature_lines):
-            errors.append(f"forbidden ort feature is enabled: {forbidden}")
-    return errors
+    features = {
+        match.group(1)
+        for line in feature_lines
+        if (match := re.search(r'feature "([^"]+)"', line)) is not None
+    }
+    return [
+        error.replace(f"missing required ort feature {REQUIRED}", "ort load-dynamic feature is not enabled")
+        .replace("forbidden ort feature enabled: ", "forbidden ort feature is enabled: ")
+        for error in violations(features)
+    ]
 
 
 def self_test() -> None:
     valid = "├── ort v2.0.0-rc.12\n│   ├── ort feature \"load-dynamic\"\n│   └── ort feature \"std\""
     assert not check(valid)
     assert "load-dynamic" in " ".join(check("├── ort v2.0.0-rc.12\n│   └── ort feature \"std\""))
-    assert "download-binaries" in " ".join(check(valid + "\n│   └── ort feature \"download-binaries\""))
-    assert "tls-rustls" in " ".join(check(valid + "\n│   └── ort feature \"tls-rustls\""))
+    for forbidden in FORBIDDEN:
+        assert forbidden in " ".join(check(valid + f'\n│   └── ort feature "{forbidden}"'))
 
 
 def main() -> int:
