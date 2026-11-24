@@ -1638,6 +1638,25 @@ fn test_wake_driver_waits_for_wake_and_times_out_without_repolling() {
 }
 
 #[test]
+fn test_wake_driver_times_out_while_future_self_wakes() {
+    let mut started = None;
+    let result = run_until(
+        std::future::poll_fn(|context| {
+            let started = started.get_or_insert_with(Instant::now);
+            context.waker().wake_by_ref();
+            if started.elapsed() >= Duration::from_millis(250) {
+                Poll::Ready("fallback result")
+            } else {
+                Poll::Pending
+            }
+        }),
+        Duration::from_millis(10),
+    );
+
+    assert_eq!(Err(()), result);
+}
+
+#[test]
 fn test_wake_during_poll_is_not_lost_before_park() {
     struct WakeDuringPoll(usize);
     impl Future for WakeDuringPoll {

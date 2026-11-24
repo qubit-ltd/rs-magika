@@ -1039,6 +1039,28 @@ fn test_range_driver_returns_published_result_after_runtime_stop_without_reading
 
 #[test]
 fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
+    fn wait_for_worker(
+        worker: std::thread::JoinHandle<std::io::Result<()>>,
+        stage: &str,
+        reads: usize,
+        cancellation_observed: bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !worker.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        if !worker.is_finished() {
+            drop(worker);
+            panic!(
+                "timed out waiting for worker completion; stage={stage}; reads={reads}; cancellation_observed={cancellation_observed}"
+            );
+        }
+        assert!(
+            worker.join().unwrap().is_err(),
+            "worker should stop with an error after {stage}"
+        );
+    }
+
     struct PendingInput(Arc<std::sync::atomic::AtomicUsize>);
 
     impl magika::AsyncInput for PendingInput {
@@ -1134,27 +1156,35 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         if std::time::Instant::now() >= cancel_deadline {
             break None;
         }
-        std::thread::park_timeout(cancel_deadline.saturating_duration_since(std::time::Instant::now()));
+        std::thread::park_timeout(
+            cancel_deadline.saturating_duration_since(std::time::Instant::now()),
+        );
     };
     drop(driver);
-    let worker_result = worker.join().unwrap();
+    let active_read_count = reads.load(std::sync::atomic::Ordering::SeqCst);
+    let cancellation_observed = stopped.as_ref().is_some_and(Result::is_err);
     assert!(
         reached_active_read,
         "timed out waiting for worker to reach the active read; reads={}",
-        reads.load(std::sync::atomic::Ordering::SeqCst)
+        active_read_count
     );
-    assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(worker_result.is_err());
+    assert_eq!(1, active_read_count);
     assert!(
         stopped.is_some(),
         "timed out waiting for cancellation during active read; reads={}",
-        reads.load(std::sync::atomic::Ordering::SeqCst)
+        active_read_count
     );
     assert!(
-        stopped.unwrap().is_err(),
+        cancellation_observed,
         "runtime Cancel must end an active range read"
     );
-    assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(1, active_read_count);
+    wait_for_worker(
+        worker,
+        "active provider read",
+        active_read_count,
+        cancellation_observed,
+    );
 
     // Linearize cancellation at the provider-start gate after the worker has
     // published a range. The inference stays pending, so the driver must
@@ -1194,11 +1224,24 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         }
         std::thread::park_timeout(Duration::from_millis(1));
     };
-    assert!(rejected.is_some(), "provider-start rejection must end business waiting");
-    assert!(rejected.unwrap().is_err());
-    assert_eq!(0, reads.load(std::sync::atomic::Ordering::SeqCst));
+    let rejection_observed = rejected.as_ref().is_some_and(Result::is_err);
     drop(driver);
-    assert!(worker.join().unwrap().is_err());
+    let rejection_reads = reads.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        rejected.is_some(),
+        "provider-start rejection must end business waiting"
+    );
+    assert!(
+        rejection_observed,
+        "provider-start rejection must be reported as cancellation"
+    );
+    assert_eq!(0, rejection_reads);
+    wait_for_worker(
+        worker,
+        "provider-start rejection",
+        rejection_reads,
+        rejection_observed,
+    );
 
     // If a completed result is already published when cancellation arrives,
     // the range driver returns it without opening a provider operation.
