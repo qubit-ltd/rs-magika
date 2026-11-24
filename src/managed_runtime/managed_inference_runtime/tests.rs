@@ -2013,6 +2013,93 @@ fn test_provider_read_error_is_mapped_and_settled() {
 }
 
 #[test]
+fn test_provider_length_error_drops_input_before_settling_admission() {
+    struct DropObservedLengthInput {
+        runtime: Arc<ManagedInferenceRuntime>,
+        state: Arc<super::super::task_state::TaskState>,
+        started: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        observed_bytes: Arc<std::sync::atomic::AtomicUsize>,
+        observed_released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for DropObservedLengthInput {
+        fn drop(&mut self) {
+            self.observed_bytes
+                .store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
+            self.observed_released.store(
+                self.state.wait_released_blocking(Duration::ZERO),
+                std::sync::atomic::Ordering::Release,
+            );
+            self.started.send(()).unwrap();
+            self.release.recv().unwrap();
+        }
+    }
+    impl magika::AsyncInput for DropObservedLengthInput {
+        fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
+                "length read failed",
+            ))))
+        }
+        fn read_at(
+            &mut self,
+            _buffer: &mut [u8],
+            _offset: u64,
+        ) -> impl Future<Output = Result<(), magika::Error>> {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    fn map_length_error(_: magika::Error) -> MimeError {
+        MimeError::detector_backend("magika", "original length business error")
+    }
+
+    let runtime = borrowed_test_runtime(8);
+    let admission = runtime.reserve_for_provider(None, 4).unwrap();
+    let state = Arc::clone(&admission.state);
+    let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let detect_runtime = Arc::clone(&runtime);
+    let input = DropObservedLengthInput {
+        runtime: Arc::clone(&runtime),
+        state: Arc::clone(&state),
+        started: started_tx,
+        release: release_rx,
+        observed_bytes: Arc::clone(&observed_bytes),
+        observed_released: Arc::clone(&observed_released),
+    };
+    let detect = std::thread::spawn(move || {
+        block_on(detect_runtime.detect_async_input_admitted_test(
+            admission,
+            input,
+            4,
+            map_length_error,
+        ))
+    });
+
+    let drop_started = started_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    let bytes_during_drop = observed_bytes.load(std::sync::atomic::Ordering::Acquire);
+    let released_during_drop = observed_released.load(std::sync::atomic::Ordering::Acquire);
+    let _ = release_tx.send(());
+    let result = detect.join().unwrap();
+
+    assert!(drop_started, "input destructor did not reach its barrier");
+    assert_eq!(4, bytes_during_drop);
+    assert!(!released_during_drop);
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("original length business error")
+    );
+    assert!(state.wait_released_blocking(Duration::ZERO));
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::Acquire));
+    let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+}
+
+#[test]
 fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registration() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
