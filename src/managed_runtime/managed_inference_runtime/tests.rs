@@ -82,6 +82,7 @@ impl Wake for CountWake {
 struct WorkerPanicPayloadProbe {
     runtime: Arc<Mutex<Option<std::sync::Weak<ManagedInferenceRuntime>>>>,
     observed_updated_state: Arc<AtomicBool>,
+    panic_on_drop: bool,
 }
 
 impl Drop for WorkerPanicPayloadProbe {
@@ -99,6 +100,9 @@ impl Drop for WorkerPanicPayloadProbe {
                     .is_ok_and(|worker| worker.stopped && worker.panicked)
             });
         self.observed_updated_state.store(observed, Ordering::SeqCst);
+        if self.panic_on_drop {
+            panic!("worker join payload destructor panic");
+        }
     }
 }
 
@@ -2816,6 +2820,54 @@ fn test_provider_driver_safe_drop_after_read_ready_releases_capacity() {
 }
 
 #[test]
+fn test_provider_driver_panic_teardown_closes_bridge_and_marks_io_unconfirmed() {
+    struct PanickingInput;
+    impl Drop for PanickingInput {
+        fn drop(&mut self) {
+            panic!("injected provider input teardown panic");
+        }
+    }
+
+    for (pending_io, already_panicking) in [(false, false), (true, false), (false, true)] {
+        let runtime = ManagedInferenceRuntime::with_engine(
+            OperationManager::new(ManagerOptions::default()).unwrap(),
+            8,
+            Box::new(|_| Ok(None)),
+            Box::new(|| {}),
+        );
+        let admission = runtime.reserve_request(None, 4).unwrap();
+        let state = Arc::clone(&admission.state);
+        let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
+        let io_in_flight = Arc::new(AtomicBool::new(pending_io));
+        let guard = ProviderDriverGuard::new_with_io_status(
+            PanickingInput,
+            bridge.driver(),
+            Arc::clone(&state),
+            Some(io_in_flight),
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if already_panicking {
+                let _guard = guard;
+                panic!("original caller panic");
+            }
+            drop(guard);
+        }));
+        assert!(result.is_err(), "teardown must preserve the active panic");
+        assert!(
+            state.inner.lock().unwrap().unconfirmed_provider_io,
+            "a panicking input teardown must conservatively retain capacity"
+        );
+        assert_eq!(4, runtime.snapshot().reserved_bytes);
+        let mut closed = std::pin::pin!(bridge.closed());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(closed.as_mut().poll(&mut context), Poll::Ready(())));
+        drop(admission);
+        let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+    }
+}
+
+#[test]
 fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
     struct ThreadWake(std::thread::Thread);
     impl std::task::Wake for ThreadWake {
@@ -3795,6 +3847,15 @@ fn test_normal_worker_result_survives_panicking_waiter_and_releases_capacity() {
 
 #[test]
 fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
+    struct PanickingPayload(Arc<AtomicUsize>);
+    impl Drop for PanickingPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("payload destructor panic");
+        }
+    }
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let worker_payload_drops = Arc::clone(&payload_drops);
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (panic_tx, panic_rx) = mpsc::channel();
@@ -3806,7 +3867,7 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
             panic_rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("fault injection release barrier");
-            panic!("injected worker panic")
+            std::panic::panic_any(PanickingPayload(Arc::clone(&worker_payload_drops)))
         }),
         Box::new(|| {}),
     ));
@@ -3844,6 +3905,7 @@ fn test_worker_panic_faults_runtime_and_settles_queued_bridge() {
 
     panic_tx.send(()).unwrap();
     assert!(states[0].wait_worker_done_blocking(Duration::from_secs(2)));
+    assert!(payload_drops.load(Ordering::SeqCst) >= 1);
     assert!(
         normal_wake.0.load(Ordering::SeqCst) > 0,
         "ordinary waiter must be notified after panic"
@@ -4423,6 +4485,7 @@ fn test_worker_panic_payload_drops_after_worker_report_and_unlock() {
             std::panic::panic_any(WorkerPanicPayloadProbe {
                 runtime: worker_runtime_ref,
                 observed_updated_state: worker_observed,
+                panic_on_drop: true,
             });
         }),
     ));

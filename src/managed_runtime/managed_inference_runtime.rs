@@ -1095,7 +1095,9 @@ impl ManagedInferenceRuntime {
         // A panic payload has user-defined destruction behavior. Release the
         // worker mutex before dropping it so that cleanup cannot deadlock
         // concurrent shutdown observers.
-        drop(panic_payload);
+        if let Some(payload) = panic_payload {
+            crate::internal::waker_notify::drop_panic_payload(payload);
+        }
         report
     }
 

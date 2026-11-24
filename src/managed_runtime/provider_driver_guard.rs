@@ -101,6 +101,7 @@ impl<I> Drop for ProviderDriverGuard<I> {
     /// pending provider read is marked unconfirmed first; this notification
     /// does not claim that its native operation completed.
     fn drop(&mut self) {
+        let already_panicking = std::thread::panicking();
         if self
             .io_in_flight
             .as_ref()
@@ -112,11 +113,23 @@ impl<I> Drop for ProviderDriverGuard<I> {
         // this owner. Drop the input before closing the bridge, then publish
         // completion regardless of whether provider-native work is confirmed;
         // the separate unconfirmed-I/O fact controls capacity release.
-        drop(self.input.take());
+        let input_drop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(self.input.take());
+        }));
+        if input_drop.is_err() {
+            self.unconfirmed_io.store(true, Ordering::Relaxed);
+        }
         drop(self.driver.take());
         if self.unconfirmed_io.load(Ordering::Relaxed) {
             self.state.mark_unconfirmed_provider_io();
         }
         self.state.mark_driver_done();
+        if let Err(payload) = input_drop {
+            if already_panicking {
+                crate::internal::waker_notify::drop_panic_payload(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }
