@@ -201,6 +201,16 @@ impl RequestAdmissionHandoff {
     /// An outcome that wins closes the handoff and releases any unclaimed
     /// payload. A body claim disarms the caller guard; a prior close is
     /// returned with its recorded reason.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Future that resolves to the unmanaged child outcome.
+    /// * `T` - Unmanaged child outcome type.
+    ///
+    /// # Parameters
+    ///
+    /// * `guard` - Caller guard that is disarmed when this wait completes.
+    /// * `outcome` - Unmanaged child outcome polled alongside body start.
     pub(crate) async fn wait_for_root_or<F, T>(
         self: &Arc<Self>,
         guard: &mut RequestAdmissionHandoffGuard,
@@ -222,9 +232,7 @@ impl RequestAdmissionHandoff {
     ///
     /// The payload claim and close check share the handoff lock, so a stop
     /// cannot release capacity while the body is beginning to use it.
-    pub(crate) fn take_for_root(
-        self: &Arc<Self>,
-    ) -> Option<(RequestAdmission, Option<WorkerInput>)> {
+    pub(crate) fn take_for_root(self: &Arc<Self>) -> Option<(RequestAdmission, Option<WorkerInput>)> {
         let (payload, caller_waker) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.closed {
@@ -232,10 +240,7 @@ impl RequestAdmissionHandoff {
             }
             let mut payload = state.caller_payload.take()?;
             state.body_started = true;
-            (
-                (payload.admission, payload.input.take()),
-                state.caller_waker.take(),
-            )
+            ((payload.admission, payload.input.take()), state.caller_waker.take())
         };
         if let Some(waker) = caller_waker {
             waker.wake();
@@ -263,10 +268,7 @@ impl RequestAdmissionHandoff {
     /// closed first. The outcome is polled first, so a ready outcome wins over
     /// a simultaneous start or close. The underlying poll uses `Some(true)`,
     /// `Some(false)`, and `None` for started, closed, and pending respectively.
-    pub(crate) async fn wait_for_body_start_or<F, T>(
-        &self,
-        outcome: &mut F,
-    ) -> BodyStartOr<T>
+    pub(crate) async fn wait_for_body_start_or<F, T>(&self, outcome: &mut F) -> BodyStartOr<T>
     where
         F: Future<Output = T> + Unpin,
     {
@@ -566,7 +568,10 @@ mod tests {
             .as_async()
             .try_submit(
                 OperationOptions {
-                    limits: ScopeLimits { resources: 1, ..ScopeLimits::default() },
+                    limits: ScopeLimits {
+                        resources: 1,
+                        ..ScopeLimits::default()
+                    },
                     ..OperationOptions::default()
                 },
                 move |scope| async move {
@@ -613,11 +618,17 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(block_on(parent.wait_outcome()).unwrap(), OperationOutcome::Succeeded(())));
-        assert!(drop_facts_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
-        assert!(state_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap().wait_released_blocking(
-            std::time::Duration::ZERO
+        assert!(matches!(
+            block_on(parent.wait_outcome()).unwrap(),
+            OperationOutcome::Succeeded(())
         ));
+        assert!(drop_facts_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        assert!(
+            state_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .wait_released_blocking(std::time::Duration::ZERO)
+        );
         assert_eq!(0, active_requests.load(Ordering::SeqCst));
         assert!(byte_budget.try_acquire(8).is_some());
         assert!(block_on(parent.wait_settlement()).all_released());

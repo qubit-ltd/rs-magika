@@ -27,10 +27,8 @@ use super::service_permit::ServicePermit;
 use super::task_state::TaskState;
 use super::worker_input::WorkerInput;
 
-pub(super) struct RejectedJob {
-    job: Job,
-    reason: &'static str,
-}
+mod internal;
+use internal::RejectedJob;
 
 /// Runtime, byte, task, and optional parent-scope admission for one request.
 pub(crate) struct RequestAdmission {
@@ -272,12 +270,8 @@ impl RequestAdmission {
         }
         let owner = Arc::new(RequestResourceOwner::new(
             Arc::downgrade(&self.state),
-            self.service
-                .take()
-                .expect("unowned admission retains service capacity"),
-            self.bytes
-                .take()
-                .expect("unowned admission retains byte capacity"),
+            self.service.take().expect("unowned admission retains service capacity"),
+            self.bytes.take().expect("unowned admission retains byte capacity"),
             true,
         ));
         self.state.attach_owner(Arc::clone(&owner), None);
@@ -339,6 +333,15 @@ impl RequestAdmission {
         }
     }
 
+    /// Releases a rejected job's input and completes its request state.
+    ///
+    /// # Parameters
+    ///
+    /// * `rejected` - Job and reason returned by a failed worker submission.
+    ///
+    /// # Returns
+    ///
+    /// The task state completed with the rejection error.
     pub(super) fn settle_rejected_job(rejected: RejectedJob) -> Arc<TaskState> {
         let Job { input, state, owner } = rejected.job;
         if let WorkerInput::Bridge(bridge, _, _) = &input {

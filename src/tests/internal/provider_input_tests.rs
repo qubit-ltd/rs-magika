@@ -20,10 +20,10 @@ use std::time::Instant;
 use magika::AsyncInput;
 use magika::Error;
 use magika::SyncInput;
+use qubit_fs::Path;
 use qubit_fs::error::FsError;
 use qubit_fs::error::FsErrorKind;
 use qubit_fs::error::FsOperation;
-use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
 use qubit_fs::read::ReadIoObserver;
 use qubit_fs::read::ReadIoPhase;
@@ -33,6 +33,7 @@ use super::provider_input_fixture::ProviderFileSystemSpi;
 use super::provider_input_fixture::ProviderObservations;
 use crate::internal::AsyncProviderInput;
 use crate::internal::SyncProviderInput;
+use crate::internal::is_session_stop_error;
 use crate::internal::provider_input::copy_exact;
 use crate::internal::provider_input::invalid_input;
 use crate::internal::provider_input::map_provider_magika_error;
@@ -40,9 +41,8 @@ use crate::internal::provider_input::read_async_segments_observed;
 use crate::internal::provider_input::read_options;
 use crate::internal::provider_input::read_sync_segments;
 use crate::internal::provider_input::validate_request;
-use crate::internal::is_session_stop_error;
-use crate::internal::session_read_stopped_io_error;
 use crate::internal::read_budget::ReadBudget;
+use crate::internal::session_read_stopped_io_error;
 
 fn run_ready<F: Future>(future: F) -> F::Output {
     let wake = Arc::new(ThreadWake {

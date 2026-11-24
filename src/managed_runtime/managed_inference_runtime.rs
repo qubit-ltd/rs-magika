@@ -555,17 +555,15 @@ impl ManagedInferenceRuntime {
                         }
                     }
                 }
-                (None, Some(handoff), Some(guard)) => {
-                    match handoff.wait_for_root_or(guard, &mut outcome).await {
-                        super::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
-                        super::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
-                        super::request_admission_handoff::BodyStartOr::Closed(reason) => {
-                            drop(outcome);
-                            let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
-                            return Err(MimeError::detector_backend("magika", reason.as_str()));
-                        }
+                (None, Some(handoff), Some(guard)) => match handoff.wait_for_root_or(guard, &mut outcome).await {
+                    super::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
+                    super::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
+                    super::request_admission_handoff::BodyStartOr::Closed(reason) => {
+                        drop(outcome);
+                        let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                        return Err(MimeError::detector_backend("magika", reason.as_str()));
                     }
-                }
+                },
                 _ => outcome.await,
             }
         };
@@ -1003,8 +1001,7 @@ impl ManagedInferenceRuntime {
             let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
             let local_access_complete = tasks.iter().all(|task| task.access_complete());
             drop(tasks);
-            let operations_settled =
-                mode == ShutdownMode::Cancel || admission.snapshot.active_operations == 0;
+            let operations_settled = mode == ShutdownMode::Cancel || admission.snapshot.active_operations == 0;
             if operations_settled && local_access_complete {
                 break;
             }

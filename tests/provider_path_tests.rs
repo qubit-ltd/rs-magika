@@ -2206,9 +2206,8 @@ fn provider_read_error_kind(error: &MimeError) -> qubit_fs::error::FsErrorKind {
 fn test_provider_read_error_sources_cover_all_path_entrances() {
     for asynchronous in [false, true] {
         for session in [false, true] {
-            let mut provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_read_error(
-                qubit_fs::error::FsErrorKind::Cancelled,
-            );
+            let mut provider =
+                ProviderFileSystemSpi::new(PYTHON.to_vec()).with_read_error(qubit_fs::error::FsErrorKind::Cancelled);
             if session {
                 provider = provider.with_random_access();
             } else {
@@ -2250,8 +2249,7 @@ fn test_provider_read_error_sources_cover_all_path_entrances() {
         }
     }
 
-    let read_all = ProviderFileSystemSpi::new(PYTHON.to_vec())
-        .with_read_error(qubit_fs::error::FsErrorKind::Cancelled);
+    let read_all = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_read_error(qubit_fs::error::FsErrorKind::Cancelled);
     let error = detector()
         .detect_path(
             &read_all.file_system(),
@@ -3003,31 +3001,28 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
             )),
         }
     }
-    match settlement_after {
-        Ok(settlement) => {
-            if gate_was_entered && managed && settlement.all_released() {
-                contract_failures.push(format!(
-                    "Pending Provider access must retain the settlement required by its evidence; managed={managed}, point={point:?}, session={session}, range={range}, future_dropped={provider_wait_dropped_after_release}, settlement={settlement:?}"
-                ));
-            }
-            if gate_was_entered && !managed && !settlement.all_released() {
-                contract_failures.push(format!(
-                    "legacy hook wrapper should settle independently of runtime-held Provider resources; point={point:?}, session={session}, range={range}, settlement={settlement:?}"
-                ));
-            }
-            if gate_was_entered
-                && managed
-                && settlement.recovery_count == 0
-                && settlement.recoveries_total == 0
-                && settlement.cleanup_failures_total == 0
-                && settlement.transferred_count == 0
-            {
-                contract_failures.push(format!(
-                    "negative settlement must retain recovery evidence; managed={managed}, point={point:?}, session={session}, range={range}, settlement={settlement:?}"
-                ));
-            }
+    if let Ok(settlement) = settlement_after {
+        if gate_was_entered && managed && settlement.all_released() {
+            contract_failures.push(format!(
+                "Pending Provider access must retain the settlement required by its evidence; managed={managed}, point={point:?}, session={session}, range={range}, future_dropped={provider_wait_dropped_after_release}, settlement={settlement:?}"
+            ));
         }
-        Err(()) => {}
+        if gate_was_entered && !managed && !settlement.all_released() {
+            contract_failures.push(format!(
+                "legacy hook wrapper should settle independently of runtime-held Provider resources; point={point:?}, session={session}, range={range}, settlement={settlement:?}"
+            ));
+        }
+        if gate_was_entered
+            && managed
+            && settlement.recovery_count == 0
+            && settlement.recoveries_total == 0
+            && settlement.cleanup_failures_total == 0
+            && settlement.transferred_count == 0
+        {
+            contract_failures.push(format!(
+                "negative settlement must retain recovery evidence; managed={managed}, point={point:?}, session={session}, range={range}, settlement={settlement:?}"
+            ));
+        }
     }
     if gate_was_entered {
         let snapshot = detector.runtime_snapshot();

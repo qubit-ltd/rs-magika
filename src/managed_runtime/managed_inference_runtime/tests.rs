@@ -1683,7 +1683,10 @@ fn test_scope_less_bytes_cancel_releases_blocked_handoff_before_executor_resumes
     ));
     let retirement_deadline = std::time::Instant::now() + Duration::from_secs(5);
     while runtime.service_group().snapshot().active_operations != 0 {
-        assert!(std::time::Instant::now() < retirement_deadline, "queued request did not retire");
+        assert!(
+            std::time::Instant::now() < retirement_deadline,
+            "queued request did not retire"
+        );
         std::thread::yield_now();
     }
 }
@@ -1710,8 +1713,9 @@ fn test_scope_less_provider_cancel_releases_blocked_handoff_before_provider_io()
         .managed_runtime(Arc::clone(&runtime))
         .build()
         .unwrap();
-    let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(b"provider data".to_vec())
-        .with_range();
+    let provider =
+        crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(b"provider data".to_vec())
+            .with_range();
     let observations = provider.observations();
     let file_system = provider.async_file_system();
     let path = qubit_fs::Path::parse("/scope-less-blocked.py").unwrap();
@@ -1756,7 +1760,10 @@ fn test_scope_less_provider_cancel_releases_blocked_handoff_before_provider_io()
     ));
     let retirement_deadline = std::time::Instant::now() + Duration::from_secs(5);
     while runtime.service_group().snapshot().active_operations != 0 {
-        assert!(std::time::Instant::now() < retirement_deadline, "queued provider request did not retire");
+        assert!(
+            std::time::Instant::now() < retirement_deadline,
+            "queued provider request did not retire"
+        );
         std::thread::yield_now();
     }
 }
@@ -2024,8 +2031,10 @@ fn test_provider_length_error_drops_input_before_settling_admission() {
     }
     impl Drop for DropObservedLengthInput {
         fn drop(&mut self) {
-            self.observed_bytes
-                .store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
+            self.observed_bytes.store(
+                self.runtime.snapshot().reserved_bytes,
+                std::sync::atomic::Ordering::Release,
+            );
             self.observed_released.store(
                 self.state.wait_released_blocking(Duration::ZERO),
                 std::sync::atomic::Ordering::Release,
@@ -2036,15 +2045,9 @@ fn test_provider_length_error_drops_input_before_settling_admission() {
     }
     impl magika::AsyncInput for DropObservedLengthInput {
         fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
-            std::future::ready(Err(magika::Error::IOError(std::io::Error::other(
-                "length read failed",
-            ))))
+            std::future::ready(Err(magika::Error::IOError(std::io::Error::other("length read failed"))))
         }
-        fn read_at(
-            &mut self,
-            _buffer: &mut [u8],
-            _offset: u64,
-        ) -> impl Future<Output = Result<(), magika::Error>> {
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
             std::future::ready(Ok(()))
         }
     }
@@ -2070,12 +2073,7 @@ fn test_provider_length_error_drops_input_before_settling_admission() {
         observed_released: Arc::clone(&observed_released),
     };
     let detect = std::thread::spawn(move || {
-        block_on(detect_runtime.detect_async_input_admitted_test(
-            admission,
-            input,
-            4,
-            map_length_error,
-        ))
+        block_on(detect_runtime.detect_async_input_admitted_test(admission, input, 4, map_length_error))
     });
 
     let drop_started = started_rx.recv_timeout(Duration::from_secs(2)).is_ok();
@@ -2208,7 +2206,10 @@ fn test_provider_input_drops_before_begin_rejection_releases_admission() {
     }
     impl Drop for DropObservedInput {
         fn drop(&mut self) {
-            self.observed_bytes.store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
+            self.observed_bytes.store(
+                self.runtime.snapshot().reserved_bytes,
+                std::sync::atomic::Ordering::Release,
+            );
             self.observed_released.store(
                 self.state.wait_released_blocking(Duration::ZERO),
                 std::sync::atomic::Ordering::Release,
@@ -2265,7 +2266,10 @@ fn test_provider_input_drops_before_dispatch_rejection_releases_admission() {
     }
     impl Drop for DropObservedInput {
         fn drop(&mut self) {
-            self.observed_bytes.store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
+            self.observed_bytes.store(
+                self.runtime.snapshot().reserved_bytes,
+                std::sync::atomic::Ordering::Release,
+            );
             self.observed_released.store(
                 self.state.wait_released_blocking(Duration::ZERO),
                 std::sync::atomic::Ordering::Release,
@@ -3512,6 +3516,14 @@ fn test_first_receive_gate_delivers_two_admitted_jobs_and_rejects_third() {
 
 #[test]
 fn test_receiver_disconnect_settles_undelivered_dispatch() {
+    struct DriverInput(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DriverInput {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
         OperationManager::new(ManagerOptions::default()).unwrap(),
         16,
@@ -3526,6 +3538,12 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
     let admission = runtime.reserve_request(None, 4).unwrap();
     let state = Arc::clone(&admission.state);
     let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
+    let input_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let driver = ProviderDriverGuard::new(
+        DriverInput(Arc::clone(&input_dropped)),
+        bridge.driver(),
+        Arc::clone(&state),
+    );
     let future = runtime
         .dispatch(
             admission,
@@ -3536,10 +3554,17 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
     assert!(block_on(bridge.next_request()).is_none());
     let error = block_on(future).unwrap_err();
     assert!(error.to_string().contains("disconnected"));
-    let inner = state.inner.lock().unwrap();
-    assert_eq!(Some(qubit_operation::ChildOutcomeKind::Failed), inner.business);
-    assert!(inner.released);
-    drop(inner);
+    block_on(bridge.closed());
+    assert!(!input_dropped.load(std::sync::atomic::Ordering::Acquire));
+    {
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(Some(qubit_operation::ChildOutcomeKind::Failed), inner.business);
+        assert!(!inner.released, "worker failure must wait for provider driver drop");
+    }
+    assert!(!state.wait_released_blocking(Duration::ZERO));
+    drop(driver);
+    assert!(input_dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert!(state.wait_released_blocking(Duration::from_secs(2)));
     assert_eq!(0, runtime.snapshot().reserved_bytes);
     assert_eq!(0, runtime.snapshot().admitted_not_started);
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
@@ -3560,7 +3585,10 @@ fn test_rejected_bytes_drop_before_worker_release_is_published() {
     impl Drop for DropOrderProbe {
         fn drop(&mut self) {
             let released = self.state.wait_released_blocking(Duration::ZERO);
-            self.observed_bytes.store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
+            self.observed_bytes.store(
+                self.runtime.snapshot().reserved_bytes,
+                std::sync::atomic::Ordering::Release,
+            );
             self.observed_released
                 .store(released, std::sync::atomic::Ordering::Release);
             self.started.send(()).unwrap();
@@ -3628,8 +3656,8 @@ fn test_scope_less_scope_registration_rejection_drops_payload_before_release() {
     }
     impl Drop for DropOrderProbe {
         fn drop(&mut self) {
-            let held = self.runtime.snapshot().reserved_bytes == 4
-                && !self.state.wait_released_blocking(Duration::ZERO);
+            let held =
+                self.runtime.snapshot().reserved_bytes == 4 && !self.state.wait_released_blocking(Duration::ZERO);
             self.observed.store(held, std::sync::atomic::Ordering::Release);
             self.started.send(()).unwrap();
             self.release.recv().unwrap();
