@@ -200,6 +200,33 @@ fn test_async_legacy_provider_reads_bounded_ranges_and_reserves_budget_once() {
 }
 
 #[test]
+fn test_async_legacy_provider_stops_between_completed_ranges() {
+    let provider = ProviderFileSystemSpi::new(vec![0, 1, 2, 3, 4, 5])
+        .with_range()
+        .with_max_read_range_bytes(2);
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let path = Path::parse("/stop-between-ranges").unwrap();
+    let mut output = [0; 4];
+
+    let result = run_ready(crate::internal::read_async_segments_with_stop(
+        &file_system,
+        &path,
+        None,
+        &mut output,
+        0,
+        2,
+        || !observations.options.lock().unwrap().is_empty(),
+    ));
+
+    assert!(
+        result.is_err(),
+        "stop after one completed range must prevent the next range"
+    );
+    assert_eq!(1, observations.options.lock().unwrap().len());
+}
+
+#[test]
 fn test_legacy_provider_empty_unknown_zero_short_and_conditional_ranges() {
     let path = Path::parse("/same").unwrap();
 
