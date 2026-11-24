@@ -500,9 +500,9 @@ fn shutdown_application(
 `Result<SettlementWait, ObservationError>`。`SettlementWait::Pending(snapshot)` 只表示
 本次有界观察结束，不能证明资源已释放。截止时间必须来自 operation 使用的 clock domain。
 示例显式匹配 Ready 和 Pending，并在 Ready 时检查 `all_released()`。`Ready(report)` 表示本次结算已终结，
-但报告仍可能包含资源未释放等负面证据，也可能来自 scope 中其他资源；应保留报告以便恢复。
-`Pending(snapshot)` 只表示等待到达截止时间，调用方可继续观察。只有本次请求的 Provider I/O 完成状态未确认时，
-Magika 才会保留自己的容量。停止请求仍会析构本地 future、reader 和 driver，但这不能证明 native 或远端 I/O
+但报告仍可能包含资源未释放等负面证据，也可能来自 scope 中其他资源；scope 中其他资源的负面报告不能推出 Magika 仍占用容量，应保留报告以便恢复。
+`Pending(snapshot)` 只表示等待到达截止时间，调用方可继续观察。本次请求的 Provider I/O 完成状态未确认，
+或 worker 仍在访问请求资源时，Magika 会继续保留自己的容量。停止请求仍会析构本地 future、reader 和 driver，但这不能证明 native 或远端 I/O
 已经完成。内置清理无法接收已丢弃 Provider I/O 的新完成证据，因此重试不能释放这笔容量。`RecoveryHandle`
 可查看状态、重试已登记的策略或转移责任；重新提交推理请求不会释放先前请求的资源。关闭函数返回
 `DetectorPending` 时应先保留报告并重试 detector shutdown，不要继续关闭 manager；`ManagerPending`

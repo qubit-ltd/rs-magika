@@ -124,8 +124,8 @@ pub struct ManagedInferenceRuntime {
     /// Runtime request slots remain occupied until worker and provider access
     /// release.
     active_requests: Arc<AtomicUsize>,
-    /// Per-detector upper bound used when reserving shared aggregate byte
-    /// capacity.
+    /// Runtime-wide aggregate owned-payload byte limit shared by all detectors
+    /// using this runtime.
     max_in_flight_bytes: usize,
     /// Shared aggregate owned-payload bytes reserved by active and queued jobs.
     byte_budget: Arc<ByteBudget>,
@@ -828,9 +828,10 @@ impl ManagedInferenceRuntime {
             WorkerInput::Bytes(bytes) => bytes.len(),
             WorkerInput::Bridge(_, byte_limit, _) => *byte_limit,
             // Magika keeps Features opaque and does not expose its allocation
-            // length. It is a fixed-size model input, while the service group
-            // bounds retained feature values to one running and one queued job.
-            // The byte budget tracks caller payloads and provider read bounds.
+            // length. It consumes no payload-byte budget. Runtime request-slot
+            // admission still bounds retained jobs independently of the shared
+            // runtime-wide byte limit; the internal service group is used only
+            // for scope-less operation submission.
             WorkerInput::Features(_, _) => 0,
         };
         let admission = self.reserve_request(scope, byte_count)?;

@@ -112,8 +112,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 `OperationScope`。受管调用会将工作关联到该 scope，使其报告能独立跟踪资源释放和业务结果。
 应用启动时创建 runtime 和 detector，每个受管请求传入 scope，并在应用关闭时 drain runtime。
 检测 future 返回的是业务结果；scope observer 会单独报告资源结算。有界等待可能返回 `Pending(snapshot)`，
-也可能返回终态 `Ready(report)`，但 `all_released()` 仍为 false；负面报告也可能来自 scope 中其他资源。
-只有本次请求的 Provider I/O 完成状态未确认时，Magika 才会保留自己的容量。停止请求会析构本地 future、reader
+也可能返回终态 `Ready(report)`，但 `all_released()` 仍为 false；负面报告也可能来自 scope 中其他资源，不能据此推断 Magika 仍占用容量。
+本次请求的 Provider I/O 完成状态未确认，或 worker 仍在访问请求资源时，Magika 会继续保留自己的容量。停止请求会析构本地 future、reader
 和 driver，但这不能证明 native 或远端 I/O 已完成。内置清理没有接收已丢弃 Provider I/O 完成证据的入口，
 按当前策略重试也不能释放这笔容量。`RecoveryHandle` 可检查状态、重试策略或转移责任。
 `worker_stopped` 只报告 worker join，与结算和资源释放相互独立。
