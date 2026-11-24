@@ -29,22 +29,49 @@ use crate::managed_runtime::task_state::TaskState;
 use qubit_fs::read::ReadIoEvent;
 use qubit_fs::read::ReadIoObserver;
 use qubit_fs::read::ReadIoPhase;
+use qubit_operation::OperationContext;
 
 /// Tracks real provider reads while allowing stop between aggregate-read I/Os.
 pub(crate) struct ManagedReadObserver {
     state: Option<Arc<TaskState>>,
     in_flight: Arc<AtomicBool>,
+    stop_watcher: Option<Arc<StopWatcher>>,
 }
 
 impl ManagedReadObserver {
-    pub(crate) fn new(state: Option<Arc<TaskState>>, in_flight: Arc<AtomicBool>) -> Self {
-        Self { state, in_flight }
+    pub(crate) fn new(
+        state: Option<Arc<TaskState>>,
+        in_flight: Arc<AtomicBool>,
+        stop_watcher: Option<Arc<StopWatcher>>,
+    ) -> Self {
+        Self {
+            state,
+            in_flight,
+            stop_watcher,
+        }
+    }
+}
+
+/// Checks scope cancellation synchronously at every provider I/O boundary.
+pub(crate) struct StopWatcher {
+    context: OperationContext,
+}
+
+impl StopWatcher {
+    pub(crate) fn new(context: OperationContext) -> Arc<Self> {
+        Arc::new(Self { context })
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.context.stop_reason().is_some()
     }
 }
 
 impl ReadIoObserver for ManagedReadObserver {
     fn before_io(&mut self, _phase: ReadIoPhase) -> ControlFlow<()> {
-        if self.state.as_ref().is_some_and(|state| state.stop_requested()) {
+        let stopped = self.state.as_ref().is_some_and(|state| state.stop_requested())
+            || self.stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped());
+        if stopped {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -72,6 +99,8 @@ pub(crate) struct AsyncProviderInput {
     budget: ReadBudget,
     /// Managed request state used to stop between confirmed session I/Os.
     stop_state: Option<Arc<TaskState>>,
+    /// Scope stop state read directly between aggregate provider I/Os.
+    stop_watcher: Option<Arc<StopWatcher>>,
     /// Tracks actual provider futures, excluding aggregate scheduling yields.
     io_in_flight: Option<Arc<AtomicBool>>,
 }
@@ -100,6 +129,7 @@ impl AsyncProviderInput {
             version,
             budget: ReadBudget::new(limit),
             stop_state: None,
+            stop_watcher: None,
             io_in_flight: Some(Arc::new(AtomicBool::new(false))),
         }
     }
@@ -124,6 +154,7 @@ impl AsyncProviderInput {
             version: None,
             budget: ReadBudget::new(limit),
             stop_state: None,
+            stop_watcher: None,
             io_in_flight: None,
         }
     }
@@ -131,6 +162,11 @@ impl AsyncProviderInput {
     /// Observes request cancellation between confirmed provider session reads.
     pub(crate) fn with_stop_state(mut self, state: Arc<TaskState>) -> Self {
         self.stop_state = Some(state);
+        self
+    }
+
+    pub(crate) fn with_stop_watcher(mut self, watcher: Arc<StopWatcher>) -> Self {
+        self.stop_watcher = Some(watcher);
         self
     }
 
@@ -165,11 +201,12 @@ impl AsyncInput for AsyncProviderInput {
     /// Returns an I/O error when the range is invalid, exceeds the cumulative
     /// budget, or cannot be read exactly from the provider.
     async fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
+        let stop_state = self.stop_state.as_ref().map(Arc::clone);
+        let stop_watcher = self.stop_watcher.as_ref().map(Arc::clone);
         match &mut self.route {
             AsyncRoute::OwnedLegacy { file_system, path } => {
                 if let Some(io_in_flight) = &self.io_in_flight {
-                    let mut observer =
-                        ManagedReadObserver::new(self.stop_state.as_ref().map(Arc::clone), Arc::clone(io_in_flight));
+                    let mut observer = ManagedReadObserver::new(stop_state, Arc::clone(io_in_flight), stop_watcher);
                     read_async_observed(
                         file_system,
                         path,
@@ -186,7 +223,7 @@ impl AsyncInput for AsyncProviderInput {
                 }
             }
             AsyncRoute::Session { reader, max_segment } => {
-                if let Some(state) = &self.stop_state {
+                if stop_state.is_some() || stop_watcher.is_some() {
                     read_async_session_with_stop(
                         reader,
                         self.length,
@@ -194,7 +231,10 @@ impl AsyncInput for AsyncProviderInput {
                         buffer,
                         offset,
                         *max_segment,
-                        || state.stop_requested(),
+                        move || {
+                            stop_state.as_ref().is_some_and(|state| state.stop_requested())
+                                || stop_watcher.as_ref().is_some_and(|watcher| watcher.is_stopped())
+                        },
                     )
                     .await
                 } else {

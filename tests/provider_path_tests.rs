@@ -38,6 +38,7 @@ use qubit_operation::StopReason;
 use crate::support::AsyncProviderGate;
 use crate::support::AsyncProviderGatePoint;
 use crate::support::ProviderFileSystemSpi;
+use crate::support::ProviderReadCompletionGate;
 use crate::support::ShutdownBlocking;
 use crate::support::detector;
 use crate::support::run_ready;
@@ -2153,6 +2154,168 @@ fn test_public_async_read_prefix_yields_after_sixty_four_ready_short_reads() {
     assert_eq!(8, gated_observations.read_bytes.load(Ordering::SeqCst));
 }
 
+#[test]
+fn test_magika_managed_and_legacy_cancel_at_sixty_fourth_read_completion() {
+    for managed in [false, true] {
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+        let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+        let config = qubit_mime::MimeConfig::default();
+        let runtime = Arc::new(
+            ManagedInferenceRuntime::new(supervisor, config.max_buffer_size())
+                .expect("managed inference runtime should initialize"),
+        );
+        let detector = Arc::new(
+            qubit_magika::MagikaMimeDetector::builder()
+                .mime_config(config)
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .expect("bundled ONNX Runtime should initialize"),
+        );
+        let completion_gate = ProviderReadCompletionGate::new(64);
+        let provider = ProviderFileSystemSpi::new(vec![0])
+            .logical(4096)
+            .short_reads()
+            .with_read_completion_gate(Arc::clone(&completion_gate));
+        let observations = provider.observations();
+        let file_system = provider.async_file_system();
+
+        if managed {
+            let request_detector = Arc::clone(&detector);
+            let mut operation = service
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
+                    request_detector
+                        .detect_async_provider_path_managed(&scope, &file_system, &path("/yield-cancel.py"), 4096)
+                        .await
+                })
+                .unwrap();
+            completion_gate.wait_until_entered(Duration::from_secs(5));
+            assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+            assert_eq!(
+                qubit_operation::StopRequestStatus::Accepted,
+                operation.request_stop(StopReason::UserCancelled)
+            );
+            completion_gate.release();
+            let _ = run_ready(operation.wait_outcome());
+            assert!(run_ready(operation.wait_settlement()).all_released());
+        } else {
+            let hook_detector = Arc::clone(&detector);
+            let hook_file_system = file_system.clone();
+            let hook = std::thread::spawn(move || {
+                run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+                    &*hook_detector,
+                    &hook_file_system,
+                    &path("/yield-cancel.py"),
+                    4096,
+                ))
+            });
+            completion_gate.wait_until_entered(Duration::from_secs(5));
+            assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+            let shutdown_runtime = Arc::clone(&runtime);
+            let shutdown = std::thread::spawn(move || {
+                shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !runtime.snapshot().admission_closed {
+                assert!(Instant::now() < deadline, "runtime Cancel did not close admission");
+                std::thread::yield_now();
+            }
+            completion_gate.release();
+            let _ = hook.join().unwrap();
+            assert!(shutdown.join().unwrap().worker_stopped);
+        }
+
+        assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));
+        let snapshot = runtime.snapshot();
+        assert_eq!(0, snapshot.unconfirmed_provider_io);
+        assert_eq!(0, snapshot.reserved_bytes);
+        let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+        assert!(report.worker_stopped);
+    }
+}
+
+#[test]
+fn test_magika_managed_and_legacy_cancel_before_second_legacy_range() {
+    for managed in [false, true] {
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+        let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+        let config = qubit_mime::MimeConfig::default();
+        let runtime = Arc::new(
+            ManagedInferenceRuntime::new(supervisor, config.max_buffer_size())
+                .expect("managed inference runtime should initialize"),
+        );
+        let detector = Arc::new(
+            qubit_magika::MagikaMimeDetector::builder()
+                .mime_config(config)
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .expect("bundled ONNX Runtime should initialize"),
+        );
+        let completion_gate = ProviderReadCompletionGate::new(2);
+        let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .logical(4096)
+            .with_range()
+            .with_max_read_range_bytes(2)
+            .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation)
+            .with_read_completion_gate(Arc::clone(&completion_gate));
+        let observations = provider.observations();
+        let file_system = provider.async_file_system();
+
+        if managed {
+            let request_detector = Arc::clone(&detector);
+            let mut operation = service
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
+                    request_detector
+                        .detect_async_provider_path_managed(&scope, &file_system, &path("/range-cancel.py"), 4096)
+                        .await
+                })
+                .unwrap();
+            completion_gate.wait_until_entered(Duration::from_secs(5));
+            assert_eq!(2, observations.read_bytes.load(Ordering::SeqCst));
+            assert_eq!(
+                qubit_operation::StopRequestStatus::Accepted,
+                operation.request_stop(StopReason::UserCancelled)
+            );
+            completion_gate.release();
+            let _ = run_ready(operation.wait_outcome());
+            assert!(run_ready(operation.wait_settlement()).all_released());
+        } else {
+            let hook_detector = Arc::clone(&detector);
+            let hook_file_system = file_system.clone();
+            let hook = std::thread::spawn(move || {
+                run_ready(MimeDetectorBackend::guess_from_async_provider_path(
+                    &*hook_detector,
+                    &hook_file_system,
+                    &path("/range-cancel.py"),
+                    4096,
+                ))
+            });
+            completion_gate.wait_until_entered(Duration::from_secs(5));
+            assert_eq!(2, observations.read_bytes.load(Ordering::SeqCst));
+            let shutdown_runtime = Arc::clone(&runtime);
+            let shutdown = std::thread::spawn(move || {
+                shutdown_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5))
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !runtime.snapshot().admission_closed {
+                assert!(Instant::now() < deadline, "runtime Cancel did not close admission");
+                std::thread::yield_now();
+            }
+            completion_gate.release();
+            assert!(hook.join().unwrap().is_err());
+            assert!(shutdown.join().unwrap().worker_stopped);
+        }
+
+        assert_eq!(2, observations.read_bytes.load(Ordering::SeqCst));
+        assert_eq!(1, observations.options.lock().unwrap().len());
+        assert_eq!(0, runtime.snapshot().unconfirmed_provider_io);
+        assert_eq!(0, runtime.snapshot().reserved_bytes);
+        let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(5));
+        assert!(report.worker_stopped);
+    }
+}
+
 /// A runtime-only Cancel must wake either async Provider entrance while the
 /// Provider future is Pending. Always release the fixture gate before joining
 /// the shutdown thread so a regression cannot strand the test process.
@@ -2599,6 +2762,90 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         failures.is_empty(),
         "last-runtime release evidence failures: {failures:#?}"
     );
+}
+
+#[test]
+fn test_pending_provider_open_and_stat_retain_resources_across_runtime_shutdown() {
+    for point in [AsyncProviderGatePoint::Open, AsyncProviderGatePoint::Stat] {
+        let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+        let config = qubit_mime::MimeConfig::default();
+        let runtime = Arc::new(
+            ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size())
+                .expect("managed inference runtime should initialize"),
+        );
+        let detector = Arc::new(
+            qubit_magika::MagikaMimeDetector::builder()
+                .mime_config(config)
+                .managed_runtime(Arc::clone(&runtime))
+                .build()
+                .expect("bundled ONNX Runtime should initialize"),
+        );
+        drop(runtime);
+        let service = supervisor.group(qubit_operation::GroupOptions { capacity: 2 }).unwrap();
+        let gate = AsyncProviderGate::new(point);
+        let mut provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_async_gate(Arc::clone(&gate));
+        if point == AsyncProviderGatePoint::Stat {
+            provider = provider.random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation);
+        } else {
+            provider = provider.with_random_access();
+        }
+        let observations = provider.observations();
+        let request_detector = Arc::clone(&detector);
+        let mut operation = service
+            .as_async()
+            .try_submit(OperationOptions::default(), move |scope| async move {
+                request_detector
+                    .detect_async_provider_path_managed(
+                        &scope,
+                        &provider.async_file_system(),
+                        &path("/pre-bridge-runtime-drop.py"),
+                        4096,
+                    )
+                    .await
+            })
+            .unwrap();
+        gate.wait_until_entered(Duration::from_secs(5));
+        assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+        assert_eq!(0, observations.random_reads.load(Ordering::SeqCst));
+        let observer = operation.observer();
+        let shutdown_detector = Arc::clone(&detector);
+        let shutdown = std::thread::spawn(move || {
+            shutdown_detector.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1))
+        });
+        let outcome_before_release = run_until(operation.wait_outcome(), Duration::from_secs(5));
+        let settlement_before_release = run_until(observer.wait_settlement(), Duration::from_secs(5));
+        let report = shutdown.join().unwrap();
+        // The cancelled managed operation and shutdown caller now hold no
+        // detector owner; dropping this last owner happens while the provider
+        // gate is still pending.
+        drop(detector);
+        gate.release();
+        let outcome = match outcome_before_release {
+            Ok(outcome) => outcome,
+            Err(()) => run_until(operation.wait_outcome(), Duration::from_secs(5)).expect("operation settles"),
+        };
+
+        assert!(
+            matches!(
+                outcome,
+                Ok(qubit_operation::OperationOutcome::Failed(_)) | Ok(qubit_operation::OperationOutcome::Stopped(_))
+            ),
+            "{point:?} cancellation should finish before bridge dispatch: {outcome:?}"
+        );
+        let settlement = settlement_before_release.expect("cancelled child should report settlement");
+        assert!(
+            !settlement.all_released(),
+            "{point:?} pending provider I/O must not be reported released: {settlement:?}"
+        );
+        assert!(
+            report.worker_stopped,
+            "shutdown must stop without a bridge job: {report:?}"
+        );
+        assert!(
+            report.admission.snapshot.service_resources > 0,
+            "{point:?} provider resources should remain attached to recovery: {report:?}"
+        );
+    }
 }
 
 #[test]

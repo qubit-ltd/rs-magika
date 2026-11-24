@@ -22,6 +22,7 @@ mod sync_route;
 
 pub(crate) use async_provider_input::AsyncProviderInput;
 pub(crate) use async_provider_input::ManagedReadObserver;
+pub(crate) use async_provider_input::StopWatcher;
 pub(crate) use operation_outcome_context::INFERENCE_OUTCOME;
 pub(crate) use operation_outcome_context::PROVIDER_OUTCOME;
 pub(crate) use operation_outcome_context::map_operation_outcome;
