@@ -1178,13 +1178,13 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         cancellation_observed,
         "runtime Cancel must end an active range read"
     );
-    assert_eq!(1, active_read_count);
     wait_for_worker(
         worker,
         "active provider read",
         active_read_count,
         cancellation_observed,
     );
+    assert_eq!(1, reads.load(std::sync::atomic::Ordering::SeqCst));
 
     // Linearize cancellation at the provider-start gate after the worker has
     // published a range. The inference stays pending, so the driver must
