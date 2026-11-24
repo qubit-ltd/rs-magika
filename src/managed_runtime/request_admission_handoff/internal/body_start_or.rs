@@ -12,7 +12,7 @@
 /// # Type Parameters
 ///
 /// * `T` - Outcome returned when the operation finishes before body start.
-pub(super) enum BodyStartOr<T> {
+pub(in crate::managed_runtime::request_admission_handoff) enum BodyStartOr<T> {
     /// The child body entered and is waiting for its admission.
     BodyStarted,
     /// The child operation finished before its body-start handshake.

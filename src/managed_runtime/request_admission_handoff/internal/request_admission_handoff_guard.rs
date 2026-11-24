@@ -16,7 +16,7 @@ pub(crate) struct RequestAdmissionHandoffGuard {
     /// Shared state closed unless registration is handed to the child.
     pub(in crate::managed_runtime::request_admission_handoff) handoff: Arc<RequestAdmissionHandoff>,
     /// Whether dropping this guard should close the shared handoff.
-    active: bool,
+    pub(in crate::managed_runtime::request_admission_handoff) active: bool,
 }
 
 impl RequestAdmissionHandoffGuard {

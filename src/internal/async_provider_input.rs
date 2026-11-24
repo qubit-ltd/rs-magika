@@ -10,7 +10,6 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use magika::AsyncInput;
 use magika::Result as MagikaResult;
