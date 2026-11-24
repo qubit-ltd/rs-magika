@@ -245,6 +245,8 @@ impl RequestAdmission {
 
     /// Marks provider work started without settling on rejection, so an
     /// owned provider input can be destroyed before admission is released.
+    /// The caller remains responsible for dropping that input before settling
+    /// admission when this check fails.
     pub(crate) fn try_begin_provider_operation(&mut self) -> MimeResult<()> {
         if !self.state.try_start_provider_operation() {
             self.state.request_stop();

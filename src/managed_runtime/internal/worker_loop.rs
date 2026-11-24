@@ -73,7 +73,8 @@ pub(super) fn run_worker(
 /// * `gate` - Admission state synchronized with the queue.
 /// * `infer` - Inference operation run for each input.
 /// * `before_first_recv` - Hook called before receiving the first job.
-/// * `on_fault` - Callback after the worker fault is linearized with admission.
+/// * `on_fault` - Callback after the worker fault is linearized with admission;
+///   it closes admission and publishes the fault to affected task states.
 /// * `after_business` - Hook called after publishing each business result.
 /// * `before_exit` - Hook called before the worker exits.
 pub(super) fn run_worker_with_before_first_recv(
