@@ -503,11 +503,13 @@ mod tests {
         use qubit_operation::ScopeLimits;
 
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
-        let mut options = OperationOptions::default();
-        options.limits = ScopeLimits {
-            resources: 1,
-            resource_scopes: 1,
-            ..ScopeLimits::default()
+        let options = OperationOptions {
+            limits: ScopeLimits {
+                resources: 1,
+                resource_scopes: 1,
+                ..ScopeLimits::default()
+            },
+            ..OperationOptions::default()
         };
         let mut operation = manager
             .try_submit(options, |scope| {
