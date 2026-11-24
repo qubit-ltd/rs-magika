@@ -11,3 +11,6 @@ qubit-magika = { path = "../../..", default-features = false }
 qubit-mime = { version = "^0.22", path = "../../../../rs-mime" }
 qubit-spi = "^0.14"
 ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
+
+[patch.crates-io]
+qubit-operation = { path = "../../../../rs-operation" }
