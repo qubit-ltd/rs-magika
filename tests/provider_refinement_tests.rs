@@ -218,13 +218,14 @@ fn test_local_file_refinement_applies_only_to_regular_files() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let directory_candidate = detector
         .detect_by_filename(same_name_directory.to_str().expect("path should be UTF-8"))
-        .expect("filename candidate should be available");
+        .expect("filename detection should succeed")
+        .expect("directory filename should have a MIME mapping");
     assert_eq!(
         detector
             .detect_file(&same_name_directory, MimeDetectionPolicy::Freedesktop)
             .expect("directory detection should fall back to its filename")
-            .as_deref(),
-        directory_candidate.as_deref()
+            .expect("directory filename fallback should return a MIME type"),
+        directory_candidate
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -243,13 +244,14 @@ fn test_local_file_refinement_applies_only_to_regular_files() {
         symlink(&file, &link).expect("stable symlink should be created");
         let link_candidate = detector
             .detect_by_filename(link.to_str().expect("path should be UTF-8"))
-            .expect("symlink filename candidate should be available");
+            .expect("symlink filename detection should succeed")
+            .expect("symlink filename should have a MIME mapping");
         assert_eq!(
             detector
                 .detect_file(&link, MimeDetectionPolicy::Freedesktop)
                 .expect("symlink detection should fall back to its filename")
-                .as_deref(),
-            link_candidate.as_deref()
+                .expect("symlink filename fallback should return a MIME type"),
+            link_candidate
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
