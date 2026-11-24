@@ -45,6 +45,7 @@ use super::managed_inference_snapshot::ManagedInferenceSnapshot;
 use super::provider_driver_guard::ProviderDriverGuard;
 use super::provider_read_event::ProviderReadEvent;
 use super::request_admission::RequestAdmission;
+use super::request_admission_handoff::BodyStartOr;
 use super::service_permit::ServicePermit;
 use super::task_state::AdmissionGate;
 use super::task_state::TaskState;
@@ -70,6 +71,14 @@ mod test_support;
 
 /// Monotonically allocates identifiers for runtime child operations.
 static NEXT_CHILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Keeps provider setup input ahead of its admission lease during destruction.
+struct ProviderSetupOwner {
+    /// Owned provider input is destroyed before capacity is released.
+    input: AsyncProviderInput,
+    /// Capacity retained until setup input destruction or worker dispatch.
+    admission: RequestAdmission,
+}
 
 /// Maximum number of admitted requests retained by the runtime.
 const SERVICE_CAPACITY: usize = 2;
@@ -451,6 +460,8 @@ impl ManagedInferenceRuntime {
     /// * `input` - Owned input dispatched to the inference worker.
     /// * `before_submit` - One-shot hook called before the supervisor accepts
     ///   the operation.
+    /// * `before_retain` - One-shot hook called by the root body immediately
+    ///   before it attaches admission to the operation scope.
     ///
     /// # Returns
     ///
@@ -470,7 +481,7 @@ impl ManagedInferenceRuntime {
         let state = Arc::clone(&admission.state);
         let (handoff, mut handoff_guard) =
             super::request_admission_handoff::RequestAdmissionHandoff::new_with_input(admission, Some(input));
-        let request_handoff = Some(Arc::clone(&handoff));
+        let request_handoff = Arc::clone(&handoff);
         let managed_handoff = parent.is_some();
         let body_handoff = Arc::clone(&handoff);
         let mut before_retain = Some(before_retain);
@@ -522,7 +533,7 @@ impl ManagedInferenceRuntime {
                 if stop.as_mut().poll(cx).is_ready() || request_stop.as_mut().poll(cx).is_ready() {
                     body_cancellation_won.store(true, std::sync::atomic::Ordering::Release);
                     state.request_stop();
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", state.provider_stop_reason())));
+                    return Poll::Ready(Err(MimeError::detector_backend("magika", "request stopped during inference")));
                 }
                 Poll::Pending
             })
@@ -543,28 +554,20 @@ impl ManagedInferenceRuntime {
         .map_err(|error| MimeError::detector_backend("magika", format!("operation submission failed: {error:?}")))?;
         let outcome_result = {
             let mut outcome = Box::pin(operation.wait_outcome());
-            match (parent, request_handoff.as_ref(), Some(&mut handoff_guard)) {
-                (Some(parent), Some(handoff), Some(guard)) => {
-                    match handoff.register_on_parent(parent, guard, &mut outcome).await {
-                        super::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
-                        super::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
-                        super::request_admission_handoff::BodyStartOr::Closed(reason) => {
-                            drop(outcome);
-                            let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
-                            return Err(MimeError::detector_backend("magika", reason.as_str()));
-                        }
-                    }
+            let start_or = match parent {
+                Some(parent) => request_handoff
+                    .register_on_parent(parent, &mut handoff_guard, &mut outcome)
+                    .await,
+                None => request_handoff.wait_for_root_or(&mut handoff_guard, &mut outcome).await,
+            };
+            match start_or {
+                BodyStartOr::Outcome(outcome) => outcome,
+                BodyStartOr::BodyStarted => outcome.await,
+                BodyStartOr::Closed(reason) => {
+                    drop(outcome);
+                    let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                    return Err(MimeError::detector_backend("magika", reason.as_str()));
                 }
-                (None, Some(handoff), Some(guard)) => match handoff.wait_for_root_or(guard, &mut outcome).await {
-                    super::request_admission_handoff::BodyStartOr::Outcome(outcome) => outcome,
-                    super::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
-                    super::request_admission_handoff::BodyStartOr::Closed(reason) => {
-                        drop(outcome);
-                        let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
-                        return Err(MimeError::detector_backend("magika", reason.as_str()));
-                    }
-                },
-                _ => outcome.await,
             }
         };
         let outcome = outcome_result.map_err(|error| {
@@ -624,58 +627,74 @@ impl ManagedInferenceRuntime {
     /// # Errors
     ///
     /// Returns provider, admission, Magika, or worker errors.
-    pub(crate) async fn detect_async_input_admitted(
-        &self,
-        scope: &OperationScope,
-        mut admission: RequestAdmission,
+    pub(crate) fn detect_async_input_admitted<'a>(
+        &'a self,
+        scope: &'a OperationScope,
+        admission: RequestAdmission,
         input: AsyncProviderInput,
         max_bytes: usize,
         map_error: fn(MagikaError) -> MimeError,
-    ) -> MimeResult<Option<String>> {
-        let state = Arc::clone(&admission.state);
-        let state_for_stop = Arc::clone(&state);
-        let mut scope_stop = Box::pin(scope.context().stop_requested());
-        let mut request_stop = Box::pin(state_for_stop.wait_stopped());
-        let stop_state = Arc::clone(&state_for_stop);
-        let setup_runtime = self;
-        let setup = async move {
-            if let Err(error) = admission.try_begin_provider_operation() {
-                drop(input);
-                drop(admission);
-                return Err(error);
-            }
-            let length_result = input.length().await;
-            admission.provider_operation_completed();
-            let length = match length_result {
-                Ok(length) => length,
-                Err(error) => {
-                    let business_error = map_error(error);
-                    drop(input);
-                    admission.settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
-                    return Err(business_error);
+    ) -> impl Future<Output = MimeResult<Option<String>>> + Send + 'a {
+        // Keep these values in one ordered owner until setup succeeds. If the
+        // returned future is dropped before its first poll, input drops first.
+        let owner = ProviderSetupOwner { input, admission };
+        async move {
+            let state = Arc::clone(&owner.admission.state);
+            let state_for_stop = Arc::clone(&state);
+            let mut scope_stop = Box::pin(scope.context().stop_requested());
+            let mut request_stop = Box::pin(state_for_stop.wait_stopped());
+            let stop_state = Arc::clone(&state_for_stop);
+            let setup_runtime = self;
+            let setup = async move {
+                let mut owner = owner;
+                if let Err(error) = owner.admission.try_begin_provider_operation() {
+                    drop(owner);
+                    return Err(error);
                 }
+                let length_result = owner.input.length().await;
+                owner.admission.provider_operation_completed();
+                let length = match length_result {
+                    Ok(length) => length,
+                    Err(error) => {
+                        let business_error = map_error(error);
+                        drop(owner.input);
+                        owner.admission.settle_error(MimeError::detector_backend(
+                            "magika",
+                            "provider length lookup failed",
+                        ));
+                        return Err(business_error);
+                    }
+                };
+                let bridge = AsyncSampleBridge::new(length);
+                let driver = bridge.driver();
+                let io_in_flight = owner.input.io_in_flight();
+                owner.admission.require_provider_driver();
+                let guard = ProviderDriverGuard::new_with_io_status(
+                    owner.input,
+                    driver,
+                    Arc::clone(&state),
+                    io_in_flight,
+                );
+                let inference = setup_runtime.dispatch(
+                    owner.admission,
+                    WorkerInput::Bridge(bridge, max_bytes, map_error),
+                )?;
+                Ok::<_, MimeError>((guard, inference))
             };
-            let bridge = AsyncSampleBridge::new(length);
-            let driver = bridge.driver();
-            let io_in_flight = input.io_in_flight();
-            admission.require_provider_driver();
-            let guard = ProviderDriverGuard::new_with_io_status(input, driver, Arc::clone(&state), io_in_flight);
-            let inference = setup_runtime.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-            Ok::<_, MimeError>((guard, inference))
-        };
-        let mut setup = Box::pin(setup);
-        let (guard, inference) = poll_fn(|context| {
-            if scope_stop.as_mut().poll(context).is_ready() {
-                stop_state.request_stop();
-                return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
-            }
-            if request_stop.as_mut().poll(context).is_ready() {
-                return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
-            }
-            setup.as_mut().poll(context)
-        })
-        .await?;
-        drive_async_input_with_stops(guard, inference, scope_stop, request_stop).await
+            let mut setup = Box::pin(setup);
+            let (guard, inference) = poll_fn(|context| {
+                if scope_stop.as_mut().poll(context).is_ready() {
+                    stop_state.request_stop();
+                    return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+                }
+                if request_stop.as_mut().poll(context).is_ready() {
+                    return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+                }
+                setup.as_mut().poll(context)
+            })
+            .await?;
+            drive_async_input_with_stops(guard, inference, scope_stop, request_stop).await
+        }
     }
 
     #[cfg(test)]
@@ -891,7 +910,8 @@ impl ManagedInferenceRuntime {
     /// # Parameters
     ///
     /// * `admission` - Token that owns operation and byte capacity.
-    /// * `input` - Owned work sent to the session-owning worker.
+    /// * `input` - Owned work sent to the session-owning worker. A rejected
+    ///   queue send is settled before the result observer is returned.
     ///
     /// # Returns
     ///

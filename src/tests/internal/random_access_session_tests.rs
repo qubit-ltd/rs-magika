@@ -86,6 +86,7 @@ pub(crate) struct Fixture {
     async_stat_gate: Option<Arc<TestAsyncReadGate>>,
     async_stream_read_gate: Option<Arc<TestAsyncReadGate>>,
     async_random_access_unsupported: bool,
+    session_drop_observer: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Fixture {
@@ -108,6 +109,7 @@ impl Fixture {
             async_stat_gate: None,
             async_stream_read_gate: None,
             async_random_access_unsupported: false,
+            session_drop_observer: None,
         }
     }
     pub(crate) fn with_async_read_gate(mut self, gate: Arc<TestAsyncReadGate>) -> Self {
@@ -178,6 +180,7 @@ impl Fixture {
             stop_on_interrupt: self.stop_on_interrupt.clone(),
             attempts: self.attempts.clone(),
             async_read_gate: self.async_read_gate.clone(),
+            drop_observer: self.session_drop_observer.clone(),
         }
     }
 }
@@ -321,6 +324,7 @@ struct Session {
     stop_on_interrupt: Option<Arc<qubit_operation::OperationContext>>,
     attempts: Arc<AtomicUsize>,
     async_read_gate: Option<Arc<TestAsyncReadGate>>,
+    drop_observer: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 pub(crate) struct TestAsyncReadGate {
@@ -382,6 +386,9 @@ impl TestAsyncReadGate {
 impl Drop for Session {
     fn drop(&mut self) {
         self.drops.fetch_add(1, Ordering::SeqCst);
+        if let Some(observer) = &self.drop_observer {
+            observer();
+        }
     }
 }
 impl RandomAccessReadSession for Session {
@@ -445,6 +452,25 @@ fn block_on<F: Future>(future: F) -> F::Output {
             },
         }
     }
+}
+
+/// Opens a real async random-access session for managed setup lifetime tests.
+pub(crate) fn opened_async_session_for_managed_setup_test(
+    on_drop: impl Fn() + Send + Sync + 'static,
+) -> (
+    qubit_fs::read::AsyncRandomAccessReader,
+    Arc<AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
+) {
+    let mut fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(4));
+    fixture.session_drop_observer = Some(Arc::new(on_drop));
+    let filesystem = AsyncFileSystem::from_spi(fixture.clone()).unwrap();
+    let reader = block_on(filesystem.open_random_access_reader(
+        &Path::parse("/managed-setup.py").unwrap(),
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    (reader, Arc::clone(&fixture.drops), Arc::clone(&fixture.reads))
 }
 
 struct ThreadWake {

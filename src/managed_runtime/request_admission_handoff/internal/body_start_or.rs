@@ -5,20 +5,23 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Outcome of waiting for a request body to start.
+//! Observation returned while waiting for an operation outcome or body start.
 
 use super::handoff_close_reason::HandoffCloseReason;
 
-/// Result of racing body start against the submitted operation outcome.
+/// Result observed while racing body start against operation completion.
+/// `BodyStarted` means the caller-specific handoff completed: parent callers
+/// delivered admission or its registration error, while root callers claimed
+/// the payload. `Closed` may occur before or after the child reports start.
 ///
 /// # Type Parameters
 ///
 /// * `T` - Outcome returned when the operation finishes before body start.
 pub(crate) enum BodyStartOr<T> {
-    /// The child crossed its start boundary, and its caller-specific handoff
-    /// step completed the transfer or root payload claim.
+    /// The child crossed its start boundary and the caller completed transfer
+    /// or root payload claim.
     BodyStarted,
-    /// The handoff closed before the child body started.
+    /// The handoff closed before caller transfer completed.
     Closed(
         /// First reason recorded when the caller or request closed the handoff.
         HandoffCloseReason,

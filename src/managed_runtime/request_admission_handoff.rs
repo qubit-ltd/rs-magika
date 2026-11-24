@@ -100,10 +100,7 @@ impl RequestAdmissionHandoff {
 
     /// Closes this pending handoff when its request is stopped.
     pub(super) fn close_for_stop(self: &Arc<Self>) {
-        let reason = self
-            .task_state
-            .upgrade()
-            .map_or("request admission stopped", |state| state.provider_stop_reason());
+        let reason = "request admission stopped";
         self.close_with_reason(HandoffCloseReason::RequestStopped(reason));
     }
 
@@ -232,6 +229,11 @@ impl RequestAdmissionHandoff {
     ///
     /// The payload claim and close check share the handoff lock, so a stop
     /// cannot release capacity while the body is beginning to use it.
+    ///
+    /// # Returns
+    ///
+    /// The admission and optional input when claimed, or `None` if already
+    /// claimed or closed.
     pub(crate) fn take_for_root(self: &Arc<Self>) -> Option<(RequestAdmission, Option<WorkerInput>)> {
         let (payload, caller_waker) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
