@@ -653,6 +653,50 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_after_atomic_payload_take_drops_input_before_admission() {
+        struct ReleaseObserver {
+            state: Arc<TaskState>,
+            released: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Drop for ReleaseObserver {
+            fn drop(&mut self) {
+                self.released.store(
+                    self.state.wait_released_blocking(std::time::Duration::ZERO),
+                    Ordering::Release,
+                );
+            }
+        }
+
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let state = Arc::new(TaskState::new(805, None));
+        let admission = RequestAdmission::new(
+            Arc::clone(&state),
+            ServicePermit::try_acquire(&active_requests, 1).unwrap(),
+            byte_budget.try_acquire(8).unwrap(),
+        );
+        let released_before_input_drop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let input = super::super::worker_input::WorkerInput::Bytes(
+            super::super::worker_input::WorkerBytes::with_drop_probe(
+                Box::new([]),
+                Box::new(ReleaseObserver {
+                    state: Arc::clone(&state),
+                    released: Arc::clone(&released_before_input_drop),
+                }),
+            ),
+        );
+        let (handoff, _guard) = RequestAdmissionHandoff::new_with_input(admission, Some(input));
+
+        let payload = handoff.take_caller_payload().unwrap();
+        state.request_stop();
+        assert!(!handoff.provide_to_child(Ok((payload.admission, payload.input))));
+
+        assert!(!released_before_input_drop.load(Ordering::Acquire));
+        assert_eq!(0, active_requests.load(Ordering::SeqCst));
+        assert!(byte_budget.try_acquire(8).is_some());
+    }
+
+    #[test]
     fn test_runtime_stop_closes_child_waiting_for_registration_while_parent_is_unpolled() {
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
         let active_requests = Arc::new(AtomicUsize::new(0));
