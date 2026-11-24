@@ -113,9 +113,12 @@ impl MagikaMimeDetector {
     /// Creates a detector using MIME selection/refinement configuration and a
     /// new Magika session.
     ///
-    /// The configuration controls repository filename matching and result
-    /// refinement. Magika's embedded model and runtime configuration remain
-    /// owned by the upstream Magika session.
+    /// Applies MIME configuration for result selection and filename fallback.
+    /// This constructor does not attach a media-stream classifier; configure
+    /// one through [`crate::MagikaMimeDetectorBuilder`] or
+    /// [`crate::MagikaMimeDetectorProvider::with_media_stream_classifier`]
+    /// when media refinement is required. Magika's embedded model and runtime
+    /// configuration remain owned by the upstream Magika session.
     ///
     /// # Parameters
     ///

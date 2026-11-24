@@ -201,14 +201,20 @@ fn classify(detector: &dyn MimeDetector) -> qubit_mime::MimeResult<()> {
 
 For direct construction, `MagikaMimeDetector::new()` uses
 `MimeConfig::default()`. `MagikaMimeDetector::builder()` and
-`MagikaMimeDetector::from_mime_config` are available when the application needs
-to supply MIME configuration or a media-stream classifier.
+`MagikaMimeDetector::from_mime_config` accept MIME configuration. The latter
+only applies that configuration; it does not attach a media-stream classifier.
+Use the builder for a classifier, or configure
+`MagikaMimeDetectorProvider::with_media_stream_classifier` and register the
+provider when constructing through a registry.
 
 ## Media Refinement Support
 
 A configured media-stream classifier is used only for eligible high-level
-inputs. Precise detection must be enabled and the detected MIME type or
-filename must match a configured ambiguous MIME mapping.
+inputs, and precise detection must be enabled. When an input has a filename
+extension, that extension must be enabled and the initially detected MIME type
+must be one of the MIME types paired with that extension. Without an extension,
+the initially detected MIME type is matched directly. Conflicting extension
+and MIME candidates are skipped instead of refined.
 
 | Detection entry point | Classifier behavior |
 | --- | --- |
@@ -277,8 +283,10 @@ Enable precise detection before starting the application by setting
 `QUBIT_MIME_ENABLE_PRECISE_DETECTION=true` (configuration key
 `mime.enable.precise.detection`). `MimeConfig::from_env()` reads this setting.
 The default ambiguous mappings cover `webm` (`video/webm` or `audio/webm`)
-and `ogg` (`video/ogg` or `audio/ogg`); refinement runs for an eligible input
-when its detected MIME type or filename matches one of these mappings.
+and `ogg` (`video/ogg` or `audio/ogg`). With a filename extension, refinement
+requires that the extension is enabled and the initial MIME type belongs to
+its mapping. Without an extension, the initial MIME type is matched directly;
+conflicting extension and MIME candidates are skipped.
 
 ```rust
 use std::sync::Arc;
@@ -301,7 +309,7 @@ For registry construction, pass the same classifier to
 configuration to `create_configured(&config)`. `MagikaMimeDetector::from_mime_config`
 accepts a configuration but does not attach a classifier; use the builder when
 both settings are needed. Classifier failures are reported as `MimeError`;
-refinement is best-effort only when the classifier succeeds.
+refinement is best-effort and is applied only when the classifier succeeds.
 
 ### Sharing an application-managed inference runtime
 
@@ -387,11 +395,15 @@ ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["s
 [patch.crates-io]
 qubit-operation = { path = "../rs-operation" }
 ```
+
+The `api-24` feature requires an ONNX Runtime 1.24 or newer shared library;
+Linux CI verifies this configuration with ONNX Runtime 1.24.2.
 <!-- dynamic-loader-application-end -->
 
 Initialize the runtime before constructing the detector. Use `onnxruntime.dll`
 on Windows, `libonnxruntime.dylib` on macOS, or `libonnxruntime.so` on Linux:
 
+<!-- dynamic-loader-rust-example-start -->
 ```rust,no_run
 use std::error::Error;
 use std::path::PathBuf;
@@ -408,6 +420,7 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
     Ok(MagikaMimeDetector::new()?)
 }
 ```
+<!-- dynamic-loader-rust-example-end -->
 
 Set `ORT_LIBRARY_PATH` to the complete shared-library path and ensure any
 execution-provider libraries are discoverable by the dynamic loader. The

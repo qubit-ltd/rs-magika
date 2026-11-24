@@ -164,9 +164,16 @@ fn classify(detector: &dyn MimeDetector) -> qubit_mime::MimeResult<()> {
 }
 ```
 
-如果只需要默认配置，也可以直接调用 `MagikaMimeDetector::new()`。需要传入 MIME
-配置或 media-stream classifier 时，使用 `MagikaMimeDetector::builder()` 或
-`MagikaMimeDetector::from_mime_config`。
+如果只需要默认配置，也可以直接调用 `MagikaMimeDetector::new()`。
+`MagikaMimeDetector::builder()` 和 `MagikaMimeDetector::from_mime_config` 接收 MIME
+配置；后者只应用该配置，不会挂接 media-stream classifier。需要 classifier 时使用
+builder；通过 registry 构造时，配置 `MagikaMimeDetectorProvider::with_media_stream_classifier`
+并注册该 provider。
+
+已配置的 media-stream classifier 只用于符合条件的高层输入，并且必须启用 precise
+detection。输入带文件扩展名时，该扩展必须已启用，且初始检测出的 MIME type 必须属于该扩展
+对应的 MIME 类型。没有扩展名时，直接按初始 MIME type 匹配。扩展名与 MIME 候选冲突时会跳过
+refinement。
 
 ## Provider Path 示例
 
@@ -211,7 +218,9 @@ Media refinement 是可选的。例如，内置的 ffprobe classifier 可以区�
 应用启动前设置 `QUBIT_MIME_ENABLE_PRECISE_DETECTION=true`（配置键为
 `mime.enable.precise.detection`）以启用 precise detection；`MimeConfig::from_env()`
 会读取该设置。默认的歧义映射覆盖 `webm`（`video/webm` 或 `audio/webm`）和
-`ogg`（`video/ogg` 或 `audio/ogg`）。符合条件的输入在检测 MIME type 或文件名匹配这些映射时才会执行 refinement。
+`ogg`（`video/ogg` 或 `audio/ogg`）。带文件扩展名时，扩展必须已启用，且初始 MIME type
+必须属于该扩展的映射。没有扩展名时直接按初始 MIME type 匹配；扩展名和 MIME 候选冲突时会跳过
+refinement。
 
 ```rust
 use std::sync::Arc;
@@ -233,7 +242,7 @@ fn create_media_aware_detector() -> qubit_mime::MimeResult<MagikaMimeDetector> {
 `MagikaMimeDetectorProvider::with_media_stream_classifier`，并将启用后的配置传给
 `create_configured(&config)`。`MagikaMimeDetector::from_mime_config` 接收配置，但不会挂接
 classifier；需要同时配置两者时请使用 builder。classifier 失败时返回 `MimeError`；只有 classifier
-成功时才会进行 refinement。
+成功时才会应用 refinement。
 
 ### 共享应用管理的推理 runtime
 
@@ -327,9 +336,13 @@ qubit-operation = { path = "../rs-operation" }
 ```
 <!-- dynamic-loader-application-end -->
 
+`api-24` feature 要求 ONNX Runtime 1.24 或更新版本的共享库；Linux CI 使用 ONNX Runtime
+1.24.2 验证此配置。
+
 创建 detector 前先初始化 runtime。Windows 使用 `onnxruntime.dll`，macOS 使用
 `libonnxruntime.dylib`，Linux 使用 `libonnxruntime.so`：
 
+<!-- dynamic-loader-rust-example-start -->
 ```rust,no_run
 use std::error::Error;
 use std::path::PathBuf;
@@ -346,6 +359,7 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
     Ok(MagikaMimeDetector::new()?)
 }
 ```
+<!-- dynamic-loader-rust-example-end -->
 
 将 `ORT_LIBRARY_PATH` 设置为完整的共享库路径，并确保 execution-provider 动态库能被
 系统加载器找到。`ort::init_from` 必须早于第一个 detector（或其他 `ort` API）调用；

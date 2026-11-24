@@ -38,6 +38,8 @@ APPLICATION_START = "<!-- fixed-source-application-start -->"
 APPLICATION_END = "<!-- fixed-source-application-end -->"
 DYNAMIC_START = "<!-- dynamic-loader-application-start -->"
 DYNAMIC_END = "<!-- dynamic-loader-application-end -->"
+DYNAMIC_EXAMPLE_START = "<!-- dynamic-loader-rust-example-start -->"
+DYNAMIC_EXAMPLE_END = "<!-- dynamic-loader-rust-example-end -->"
 GUIDES = ("doc/user_guide.md", "doc/user_guide.zh_CN.md")
 VERSIONED_DEPENDENCIES = ("qubit-mime", "qubit-operation", "qubit-fs")
 REQUIRED_IMPORTS = (
@@ -74,6 +76,16 @@ def extract_provider_example(markdown: str, guide_name: str) -> str:
         "MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime))",
     )
     return extract_example(markdown, guide_name, PROVIDER_START, PROVIDER_END, required)
+
+
+def extract_dynamic_example(markdown: str, guide_name: str) -> str:
+    example = extract_example(
+        markdown, guide_name, DYNAMIC_EXAMPLE_START, DYNAMIC_EXAMPLE_END, ()
+    )
+    for anchor in ("ort::init_from", "MagikaMimeDetector::new"):
+        if anchor not in example:
+            raise ValueError(f"{guide_name}: dynamic example is missing {anchor}")
+    return example
 
 
 def extract_dependencies(markdown: str, guide_name: str) -> tuple[str, dict[str, object]]:
@@ -185,11 +197,11 @@ def validate_and_rebase_manifest(
 
 
 def _guide_relative_path(value: str, guide_name: str, key: str) -> str:
-    path = Path(value)
-    windows_absolute = PureWindowsPath(value).is_absolute()
-    if path.is_absolute() or windows_absolute:
+    windows_path = PureWindowsPath(value)
+    if Path(value).is_absolute() or windows_path.is_absolute():
         raise ValueError(f"{guide_name}: {key} must use a relative guide path, got {value!r}")
-    return posixpath.normpath(value)
+    normalized = windows_path.as_posix() if "\\" in value else value
+    return posixpath.normpath(normalized)
 
 
 def _validate_toml_value(value: object, guide_name: str, key: str) -> None:
@@ -496,7 +508,7 @@ edition = "2024"
 metadata = { "display name" = "Application" }
 [dependencies]
 qubit-magika = { version = "0.18", path = "../rs-magika" }
-qubit-mime = { version = "0.22", path = "../rs-mime" }
+qubit-mime = { version = "0.22", path = "../rs-mime", default-features = false, features = ["inventory"] }
 qubit-fs = { version = "0.4", path = "../rs-fs", default-features = false, features = ["async"] }
 qubit-operation = { version = "0.3.2", path = "../rs-operation" }
 [patch.crates-io]
@@ -512,9 +524,28 @@ qubit-operation = { path = "../rs-operation" }
         "qubit-operation": (fixture_root.parent / "rs-operation").resolve(),
     }
     rebased = validate_and_rebase_manifest(parsed_application, guide, fixture_root)
-    assert Path(rebased["dependencies"]["qubit-magika"]["path"]).resolve() == expected_fixture_paths["qubit-magika"]
-    assert Path(rebased["dependencies"]["qubit-operation"]["path"]).resolve() == expected_fixture_paths["qubit-operation"]
-    assert Path(rebased["patch"]["crates-io"]["qubit-operation"]["path"]).resolve() == expected_fixture_paths["qubit-operation"]
+    serialized_rebased = tomllib.loads(manifest_text(rebased, add_package=False, add_workspace=False))
+    for name, expected_path in expected_fixture_paths.items():
+        assert Path(serialized_rebased["dependencies"][name]["path"]).resolve() == expected_path
+    assert Path(serialized_rebased["patch"]["crates-io"]["qubit-operation"]["path"]).resolve() == expected_fixture_paths["qubit-operation"]
+    assert serialized_rebased["dependencies"]["qubit-mime"]["version"] == "0.22"
+    assert serialized_rebased["dependencies"]["qubit-mime"]["default-features"] is False
+    assert serialized_rebased["dependencies"]["qubit-mime"]["features"] == ["inventory"]
+    assert serialized_rebased["dependencies"]["qubit-operation"]["version"] == "0.3.2"
+    windows_relative = json.loads(json.dumps(parsed_application))
+    windows_relative["dependencies"]["qubit-magika"]["path"] = r"..\rs-magika"
+    windows_relative["dependencies"]["qubit-mime"]["path"] = r"..\rs-mime"
+    windows_relative["dependencies"]["qubit-fs"]["path"] = r"..\rs-fs"
+    windows_relative["dependencies"]["qubit-operation"]["path"] = r"..\rs-operation"
+    windows_relative["patch"]["crates-io"]["qubit-operation"]["path"] = r"..\rs-operation"
+    windows_rebased = validate_and_rebase_manifest(windows_relative, guide, fixture_root)
+    windows_roundtrip = tomllib.loads(manifest_text(windows_rebased, add_package=False, add_workspace=False))
+    assert windows_roundtrip == windows_rebased
+    for name, expected_path in expected_fixture_paths.items():
+        assert Path(windows_roundtrip["dependencies"][name]["path"]).resolve() == expected_path
+    assert windows_roundtrip["dependencies"]["qubit-mime"]["features"] == ["inventory"]
+    assert windows_roundtrip["dependencies"]["qubit-mime"]["default-features"] is False
+    assert Path(windows_roundtrip["patch"]["crates-io"]["qubit-operation"]["path"]).resolve() == expected_fixture_paths["qubit-operation"]
     for windows_absolute in (r"C:\apps\rs-magika", r"\\server\share\rs-magika"):
         try:
             _guide_relative_path(windows_absolute, guide, "Windows path self-test")
@@ -576,6 +607,18 @@ qubit-operation = { path = "../rs-operation" }
     dynamic_manifest["dependencies"]["qubit-magika"]["default-features"] = False
     dynamic_manifest["dependencies"]["ort"] = {"version": ">=2.0.0-rc.12,<2.1", "default-features": False, "features": ["std", "ndarray", "load-dynamic", "api-24"]}
     validate_and_rebase_manifest(dynamic_manifest, guide, Path("/layout/rs-magika"), dynamic=True)
+    dynamic_example = f"{DYNAMIC_EXAMPLE_START}\n```rust,no_run\nfn create_detector() {{ let _ = ort::init_from(\"runtime\"); let _ = MagikaMimeDetector::new(); }}\n```\n{DYNAMIC_EXAMPLE_END}"
+    assert "ort::init_from" in extract_dynamic_example(dynamic_example, guide)
+    for invalid_dynamic in (
+        dynamic_example.replace(DYNAMIC_EXAMPLE_START, ""),
+        dynamic_example + "\n" + DYNAMIC_EXAMPLE_START,
+    ):
+        try:
+            extract_dynamic_example(invalid_dynamic, guide)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted missing or duplicate dynamic example marker")
     for invalid_text, expected_error in (
         (application.replace('metadata = { "display name" = "Application" }', 'metadata = { value = inf }'), "non-finite TOML value at package.metadata.value"),
         (application.replace('[patch.crates-io]\nqubit-operation = { path = "../rs-operation" }', '[patch]\ncrates-io = "not-a-table"'), "non-table value at patch.crates-io"),
@@ -890,6 +933,7 @@ def main() -> int:
                 extract_example(markdown, guide),
                 extract_provider_example(markdown, guide),
             ]
+            dynamic_example = extract_dynamic_example(markdown, guide)
             _, dependencies = extract_dependencies(markdown, guide)
             validate_dependencies(guide, dependencies, examples, expected_versions(project_root))
             consumer = temp_dir / Path(guide).stem
@@ -936,7 +980,12 @@ def main() -> int:
                 graph_dir = temp_dir / f"{Path(guide).stem}-{variant}"
                 graph_dir.mkdir()
                 (graph_dir / "src").mkdir()
-                (graph_dir / "src" / "lib.rs").write_text("// metadata-only guide consumer\n", encoding="utf-8")
+                lib_source = (
+                    f"#[allow(dead_code)]\nmod dynamic_guide {{\n{dynamic_example}\n}}\n"
+                    if variant == "dynamic"
+                    else "// metadata-only guide consumer\n"
+                )
+                (graph_dir / "src" / "lib.rs").write_text(lib_source, encoding="utf-8")
                 graph_manifest = graph_dir / "Cargo.toml"
                 add_package = "package" not in selected
                 add_workspace = "workspace" not in selected
@@ -971,6 +1020,14 @@ def main() -> int:
                 validate_local_package_identities(metadata, expected_paths)
                 validate_feature_graph(metadata, variant, guide)
                 print(f"Validated {variant} Cargo graph from {guide}", flush=True)
+                if variant == "dynamic":
+                    print(f"Compiling dynamic Rust example from {guide}", flush=True)
+                    result = subprocess.run(
+                        ["cargo", "check", "--manifest-path", str(graph_manifest)],
+                        cwd=project_root, env=cargo_env, check=False,
+                    )
+                    if result.returncode:
+                        return result.returncode
         return 0
     except (OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
         print(f"managed guide check failed: {error}", file=sys.stderr)
