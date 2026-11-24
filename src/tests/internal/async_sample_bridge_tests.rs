@@ -261,13 +261,13 @@ fn test_bridge_never_exposes_two_unanswered_requests() {
     );
     assert!(poll_for(bridge.next_request(), Duration::from_millis(30)).is_none());
     first_request.respond(Ok(vec![10]));
+    join_before(first, "first serialized response", Duration::from_secs(2)).unwrap();
     let second_request = block_on(bridge.next_request()).unwrap();
     assert!(
         bridge.wait_for_test_waiters(0, 1, Duration::from_secs(2)),
         "second worker should await its response"
     );
     second_request.respond(Ok(vec![11]));
-    join_before(first, "first serialized response", Duration::from_secs(2)).unwrap();
     join_before(second, "second serialized response", Duration::from_secs(2)).unwrap();
 }
 
