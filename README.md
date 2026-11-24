@@ -30,8 +30,10 @@ the [`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.git
 qubit-mime = "0.22"
 qubit-magika = "0.18"
 qubit-spi = "0.14"
-qubit-operation = "0.3"
+qubit-operation = "0.3.2"
 ```
+
+The crates.io releases needed by this example are not all available yet (`qubit-magika` 0.18, `qubit-mime` 0.22, `qubit-fs` 0.4, and `qubit-operation` 0.3.2 or newer). Until they are published, use the fixed sibling source checkouts listed in [the dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv) and run `python3 .infra/check-readme-examples.py` from this source checkout. `python3 .infra/check-readme-examples.py --registry-only` is the clean registry acceptance gate and will pass once the required releases can be resolved.
 
 ## Quick Start
 

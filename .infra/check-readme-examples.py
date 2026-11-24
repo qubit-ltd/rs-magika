@@ -18,7 +18,7 @@ READMES = {
     "README.md": ("Installation", "Quick Start"),
     "README.zh_CN.md": ("安装", "快速开始"),
 }
-REQUIRED_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-spi")
+REQUIRED_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-spi", "qubit-operation")
 
 
 def section(markdown: str, title: str, filename: str) -> str:
@@ -111,7 +111,7 @@ def toml_value(value: object) -> str:
 
 
 def consumer_manifest(
-    dependencies: dict[str, object], project_root: Path, filename: str
+    dependencies: dict[str, object], project_root: Path, filename: str | None
 ) -> str:
     entries: list[str] = []
     local_paths = {
@@ -121,7 +121,7 @@ def consumer_manifest(
     }
     for package, original in dependencies.items():
         value = original
-        if package in local_paths:
+        if filename is not None and package in local_paths:
             if isinstance(value, dict):
                 value = dict(value)
                 if "path" in value:
@@ -132,7 +132,7 @@ def consumer_manifest(
         entries.append(f"{package} = {toml_value(value)}")
     return (
         "[package]\n"
-        f'name = "magika-readme-example-{"zh" if filename.endswith("zh_CN.md") else "en"}"\n'
+        f'name = "magika-readme-example-{"zh" if filename and filename.endswith("zh_CN.md") else "en"}"\n'
         'version = "0.0.0"\n'
         'edition = "2024"\n\n'
         "[workspace]\n\n"
@@ -142,11 +142,23 @@ def consumer_manifest(
     )
 
 
+def validate_registry_manifest(manifest_text: str) -> None:
+    manifest = tomllib.loads(manifest_text)
+    for package, entry in manifest.get("dependencies", {}).items():
+        if isinstance(entry, dict) and "path" in entry:
+            raise ValueError(f"registry consumer dependency {package} must not use a path")
+    if manifest.get("patch"):
+        raise ValueError("registry consumer must not declare a patch")
+    workspace = manifest.get("workspace", {})
+    if workspace.get("members"):
+        raise ValueError("registry consumer must not declare workspace members")
+
+
 def run_self_tests() -> None:
-    expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-spi": "0.14"}
+    expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-spi": "0.14", "qubit-operation": "0.3.2"}
     fixtures = {
-        "README.md": """## Installation\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3\"\n```\n## Quick Start\n```rust\nfn main() {}\n```\n""",
-        "README.zh_CN.md": """## 安装\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3\"\n```\n## 快速开始\n```rust\nfn main() {}\n```\n""",
+        "README.md": """## Installation\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3.2\"\n```\n## Quick Start\n```rust\nfn main() {}\n```\n""",
+        "README.zh_CN.md": """## 安装\n```toml\n[dependencies]\nqubit-magika = \"0.18\"\nqubit-mime = \"0.22\"\nqubit-spi = \"0.14\"\nqubit-operation = \"0.3.2\"\n```\n## 快速开始\n```rust\nfn main() {}\n```\n""",
     }
     for filename, fixture in fixtures.items():
         _, quick_start_title = READMES[filename]
@@ -160,9 +172,24 @@ def run_self_tests() -> None:
             dependencies, Path("layout/rs-magika"), filename
         )
         assert (
-            'qubit-operation = { version = "0.3", path = "layout/rs-operation" }'
+            'qubit-operation = { version = "0.3.2", path = "layout/rs-operation" }'
             in relative_manifest
         )
+        registry_manifest = consumer_manifest(dependencies, Path("/project"), None)
+        validate_registry_manifest(registry_manifest)
+        assert "path =" not in registry_manifest
+        assert "[patch." not in registry_manifest
+        for invalid_registry_manifest in (
+            registry_manifest.replace('qubit-magika = "0.18"', 'qubit-magika = { version = "0.18", path = "../rs-magika" }'),
+            registry_manifest + "\n[patch.crates-io]\nqubit-magika = { path = \"../rs-magika\" }\n",
+            registry_manifest.replace("[workspace]", '[workspace]\nmembers = ["../member"]'),
+        ):
+            try:
+                validate_registry_manifest(invalid_registry_manifest)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("accepted registry consumer with a local override or member")
         installation_end = fixture.index(f"## {quick_start_title}")
         duplicate_toml = (
             fixture[:installation_end]
@@ -196,11 +223,23 @@ def run_self_tests() -> None:
             raise AssertionError(f"{filename}: accepted old qubit-mime version")
         old_manifest = consumer_manifest(old_mime, Path("/project"), filename)
         assert 'qubit-mime = { version = "0.21", path = "/rs-mime" }' in old_manifest
+        old_operation = dict(dependencies, **{"qubit-operation": "0.3"})
+        try:
+            validate_dependencies(old_operation, expected, filename)
+        except ValueError as error:
+            assert "qubit-operation" in str(error)
+        else:
+            raise AssertionError(f"{filename}: accepted qubit-operation below manifest minimum")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true", help="run extraction and version checks")
+    parser.add_argument(
+        "--registry-only",
+        action="store_true",
+        help="check README examples using a clean registry consumer with no local path overrides",
+    )
     args = parser.parse_args()
     if args.self_test:
         run_self_tests()
@@ -214,19 +253,42 @@ def main() -> int:
     cargo_env["CARGO_TARGET_DIR"] = str(target_dir)
     try:
         expected = expected_versions(project_root)
-        for filename in READMES:
-            readme_path = project_root / filename
-            dependencies, example = extract_readme(readme_path.read_text(encoding="utf-8"), filename)
-            validate_dependencies(dependencies, expected, filename)
-            with tempfile.TemporaryDirectory(prefix="magika-readme-check-") as temporary:
-                consumer_root = Path(temporary)
+        with tempfile.TemporaryDirectory(prefix="magika-readme-check-") as temporary:
+            if args.registry_only:
+                cargo_env["CARGO_HOME"] = str(Path(temporary) / "cargo-home")
+            for filename in READMES:
+                readme_path = project_root / filename
+                dependencies, example = extract_readme(readme_path.read_text(encoding="utf-8"), filename)
+                validate_dependencies(dependencies, expected, filename)
+                consumer_root = Path(temporary) / filename.replace(".md", "")
+                consumer_root.mkdir(parents=True, exist_ok=True)
                 (consumer_root / "src").mkdir()
+                generated_manifest = consumer_manifest(
+                    dependencies,
+                    project_root,
+                    filename if not args.registry_only else None,
+                )
+                if args.registry_only:
+                    validate_registry_manifest(generated_manifest)
+                    if (consumer_root / "Cargo.lock").exists():
+                        raise ValueError("registry consumer unexpectedly has a borrowed Cargo.lock")
                 (consumer_root / "Cargo.toml").write_text(
-                    consumer_manifest(dependencies, project_root, filename), encoding="utf-8"
+                    generated_manifest, encoding="utf-8"
                 )
                 (consumer_root / "src/main.rs").write_text(example + "\n", encoding="utf-8")
-                command = ["cargo", "check", "--manifest-path", str(consumer_root / "Cargo.toml")]
-                print(f"Checking {filename} with the README dependency requirements...", flush=True)
+                manifest_path = consumer_root / "Cargo.toml"
+                mode = "registry-only" if args.registry_only else "fixed-source"
+                print(f"Checking {filename} ({mode}) with the README dependency requirements...", flush=True)
+                if args.registry_only:
+                    metadata = subprocess.run(
+                        ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest_path)],
+                        env=cargo_env,
+                        check=False,
+                    )
+                    if metadata.returncode:
+                        print(f"{filename}: registry-only cargo metadata exited with {metadata.returncode}", file=sys.stderr)
+                        return metadata.returncode if metadata.returncode > 0 else 1
+                command = ["cargo", "check", "--manifest-path", str(manifest_path)]
                 result = subprocess.run(command, env=cargo_env, check=False)
                 if result.returncode:
                     print(f"{filename}: cargo check exited with {result.returncode}", file=sys.stderr)

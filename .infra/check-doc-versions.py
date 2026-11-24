@@ -14,9 +14,9 @@ from pathlib import Path
 READMES = ("README.md", "README.zh_CN.md")
 GUIDES = ("doc/user_guide.md", "doc/user_guide.zh_CN.md")
 DOCUMENTS = READMES + GUIDES
-DOC_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi", "ort")
-README_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-spi")
-MIGRATION_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi")
+DOC_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi", "qubit-operation", "ort")
+README_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-spi", "qubit-operation")
+MIGRATION_DEPENDENCIES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi", "qubit-operation")
 
 
 def expected_versions(root: Path) -> dict[str, str]:
@@ -119,7 +119,7 @@ def self_test(root: Path) -> list[str]:
         if check(fixture_root):
             return ["self-test baseline fixture unexpectedly failed"]
         expected = expected_versions(fixture_root)
-        for name in ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-spi", "ort"):
+        for name in DOC_DEPENDENCIES:
             path = fixture_root / "doc/user_guide.md"
             original = path.read_text()
             pattern = rf'({re.escape(name)}\s*=\s*(?:\{{\s*version\s*=\s*)?\")({re.escape(expected[name])})(\")'

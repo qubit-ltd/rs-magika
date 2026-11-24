@@ -238,7 +238,7 @@ into an application:
 [dependencies]
 qubit-magika = "0.18"
 qubit-mime = "0.22"
-qubit-operation = "0.3"
+qubit-operation = "0.3.2"
 qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 ```
 <!-- managed-dependencies-end -->
@@ -603,8 +603,8 @@ current upstream trait does not pass one.
 
 When upgrading a pre-0.14 integration, apply these changes in order:
 
-1. Upgrade to `qubit-magika 0.18`, `qubit-mime 0.22`, `qubit-fs 0.4`,
-   `qubit-spi 0.14`, and Rust 1.94.
+1. Use Rust 1.94 and upgrade to `qubit-magika 0.18`, `qubit-mime 0.22`,
+   `qubit-fs 0.4`, `qubit-spi 0.14`, and `qubit-operation 0.3.2`.
 2. Keep provider registration and detector configuration separate: register
    `MagikaMimeDetectorProvider`, select `magika`, then call
    `create_configured(&MimeConfig)`.
