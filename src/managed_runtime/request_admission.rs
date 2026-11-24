@@ -493,6 +493,7 @@ mod tests {
     use std::task::Context;
     use std::task::Poll;
     use std::task::Waker;
+    use std::time::Duration;
 
     use qubit_fs::Path;
     use qubit_operation::ManagerOptions;
@@ -642,10 +643,10 @@ mod tests {
         state.request_stop();
 
         assert!(matches!(
-            block_on(operation.wait_outcome()).unwrap(),
+            block_on(operation.wait_outcome(), "provider operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
-        let settlement = block_on(operation.wait_settlement());
+        let settlement = block_on(operation.wait_settlement(), "provider operation settlement");
         assert!(!settlement.all_released());
         assert_eq!(settlement.cleanup_failures_total, 1);
         assert_eq!(settlement.recovery_count, 1);
@@ -684,7 +685,10 @@ mod tests {
                     Poll::<()>::Pending
                 });
                 let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    block_on(admission.run_provider_operation_with_status(&scope, panic_during_io_poll, io_in_flight))
+                    block_on(
+                        admission.run_provider_operation_with_status(&scope, panic_during_io_poll, io_in_flight),
+                        "provider I/O panic settlement",
+                    )
                 }));
                 assert!(unwind.is_err());
                 drop(admission);
@@ -693,10 +697,10 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            block_on(operation.wait_outcome()).unwrap(),
+            block_on(operation.wait_outcome(), "provider operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
-        let settlement = block_on(operation.wait_settlement());
+        let settlement = block_on(operation.wait_settlement(), "provider operation settlement");
         assert!(!settlement.all_released());
         assert!(settlement.recovery_count > 0);
         assert!(settlement.cleanup_failures_total > 0);
@@ -783,23 +787,15 @@ mod tests {
                 .unwrap();
 
             assert!(matches!(
-                block_on(outer.wait_outcome()).unwrap(),
+                block_on(outer.wait_outcome(), "outer operation outcome").unwrap(),
                 OperationOutcome::Succeeded(())
             ));
-            assert!(block_on(outer.wait_settlement()).all_released());
+            assert!(block_on(outer.wait_settlement(), "outer operation settlement").all_released());
         }
     }
 
-    fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        let mut future = Box::pin(future);
-        loop {
-            match Pin::as_mut(&mut future).poll(&mut context) {
-                Poll::Ready(output) => return output,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
+    fn block_on<F: Future>(future: F, stage: &str) -> F::Output {
+        crate::tests::internal::bridge_wait::poll_before(future, stage, Duration::from_secs(5))
     }
 
     #[test]

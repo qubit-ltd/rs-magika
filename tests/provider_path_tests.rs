@@ -42,6 +42,7 @@ use crate::support::ProviderFileSystemSpi;
 use crate::support::ProviderReadCompletionGate;
 use crate::support::ShutdownBlocking;
 use crate::support::detector;
+use crate::support::join_before;
 use crate::support::run_ready;
 use crate::support::run_until;
 
@@ -419,11 +420,11 @@ fn assert_full_capacity_rejects_second_async_provider_route(first_managed: bool)
         assert!(run_ready(handle.wait_settlement()).all_released());
         result
     } else {
-        legacy_first
-            .take()
-            .unwrap()
-            .join()
-            .expect("scope-less capacity holder should not panic")
+        join_before(
+            legacy_first.take().unwrap(),
+            "scope-less capacity holder completion",
+            Duration::from_secs(5),
+        )
             .map(|(candidates, _)| candidates.into_iter().next())
     };
     assert!(
@@ -965,7 +966,7 @@ fn slow_provider_latency_sample(
     let outcome = run_ready(second.wait_outcome()).unwrap();
     let elapsed = start.elapsed();
     assert!(matches!(outcome, qubit_operation::OperationOutcome::Succeeded(Some(_))));
-    release_thread.join().unwrap();
+    join_before(release_thread, "capacity gate release thread", Duration::from_secs(5));
     let first_outcome = run_ready(first.wait_outcome()).unwrap();
     assert!(matches!(
         first_outcome,
@@ -1634,7 +1635,7 @@ fn test_wake_driver_waits_for_wake_and_times_out_without_repolling() {
         slot: waker_slot,
         registered,
     });
-    releaser.join().unwrap();
+    join_before(releaser, "provider gate releaser", Duration::from_secs(5));
 }
 
 #[test]
@@ -1741,7 +1742,7 @@ fn test_provider_stat_open_and_read_suspend_until_wake() {
             worker_gate.release();
         });
         let result = run_ready(future);
-        releaser.join().unwrap();
+        join_before(releaser, "provider gate releaser", Duration::from_secs(5));
         result.expect("gated provider operation should resume after wake");
         if point == AsyncProviderGatePoint::Read {
             assert_eq!(1, provider.observations().session_drops.load(Ordering::SeqCst));
@@ -1801,9 +1802,11 @@ fn test_provider_completion_gate_observes_notification_before_wait_registration(
     completion_gate.release();
     assert_eq!(
         1,
-        worker
-            .join()
-            .unwrap()
+        join_before(
+            worker,
+            "provider read after completion gate release",
+            Duration::from_secs(5),
+        )
             .expect("provider read should resume after gate release")
     );
 }
@@ -1845,7 +1848,7 @@ fn test_dropping_pending_provider_read_releases_session() {
         result.is_err(),
         "a gated provider read must remain Pending until released"
     );
-    observer.join().unwrap();
+    join_before(observer, "pending provider read observer", Duration::from_secs(5));
     drop(reader);
     assert_eq!(
         1,
@@ -1872,7 +1875,7 @@ fn test_gated_provider_read_error_resumes_after_wake() {
         run_ready(file_system.open_random_access_reader(&request_path, qubit_fs::read::ReadOptions::default()))
             .expect("session should open before the read is gated");
     let result = run_ready(reader.read_at(0, &mut [0_u8; 1]));
-    releaser.join().unwrap();
+    join_before(releaser, "provider gate releaser", Duration::from_secs(5));
     assert!(result.is_err(), "the provider read error should propagate after wake");
     drop(reader);
     assert_eq!(1, provider.observations().session_drops.load(Ordering::SeqCst));
@@ -2737,12 +2740,16 @@ fn test_magika_managed_and_legacy_cancel_at_sixty_fourth_read_completion() {
                 "cancellation must not start a 65th read"
             );
             completion_gate.release();
-            let business_result = hook.join().unwrap();
+            let business_result = join_before(
+                hook,
+                "legacy cancellation completion",
+                Duration::from_secs(5),
+            );
             assert!(
                 business_result.is_err(),
                 "legacy cancellation should fail the business request: {business_result:?}"
             );
-            let report = shutdown.join().unwrap();
+            let report = join_before(shutdown, "provider shutdown completion", Duration::from_secs(5));
             assert!(
                 report.worker_stopped,
                 "legacy runtime should stop after cancellation: {report:?}"
@@ -2862,12 +2869,16 @@ fn test_magika_managed_and_legacy_cancel_before_second_legacy_range() {
                 "cancellation must not open another legacy range"
             );
             completion_gate.release();
-            let business_result = hook.join().unwrap();
+            let business_result = join_before(
+                hook,
+                "legacy cancellation completion",
+                Duration::from_secs(5),
+            );
             assert!(
                 business_result.is_err(),
                 "legacy range cancellation should fail the business request: {business_result:?}"
             );
-            let report = shutdown.join().unwrap();
+            let report = join_before(shutdown, "provider shutdown completion", Duration::from_secs(5));
             assert!(
                 report.worker_stopped,
                 "legacy runtime should stop after range cancellation: {report:?}"
@@ -2986,9 +2997,11 @@ fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
                 );
             }
             if let Some(hook) = legacy_hook {
-                let error = hook
-                    .join()
-                    .unwrap()
+                let error = join_before(
+                    hook,
+                    "ready-read legacy cancellation completion",
+                    Duration::from_secs(5),
+                )
                     .expect_err("legacy hook must report runtime cancellation after the ready read");
                 assert!(
                     matches!(error, MimeError::DetectorBackend { ref backend, ref reason }
@@ -2996,7 +3009,7 @@ fn test_runtime_cancel_after_ready_read_blocks_session_retry_and_legacy_read() {
                     "legacy hook should expose the provider stop error: {error:?}"
                 );
             }
-            let report = shutdown.join().unwrap();
+            let report = join_before(shutdown, "provider shutdown completion", Duration::from_secs(5));
             assert!(report.worker_stopped);
             assert_eq!(
                 1,
@@ -3143,7 +3156,7 @@ fn assert_runtime_cancel_returns_while_provider_is_pending(
         Ok(completed) => Ok(completed),
         Err(_) => finished_rx.recv_timeout(Duration::from_secs(3)),
     };
-    shutdown.join().unwrap();
+    join_before(shutdown, "provider gate shutdown completion", Duration::from_secs(5));
     let (finished_at, report) = completed.expect("runtime Cancel should finish after the gate is released");
     if !gate_was_entered || !returned_before_release || !report.worker_stopped {
         failures.push(format!(
@@ -3318,8 +3331,8 @@ fn test_legacy_async_hook_returns_cancel_result_while_provider_resources_remain_
     );
 
     gate.release();
-    let report = shutdown.join().unwrap();
-    hook.join().unwrap();
+    let report = join_before(shutdown, "provider shutdown completion", Duration::from_secs(5));
+    join_before(hook, "legacy hook after provider gate release", Duration::from_secs(5));
     assert!(
         report.worker_stopped,
         "runtime worker should exit after cancellation: {report:?}"
@@ -3670,7 +3683,7 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         Ok(outcome) => Ok(outcome),
         Err(()) => run_until(operation.wait_outcome(), Duration::from_secs(3)),
     };
-    shutdown_thread.join().unwrap();
+    join_before(shutdown_thread, "pending provider shutdown report", Duration::from_secs(5));
     drop(detector);
     let settlement_after_last_runtime_drop = if cancelled_bridge_exited_while_pending {
         run_until(observer.wait_settlement(), Duration::from_secs(2))
@@ -3794,7 +3807,7 @@ fn test_pending_provider_open_and_stat_retain_resources_across_runtime_shutdown(
         });
         let outcome_before_release = run_until(operation.wait_outcome(), Duration::from_secs(5));
         let settlement_before_release = run_until(observer.wait_settlement(), Duration::from_secs(5));
-        let report = shutdown.join().unwrap();
+        let report = join_before(shutdown, "provider shutdown completion", Duration::from_secs(5));
         // The cancelled managed operation and shutdown caller now hold no
         // detector owner; dropping this last owner happens while the provider
         // gate is still pending.

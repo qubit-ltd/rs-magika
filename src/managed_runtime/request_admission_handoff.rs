@@ -652,7 +652,7 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(
-            block_on(operation.wait_outcome()).unwrap(),
+            block_on(operation.wait_outcome(), "handoff operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
     }
@@ -685,10 +685,10 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            block_on(operation.wait_outcome()).unwrap(),
+            block_on(operation.wait_outcome(), "handoff operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
-        assert!(block_on(operation.wait_settlement()).all_released());
+        assert!(block_on(operation.wait_settlement(), "handoff operation settlement").all_released());
     }
 
     #[test]
@@ -769,7 +769,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            block_on(parent.wait_outcome()).unwrap(),
+            block_on(parent.wait_outcome(), "parent operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
         assert!(drop_facts_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
@@ -781,7 +781,7 @@ mod tests {
         );
         assert_eq!(0, active_requests.load(Ordering::SeqCst));
         assert!(byte_budget.try_acquire(8).is_some());
-        assert!(block_on(parent.wait_settlement()).all_released());
+        assert!(block_on(parent.wait_settlement(), "parent operation settlement").all_released());
     }
 
     #[test]
@@ -800,7 +800,10 @@ mod tests {
         state.request_stop();
 
         assert!(matches!(
-            block_on(handoff.wait_for_body_start_or(&mut outcome)),
+            block_on(
+                handoff.wait_for_body_start_or(&mut outcome),
+                "handoff body-start notification"
+            ),
             BodyStartOr::Closed(HandoffCloseReason::RequestStopped(_))
         ));
         assert_eq!(0, active_requests.load(Ordering::SeqCst));
@@ -848,10 +851,10 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            block_on(operation.wait_outcome()).unwrap(),
+            block_on(operation.wait_outcome(), "handoff operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
-        assert!(block_on(operation.wait_settlement()).all_released());
+        assert!(block_on(operation.wait_settlement(), "handoff operation settlement").all_released());
     }
 
     #[test]
@@ -1048,7 +1051,7 @@ mod tests {
         assert_eq!(0, active_requests.load(Ordering::SeqCst));
         assert!(byte_budget.try_acquire(8).is_some());
         assert!(matches!(
-            block_on(parent.wait_outcome()).unwrap(),
+            block_on(parent.wait_outcome(), "parent operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
     }
@@ -1098,22 +1101,18 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            block_on(parent.wait_outcome()).unwrap(),
+            block_on(parent.wait_outcome(), "parent operation outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
         assert_eq!(0, active_requests.load(Ordering::SeqCst));
         assert!(byte_budget.try_acquire(8).is_some());
     }
 
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        let waker = std::task::Waker::noop();
-        let mut context = std::task::Context::from_waker(waker);
-        let mut future = Box::pin(future);
-        loop {
-            match std::future::Future::poll(future.as_mut(), &mut context) {
-                std::task::Poll::Ready(output) => return output,
-                std::task::Poll::Pending => std::thread::yield_now(),
-            }
-        }
+    fn block_on<F: std::future::Future>(future: F, stage: &str) -> F::Output {
+        crate::tests::internal::bridge_wait::poll_before(
+            future,
+            stage,
+            std::time::Duration::from_secs(5),
+        )
     }
 }
