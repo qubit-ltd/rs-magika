@@ -53,7 +53,10 @@ fn run_ready<F: Future>(future: F) -> F::Output {
     let mut context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut polls = 0usize;
     loop {
+        polls += 1;
+        assert!(polls <= 100_000, "future exceeded the bounded poll count");
         match Future::poll(Pin::as_mut(&mut future), &mut context) {
             Poll::Ready(value) => return value,
             Poll::Pending => loop {
@@ -92,6 +95,39 @@ fn test_provider_input_helper_errors_are_displayable() {
         "invalid provider input",
         invalid_input("invalid provider input").to_string()
     );
+}
+
+#[test]
+fn test_legacy_async_provider_yields_after_sixty_four_ready_one_byte_ranges() {
+    let content: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+    let provider = ProviderFileSystemSpi::new(content.clone())
+        .with_range()
+        .with_max_read_range_bytes(1);
+    let observations = provider.observations();
+    let file_system = provider.async_file_system();
+    let path = Path::parse("/cooperative-legacy").unwrap();
+    let mut output = vec![0; content.len()];
+    let mut observer = NoopReadObserver;
+    let mut future = Box::pin(read_async_segments_observed(
+        &file_system,
+        &path,
+        None,
+        &mut output,
+        0,
+        1,
+        &mut observer,
+    ));
+    let wake = Arc::new(ThreadWake {
+        thread: std::thread::current(),
+        notified: AtomicBool::new(false),
+    });
+    let waker = std::task::Waker::from(wake);
+    let mut context = Context::from_waker(&waker);
+
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert_eq!(64, observations.opens.load(std::sync::atomic::Ordering::SeqCst));
+    run_ready(future).expect("cooperative reads should eventually fill the request");
+    assert_eq!(content, output);
 }
 
 #[test]

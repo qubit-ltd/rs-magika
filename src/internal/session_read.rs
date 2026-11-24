@@ -8,7 +8,12 @@
 
 //! Exact reads from Magika's opened random-access sessions.
 
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::task::Poll;
 
 use magika::Result as MagikaResult;
 use qubit_fs::error::FsEffectState;
@@ -20,6 +25,8 @@ use qubit_fs::read::RandomAccessReader;
 mod internal;
 
 use self::internal::SessionReadStopped;
+use super::cooperative_read::READ_STEPS_PER_POLL;
+use super::cooperative_read::yield_once;
 use super::provider_input::invalid_input;
 use super::provider_input::validate_request;
 use super::read_budget::ReadBudget;
@@ -128,51 +135,48 @@ async fn read_async_at_retry(
     offset: u64,
     output: &mut [u8],
     should_stop: &impl Fn() -> bool,
+    completed_steps: &mut usize,
+    io_in_flight: Option<&AtomicBool>,
 ) -> io::Result<usize> {
     let mut retries = 0;
     loop {
         if should_stop() {
             return Err(session_read_stopped_io_error());
         }
-        match reader.read_at(offset, output).await {
+        let mut read = Box::pin(reader.read_at(offset, output));
+        let result = std::future::poll_fn(|context| {
+            if let Some(io_in_flight) = io_in_flight {
+                io_in_flight.store(true, Ordering::Release);
+            }
+            match Pin::as_mut(&mut read).poll(context) {
+                Poll::Ready(result) => {
+                    if let Some(io_in_flight) = io_in_flight {
+                        io_in_flight.store(false, Ordering::Release);
+                    }
+                    *completed_steps += 1;
+                    Poll::Ready(result)
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+        match result {
             Err(error)
                 if error.kind() == FsErrorKind::Interrupted
                     && matches!(error.effect_state(), None | Some(FsEffectState::Unchanged))
                     && retries < MAX_CONSECUTIVE_INTERRUPTED_RETRIES =>
             {
                 retries += 1;
+                if *completed_steps >= READ_STEPS_PER_POLL {
+                    *completed_steps = 0;
+                    yield_once().await;
+                }
                 continue;
             }
             Err(error) => return Err(error.into_io_error()),
             Ok(count) => return Ok(count),
         }
     }
-}
-
-/// Asynchronous counterpart to [`read_sync_session`].
-///
-/// # Parameters
-///
-/// * `reader` - Asynchronous reader retaining the opened resource.
-/// * `length` - Logical resource length captured when the reader was opened.
-/// * `budget` - Per-detection cumulative byte budget.
-/// * `buffer` - Destination for the requested resource bytes.
-/// * `offset` - Start offset of the requested range.
-/// * `max_segment` - Optional maximum byte count for one session read.
-///
-/// # Errors
-///
-/// Returns an I/O error when validation or budget reservation fails, the
-/// provider returns a short range, or a session read fails.
-pub(crate) async fn read_async_session(
-    reader: &mut AsyncRandomAccessReader,
-    length: u64,
-    budget: &mut ReadBudget,
-    buffer: &mut [u8],
-    offset: u64,
-    max_segment: Option<usize>,
-) -> MagikaResult<()> {
-    read_async_session_with_stop(reader, length, budget, buffer, offset, max_segment, || false).await
 }
 
 /// Asynchronous session read that checks for cancellation between provider
@@ -191,6 +195,7 @@ pub(crate) async fn read_async_session(
 /// * `offset` - Start offset of the requested range.
 /// * `max_segment` - Optional maximum byte count for one session read.
 /// * `should_stop` - Predicate reporting whether the owning request stopped.
+/// * `io_in_flight` - Optional marker set while a provider read is pending.
 ///
 /// # Returns
 ///
@@ -209,6 +214,7 @@ pub(crate) async fn read_async_session_with_stop(
     offset: u64,
     max_segment: Option<usize>,
     should_stop: impl Fn() -> bool,
+    io_in_flight: Option<&AtomicBool>,
 ) -> MagikaResult<()> {
     validate_request(length, budget, buffer.len(), offset)?;
     let segment_limit = max_segment.unwrap_or(usize::MAX);
@@ -216,6 +222,7 @@ pub(crate) async fn read_async_session_with_stop(
         return Err(invalid_input("provider range limit does not permit a nonempty read").into());
     }
     let mut filled = 0;
+    let mut completed_steps = 0;
     while filled < buffer.len() {
         if should_stop() {
             return Err(session_read_stopped_io_error().into());
@@ -224,11 +231,23 @@ pub(crate) async fn read_async_session_with_stop(
         let read_offset = offset
             .checked_add(filled as u64)
             .ok_or_else(|| invalid_input("provider input offset overflow"))?;
-        let count = read_async_at_retry(reader, read_offset, &mut buffer[filled..filled + step], &should_stop).await?;
+        let count = read_async_at_retry(
+            reader,
+            read_offset,
+            &mut buffer[filled..filled + step],
+            &should_stop,
+            &mut completed_steps,
+            io_in_flight,
+        )
+        .await?;
         if count == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "provider returned a short range").into());
         }
         filled += count;
+        if filled < buffer.len() && completed_steps >= READ_STEPS_PER_POLL {
+            completed_steps = 0;
+            yield_once().await;
+        }
     }
     Ok(())
 }

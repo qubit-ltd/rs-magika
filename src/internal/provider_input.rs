@@ -22,6 +22,8 @@ use qubit_mime::MimeError;
 mod internal;
 
 use self::internal::ObservedReadStopped;
+use super::cooperative_read::READ_STEPS_PER_POLL;
+use super::cooperative_read::yield_once;
 use super::read_budget::ReadBudget;
 
 /// Reads exactly one Magika range through a synchronous provider.
@@ -217,6 +219,7 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
         return Err(invalid_input("provider maximum read range is zero").into());
     }
     let mut completed = 0;
+    let mut completed_steps = 0;
     while completed < buffer.len() {
         let segment_length = (buffer.len() - completed).min(max_segment);
         let segment_offset = offset
@@ -239,6 +242,11 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
         };
         copy_exact(&mut buffer[completed..completed + segment_length], bytes)?;
         completed += segment_length;
+        completed_steps += 1;
+        if completed < buffer.len() && completed_steps >= READ_STEPS_PER_POLL {
+            completed_steps = 0;
+            yield_once().await;
+        }
     }
     Ok(())
 }

@@ -19,6 +19,17 @@ pub(crate) fn wake(waker: Waker) {
     drop_panic_payload(payload);
 }
 
+/// Wakes a task by reference while containing external waker panics.
+///
+/// Returns whether the external waker completed without panicking.
+pub(crate) fn wake_by_ref(waker: &Waker) -> bool {
+    let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| waker.wake_by_ref())) else {
+        return true;
+    };
+    drop_panic_payload(payload);
+    false
+}
+
 /// Wakes every task, continuing after a faulty external waker.
 pub(crate) fn wake_all(wakers: impl IntoIterator<Item = Waker>) {
     for waker in wakers {
@@ -46,6 +57,7 @@ mod tests {
     use std::task::Waker;
 
     use super::wake_all;
+    use super::wake_by_ref;
 
     struct PayloadProbe(Arc<AtomicUsize>);
 
@@ -82,5 +94,13 @@ mod tests {
         ]);
         assert_eq!(1, payload_drops.load(Ordering::SeqCst));
         assert_eq!(1, normal_wakes.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn wake_by_ref_contains_panicking_waker_and_payload_destructor() {
+        let payload_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(PanickingWake(Arc::clone(&payload_drops))));
+        assert!(!wake_by_ref(&waker));
+        assert_eq!(1, payload_drops.load(Ordering::SeqCst));
     }
 }
