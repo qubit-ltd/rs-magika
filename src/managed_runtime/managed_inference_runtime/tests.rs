@@ -63,6 +63,57 @@ fn test_snapshot_idle() {
 }
 
 #[test]
+fn test_snapshot_and_shutdown_recover_poisoned_runtime_locks() {
+    let runtime = borrowed_test_runtime(17);
+
+    let poisoned_tasks = Arc::clone(&runtime);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poisoned_tasks.tasks.lock().unwrap();
+            panic!("poison task registry before snapshot");
+        })
+        .join()
+        .is_err()
+    );
+    let poisoned_gate = Arc::clone(&runtime);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poisoned_gate.admission_gate.lock().unwrap();
+            panic!("poison admission gate before snapshot");
+        })
+        .join()
+        .is_err()
+    );
+    let poisoned_sender = Arc::clone(&runtime);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poisoned_sender.sender.lock().unwrap();
+            panic!("poison request sender before shutdown");
+        })
+        .join()
+        .is_err()
+    );
+    let poisoned_worker = Arc::clone(&runtime);
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = poisoned_worker.worker.lock().unwrap();
+            panic!("poison worker slot before shutdown");
+        })
+        .join()
+        .is_err()
+    );
+
+    let snapshot = runtime.snapshot();
+    assert_eq!(0, snapshot.admitted_not_started);
+    assert_eq!(0, snapshot.awaiting_release);
+    assert!(!snapshot.admission_closed);
+
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+    assert!(!report.worker_panicked);
+}
+
+#[test]
 fn test_snapshot_classifies_admitted_running_and_awaiting_release() {
     let runtime = borrowed_test_runtime(17);
     let admitted = Arc::new(super::super::task_state::TaskState::new(1, None));
