@@ -11,6 +11,7 @@ ORT_FORBIDDEN = (
     "download-binaries",
     "copy-dylibs",
     "download-binaries-check",
+    "alternative-backend",
     "tls-rustls",
     "tls-rustls-no-provider",
     "tls-native",
@@ -119,18 +120,16 @@ def ort_link_graph_violations(metadata: dict[str, Any], mode: str) -> list[str]:
 
 def check_dynamic_metadata(metadata: dict[str, Any]) -> list[str]:
     errors = ort_link_graph_violations(metadata, "dynamic")
-    packages, _ = _reachable_nodes(metadata)
-    if any(package.get("name") == "qubit-magika" for package in packages.values()):
-        try:
-            magika_id, magika_features = _one(metadata, "qubit-magika")
-        except ValueError as error:
-            errors.append(f"dynamic Cargo graph: {error}")
-        else:
-            if "bundled-onnxruntime" in magika_features:
-                errors.append(
-                    f"dynamic qubit-magika {magika_id} features {sorted(magika_features)}: "
-                    "forbidden bundled-onnxruntime"
-                )
+    try:
+        magika_id, magika_features = _one(metadata, "qubit-magika")
+    except ValueError as error:
+        errors.append(f"dynamic Cargo graph: {error}")
+    else:
+        if "bundled-onnxruntime" in magika_features:
+            errors.append(
+                f"dynamic qubit-magika {magika_id} features {sorted(magika_features)}: "
+                "forbidden bundled-onnxruntime"
+            )
     return errors
 
 
@@ -145,11 +144,33 @@ def dynamic_ort_feature_violations(features: set[str] | list[str] | tuple[str, .
 
 def run_self_tests() -> None:
     def graph(ort_features: list[str], sys_features: list[str]) -> dict[str, Any]:
-        ids = {"app": "path+app#0.1.0", "ort": "registry+ort#2", "sys": "registry+ort-sys#2"}
-        packages = [{"id": ids[key], "name": "qubit-app" if key == "app" else ("ort" if key == "ort" else "ort-sys")} for key in ids]
+        ids = {
+            "app": "path+app#0.1.0",
+            "magika": "path+qubit-magika#0.18",
+            "ort": "registry+ort#2",
+            "sys": "registry+ort-sys#2",
+        }
+        names = {"app": "qubit-app", "magika": "qubit-magika", "ort": "ort", "sys": "ort-sys"}
+        packages = [{"id": ids[key], "name": names[key]} for key in ids]
         nodes = [
-            {"id": ids["app"], "features": [], "deps": [{"name": "ort", "pkg": ids["ort"], "dep_kinds": [{"kind": None, "target": None}]}]},
-            {"id": ids["ort"], "features": ort_features, "deps": [{"name": "ort_sys", "pkg": ids["sys"], "dep_kinds": [{"kind": None, "target": None}]}]},
+            {
+                "id": ids["app"],
+                "features": [],
+                "deps": [
+                    {"name": "ort", "pkg": ids["ort"], "dep_kinds": [{"kind": None, "target": None}]},
+                    {
+                        "name": "qubit_magika",
+                        "pkg": ids["magika"],
+                        "dep_kinds": [{"kind": None, "target": None}],
+                    },
+                ],
+            },
+            {"id": ids["magika"], "features": [], "deps": []},
+            {
+                "id": ids["ort"],
+                "features": ort_features,
+                "deps": [{"name": "ort_sys", "pkg": ids["sys"], "dep_kinds": [{"kind": None, "target": None}]}],
+            },
             {"id": ids["sys"], "features": sys_features, "deps": []},
         ]
         return {"packages": packages, "resolve": {"root": ids["app"], "nodes": nodes}}
@@ -157,6 +178,9 @@ def run_self_tests() -> None:
     dynamic = graph(["load-dynamic"], ["disable-linking"])
     assert not check_dynamic_metadata(dynamic)
     assert not ort_link_graph_violations(graph(["download-binaries"], ["download-binaries"]), "bundled")
+    alternative_backend = graph(["load-dynamic", "alternative-backend"], ["disable-linking"])
+    errors = check_dynamic_metadata(alternative_backend)
+    assert errors and "forbidden alternative-backend" in " ".join(errors)
     for invalid in (
         graph(["load-dynamic"], ["disable-linking", "download-binaries"]),
         graph(["load-dynamic"], ["disable-linking", "tls-rustls"]),
@@ -177,12 +201,15 @@ def run_self_tests() -> None:
     errors = check_dynamic_metadata(ambiguous)
     assert errors and "expected one reachable ort package identity" in " ".join(errors)
     bundled_magika = graph(["load-dynamic"], ["disable-linking"])
-    bundled_magika["packages"].append({"id": "path+qubit-magika#0.18", "name": "qubit-magika"})
-    bundled_magika["resolve"]["nodes"].append({
-        "id": "path+qubit-magika#0.18", "features": ["bundled-onnxruntime"], "deps": []
-    })
-    bundled_magika["resolve"]["nodes"][0]["deps"].append({
-        "name": "qubit_magika", "pkg": "path+qubit-magika#0.18", "dep_kinds": [{"kind": None, "target": None}]
-    })
+    magika_node = next(
+        node for node in bundled_magika["resolve"]["nodes"] if node["id"] == "path+qubit-magika#0.18"
+    )
+    magika_node["features"].append("bundled-onnxruntime")
     errors = check_dynamic_metadata(bundled_magika)
     assert errors and "bundled-onnxruntime" in " ".join(errors)
+    missing_magika = graph(["load-dynamic"], ["disable-linking"])
+    missing_magika["resolve"]["nodes"][0]["deps"] = [
+        dep for dep in missing_magika["resolve"]["nodes"][0]["deps"] if dep["pkg"] != "path+qubit-magika#0.18"
+    ]
+    errors = check_dynamic_metadata(missing_magika)
+    assert errors and "expected one reachable qubit-magika package identity" in " ".join(errors)
