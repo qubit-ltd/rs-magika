@@ -14,10 +14,17 @@ selection or MIME policy.
 
 There are two separate startup decisions:
 
-1. Register `MagikaMimeDetectorProvider` with the global
-   `MimeDetectorRegistry` and select the provider name `magika`.
+1. Keep an application-owned `MimeDetectorRegistry`, register
+   `MagikaMimeDetectorProvider`, and select the provider name `magika`.
 2. Create a detector with `MimeConfig`, which controls the surrounding
    `qubit-mime` selection and refinement behavior.
+
+For explicit registration, create an isolated registry with
+`MimeDetectorRegistry::default()` and retain it in application state. With the
+`inventory` feature, `MimeDetectorRegistry::builtin()` also discovers the
+linked `magika` provider; `MimeDetectorRegistry::global()` is the process-wide
+registry. In both inventory registries, `repository` remains the default
+selection. Avoid registering the inventory-submitted provider a second time.
 
 The detector uses repository filename rules for filename-only detection and
 Magika inference for content, reader, and local-file detection. Creating a
@@ -33,14 +40,26 @@ media-stream classifier must still be constructed and registered explicitly.
 Reference the crate in the application with `use qubit_magika as _;` so its
 inventory submission is linked.
 
-The `qubit-mime` async provider registry selects and constructs an
-`AsyncMimeDetectorBackend`; its async hooks still do not receive a parent
-operation scope. Inventory only registers a provider with that registry. Use
-the explicit managed API when application code must attach provider sampling to
-an operation scope. To reproduce the tested local dependency layout, run
-[`prepare-local-path-dependencies.sh --check-locked`](../.infra/bin/prepare-local-path-dependencies.sh)
-and follow the fixed revisions in
-[`local-path-dependencies.tsv`](../.infra/ci/local-path-dependencies.tsv).
+The async provider registry is a separate capability: this inventory entry is
+a synchronous factory, so selecting `magika` with
+`MimeDetectorRegistry::create_async_backend` returns
+`MimeError::AsyncUnsupported`. This does not remove the legacy async hooks on
+`MimeDetector`; those hooks can run worker inference or provider reads but do
+not accept a parent operation scope. Use the explicit managed API when
+application code must attach provider sampling to an operation scope.
+
+The source checkout includes dependency preparation helpers that are not
+included in the published crate. To prepare missing sibling checkouts, run
+[`prepare-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)
+without arguments. Preparation leaves any existing Git checkout untouched,
+even when its revision or working tree differs from the lock file. To verify
+already prepared checkouts without changing them, run
+[`prepare-local-path-dependencies.sh --check-locked`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)
+and compare against the fixed revisions in
+[`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv).
+The check reports a missing, dirty, or wrong-revision checkout; it does not
+repair or replace it. Review and resolve drift deliberately. Linux preparation
+uses GNU `mv -Tn` when publishing a newly prepared checkout.
 
 ## Scenario
 
@@ -80,17 +99,22 @@ use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{MimeConfig, MimeDetector, MimeDetectorRegistry};
 use qubit_spi::ProviderSelection;
 
-fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
-    let registry = MimeDetectorRegistry::global();
+fn create_registry() -> Result<MimeDetectorRegistry, Box<dyn Error>> {
+    let registry = MimeDetectorRegistry::default();
     registry.register(MagikaMimeDetectorProvider::new())?;
+    Ok(registry)
+}
+
+fn create_detector(registry: &MimeDetectorRegistry) -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let selection = ProviderSelection::named("magika")?;
-    registry
-        .set_default_selection(selection.clone())
-        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
     Ok(provider.create_configured(&MimeConfig::default())?)
 }
 ```
+
+Call both functions during startup and keep the registry alongside the shared
+detector. This lets application code resolve the provider later without
+depending on process-global registry state.
 
 Use the resulting detector for content and filename checks:
 
@@ -220,7 +244,7 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 <!-- managed-dependencies-end -->
 
 Create the runtime during application startup and register a configured
-provider explicitly:
+provider in an isolated registry explicitly:
 
 <!-- provider-runtime-example-start -->
 ```rust
@@ -231,27 +255,31 @@ use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
 use qubit_mime::{MimeConfig, MimeDetectorRegistry};
 use qubit_operation::{ManagerOptions, OperationManager};
 
-fn register_provider() -> Result<Arc<ManagedInferenceRuntime>, Box<dyn Error>> {
+fn register_provider() -> Result<(MimeDetectorRegistry, Arc<ManagedInferenceRuntime>), Box<dyn Error>> {
     let manager = OperationManager::new(ManagerOptions::default())?;
     let runtime = Arc::new(ManagedInferenceRuntime::new(
         manager,
         MimeConfig::default().max_buffer_size(),
     )?);
-    MimeDetectorRegistry::global().register(
+    let registry = MimeDetectorRegistry::default();
+    registry.register(
         MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)),
     )?;
-    Ok(runtime)
+    Ok((registry, runtime))
 }
 ```
 <!-- provider-runtime-example-end -->
 
-Keep the returned `Arc` for the application lifetime and shut the runtime down
-after detectors stop accepting requests. Detectors created by this provider
-share its worker, request capacity, byte budget, and shutdown domain. The
-runtime byte budget must cover each detector's configured `max_buffer_size`.
-Inventory submits only `MagikaMimeDetectorProvider::new()` without a runtime;
-register a configured provider explicitly when sharing an application-owned
-runtime.
+Keep both returned values in application state. Resolve `magika` from the
+returned registry with `resolve_selected`, then call
+`create_configured(&MimeConfig)`; do not discard the registry after
+registration. Shut the runtime down after detectors stop accepting requests.
+Detectors created by this provider share its worker, request capacity, byte
+budget, and shutdown domain. The runtime byte budget must cover each detector's
+configured `max_buffer_size`. Inventory submits only
+`MagikaMimeDetectorProvider::new()` without a runtime; register a configured
+provider explicitly in an independent registry when sharing an
+application-owned runtime.
 
 ## Custom ONNX Runtime Configuration
 
@@ -292,7 +320,7 @@ execution-provider libraries are discoverable by the dynamic loader. The
 `ort`) API is used; the environment is process-global and can only be
 committed once.
 
-The [`dynamic-loader` job in the repository's Linux CI](../.github/workflows/ci.yml)
+The [`dynamic-loader` job in the repository's Linux CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
 checks this setup with ONNX Runtime 1.24.2: it initializes the shared library,
 constructs a detector, and verifies that Python content is classified as
 `text/x-python`. The job checks the Cargo feature graph to ensure bundled runtime
@@ -349,6 +377,16 @@ lengths do not cap total process memory, including provider buffers and
 transient allocations. After shutdown, ruled sync inputs can still return
 directly; requests needing model inference use the closed runtime and fail.
 
+On ordinary completion, the legacy `guess_from_content_async` hook waits for
+its internal operation to settle before returning. Runtime `Cancel` can end
+that business wait early with an error while the worker still owns its input
+and byte capacity; the hook has no parent-scope observer for checking release.
+The legacy async provider-path hook returns the internal child business result
+without exposing a settlement observer. Runtime `Cancel` may return its stop
+error while a provider's native or remote I/O remains unconfirmed. Use the
+explicit managed APIs when the application needs to distinguish a result from
+resource release.
+
 The async content hook returns the backend's raw Magika candidate list, like
 the synchronous content hook. It does not apply high-level MIME selection or
 media refinement. Once accepted, it accounts for the owned input against the
@@ -370,6 +408,14 @@ each observation deadline. `ManagerOptions::default()` has no clock, so
 `wait_settlement_until` would otherwise return `ClockUnavailable`.
 The caller also supplies `wait_ticks`, converted from the desired wait duration
 using that clock's documented tick scale; this value is not seconds.
+
+`MagikaMimeDetectorBuilder::operation_manager` binds the detector runtime to
+the application's manager. For an already owned byte buffer, call
+`detect_bytes_managed(&scope, bytes)`; for provider-backed data, call
+`detect_async_provider_path_managed(&scope, file_system, path, max_bytes)`.
+Both APIs associate admitted work with the supplied scope. The legacy
+`MimeDetector` hooks do not take a scope, even when they perform asynchronous
+work.
 
 <!-- managed-guide-example-start -->
 ```rust,no_run
@@ -509,9 +555,11 @@ reserves runtime capacity and this byte budget, then commits the optional scope
 child before the first provider `open`, `stat`, `read_all`, `length`, or range-read
 call. A closed runtime, full capacity, or cancelled scope is rejected before
 those provider calls. The `read_all` fallback transfers its buffer to the
-worker instead of making another full-size copy. Sampling and inference run on
-the session-owning worker; async provider reads are serviced by the operation
-future without blocking its executor.
+worker without an explicit second full-size clone. The worker converts the
+owned `Vec` with `into_boxed_slice`; that conversion may reallocate to trim
+unused capacity, so this is not a zero-allocation guarantee. Sampling and
+inference run on the session-owning worker; async provider reads are serviced
+by the operation future without blocking its executor.
 
 Provider future cancellation has a narrower meaning than native I/O
 cancellation. The `rs-fs` contract says dropping a pending provider future
@@ -530,9 +578,12 @@ applies to both scope-managed and scope-less provider entry points.
 
 The child business outcome is independent of resource release. Successful
 inference reports `Succeeded`; a worker error reports `Failed` while the
-caller receives the original error, and a worker panic reports
-`Panicked`. The terminal child result remains observable after the caller
-consumes the result and after resources are released.
+caller receives the original error. A worker inference panic caught by the
+runtime is also exposed as `Failed(MimeError)`; the runtime snapshot sets
+`faulted`. The shutdown report's `worker_panicked` flag instead records an
+uncaught panic observed while joining the worker. The terminal child result
+remains observable after the caller consumes it and after resources are
+released.
 After a worker panic, the runtime closes admission, fails queued work with a
 backend error, and discards its session because Magika and ONNX Runtime do not
 document session recovery after an unwind. The runtime cannot be reused for

@@ -13,10 +13,15 @@
 
 应用启动时需要分别完成两件事：
 
-1. 把 `MagikaMimeDetectorProvider` 注册到全局 `MimeDetectorRegistry`，并选择
-   `magika` provider。
+1. 保留一个应用级 `MimeDetectorRegistry`，注册
+   `MagikaMimeDetectorProvider`，并选择 `magika` provider。
 2. 使用 `MimeConfig` 创建 detector；该配置负责 `qubit-mime` 周边的选择和结果
    优化行为。
+
+显式注册时，使用 `MimeDetectorRegistry::default()` 创建独立 registry，并将它保存在应用状态中。
+启用 `inventory` 后，`MimeDetectorRegistry::builtin()` 也会发现链接进来的 `magika`；
+`MimeDetectorRegistry::global()` 则是进程级 registry。两者的默认选择仍为 `repository`。
+如果 inventory 已经注册了 Magika provider，不要再向同一个 registry 重复注册。
 
 仅按文件名检测时使用仓库中的文件名规则；按内容、reader 或本地文件检测时使用
 Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runtime session。
@@ -28,12 +33,21 @@ inventory；`MimeDetectorRegistry::builtin()` 随后会包含 `magika`，但默�
 `repository`。配置媒体流分类器的 Provider 仍需显式构造和注册。
 应用中还应加入 `use qubit_magika as _;`，使 inventory 提交项参与链接。
 
-`qubit-mime` 的 async provider registry 负责选择并创建
-`AsyncMimeDetectorBackend`，但其 async hooks 仍不会收到 parent operation scope。
-Inventory 只向该 registry 注册 Provider。应用若要把 Provider 采样挂到某个 operation
-scope，需显式调用 managed API。复现本文所用的固定本地依赖布局时，可运行
-[`prepare-local-path-dependencies.sh --check-locked`](../.infra/bin/prepare-local-path-dependencies.sh)，
-并按 [`local-path-dependencies.tsv`](../.infra/ci/local-path-dependencies.tsv) 核对固定版本。
+MIME 异步 provider registry 与旧的 async hooks 是两种能力。inventory 提交的是同步工厂，
+因此通过 `MimeDetectorRegistry::create_async_backend` 选择 `magika` 会得到
+`MimeError::AsyncUnsupported`。旧的 `MimeDetector` async hooks 可以异步等待 worker 推理或
+Provider 读取，但不接收 parent operation scope。应用若要把 Provider 采样挂到某个 scope，
+需显式调用 managed API。
+
+发布的 crate 不包含源码仓库里的依赖准备脚本。需要准备缺失的兄弟 checkout 时，可运行
+[`prepare-local-path-dependencies.sh`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)
+（不带参数）。准备脚本不会覆盖已有 Git checkout，即使其提交或工作区状态与锁定值不同。
+若 checkout 已存在，只做核对时运行
+[`prepare-local-path-dependencies.sh --check-locked`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/bin/prepare-local-path-dependencies.sh)，
+并对照固定提交清单
+[`local-path-dependencies.tsv`](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)。
+核对会报告缺失、脏状态或提交不符，但不会修复或替换现有目录；请先检查漂移，再决定如何处理。
+Linux 准备流程发布新 checkout 时使用 GNU `mv -Tn`。
 
 ## 贯穿场景
 
@@ -69,17 +83,21 @@ use qubit_magika::MagikaMimeDetectorProvider;
 use qubit_mime::{MimeConfig, MimeDetector, MimeDetectorRegistry};
 use qubit_spi::ProviderSelection;
 
-fn create_detector() -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
-    let registry = MimeDetectorRegistry::global();
+fn create_registry() -> Result<MimeDetectorRegistry, Box<dyn Error>> {
+    let registry = MimeDetectorRegistry::default();
     registry.register(MagikaMimeDetectorProvider::new())?;
+    Ok(registry)
+}
+
+fn create_detector(registry: &MimeDetectorRegistry) -> Result<Arc<dyn MimeDetector>, Box<dyn Error>> {
     let selection = ProviderSelection::named("magika")?;
-    registry
-        .set_default_selection(selection.clone())
-        .expect("default selection should be valid");
     let provider = registry.resolve_selected(&selection)?;
     Ok(provider.create_configured(&MimeConfig::default())?)
 }
 ```
+
+应用启动时调用这两个函数，并将 registry 与共享 detector 一起保存在应用状态中。
+后续组件可以从该 registry 解析 provider，无需依赖进程级全局状态。
 
 使用这个 detector 分别检测内容和文件名：
 
@@ -176,7 +194,7 @@ qubit-fs = { version = "0.4", default-features = false, features = ["async"] }
 ```
 <!-- managed-dependencies-end -->
 
-在应用启动时创建 runtime，并显式注册已配置的 Provider：
+在应用启动时创建 runtime，并将已配置的 Provider 显式注册到独立 registry：
 
 <!-- provider-runtime-example-start -->
 ```rust
@@ -187,25 +205,27 @@ use qubit_magika::{MagikaMimeDetectorProvider, ManagedInferenceRuntime};
 use qubit_mime::{MimeConfig, MimeDetectorRegistry};
 use qubit_operation::{ManagerOptions, OperationManager};
 
-fn register_provider() -> Result<Arc<ManagedInferenceRuntime>, Box<dyn Error>> {
+fn register_provider() -> Result<(MimeDetectorRegistry, Arc<ManagedInferenceRuntime>), Box<dyn Error>> {
     let manager = OperationManager::new(ManagerOptions::default())?;
     let runtime = Arc::new(ManagedInferenceRuntime::new(
         manager,
         MimeConfig::default().max_buffer_size(),
     )?);
-    MimeDetectorRegistry::global().register(
+    let registry = MimeDetectorRegistry::default();
+    registry.register(
         MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)),
     )?;
-    Ok(runtime)
+    Ok((registry, runtime))
 }
 ```
 <!-- provider-runtime-example-end -->
 
-应用应在整个生命周期内保留返回的 `Arc`，并在 detector 停止接收请求后关闭
-runtime。该 Provider 创建的 detector 共享同一 worker、请求容量、字节预算和关闭域。
-runtime 字节预算必须覆盖每个 detector 配置的 `max_buffer_size`。Inventory 只提交不带
-runtime 的 `MagikaMimeDetectorProvider::new()`；需要共享应用 runtime 时，应显式注册配置后的
-Provider。
+应用应在整个生命周期内保留返回的 registry 和 `Arc` runtime。随后从该 registry 调用
+`resolve_selected` 选择 `magika`，再用 `create_configured(&MimeConfig)` 创建 detector；不要在注册后
+丢弃 registry。detector 停止接收请求后再关闭 runtime。该 Provider 创建的 detector 共享同一 worker、
+请求容量、字节预算和关闭域。runtime 字节预算必须覆盖每个 detector 配置的
+`max_buffer_size`。Inventory 只提交不带 runtime 的 `MagikaMimeDetectorProvider::new()`；需要共享
+应用 runtime 时，应在独立 registry 中显式注册配置后的 Provider。
 
 ## Media refinement 支持范围
 
@@ -260,7 +280,7 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
 系统加载器找到。`ort::init_from` 必须早于第一个 detector（或其他 `ort` API）调用；
 该环境是进程级全局状态，只能 commit 一次。
 
-仓库 Linux CI 的[`dynamic-loader` job](../.github/workflows/ci.yml)使用 ONNX Runtime
+仓库 Linux CI 的[`dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)使用 ONNX Runtime
 1.24.2 验证这条动态加载路径：先初始化共享库，再创建 detector，并确认 Python 内容识别为
 `text/x-python`。该 job 还检查 Cargo feature 图，确认未启用 bundled runtime 下载。
 `ORT_LIBRARY_PATH` 必须指向共享库文件本身，而不是所在目录。
@@ -297,6 +317,12 @@ runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由
 和共享 runtime 预算。Provider `max_bytes` 是累计逻辑采样和回退读取预算。这些逻辑预算和复制的
 payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
 分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
+
+正常完成时，旧的 `guess_from_content_async` hook 会等内部操作结算后再返回。若 runtime 以
+`Cancel` 关闭，业务 future 可能先收到错误并结束等待，但 worker 仍可能持有输入和字节容量；该
+hook 没有 parent scope observer 可供调用方确认释放。旧的 async provider-path hook 只返回内部子操作
+的业务结果，不提供结算观察器。runtime `Cancel` 可能先返回停止错误，但 Provider 的 native 或远端
+I/O 仍无法确认结束。需要区分业务结果和资源释放时，应使用显式 managed API。
 
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
 选择或媒体细化。输入受理后会按 owned payload 计入共享 runtime 聚合字节预算；即使仓库规则原本
@@ -438,7 +464,9 @@ runtime 关闭后，可调用 `detector.runtime_snapshot()` 查看共享运行�
 runtime 会先预留容量和字节预算，再提交可选的 scope 子操作，然后才调用 Provider 的
 `open`、`stat`、`read_all`、`length` 或范围读取。runtime 已关闭、容量已满或 scope
 已取消时，会在 Provider 调用前拒绝请求。`read_all` 回退会把已读缓冲区直接交给 worker，
-不再复制一份完整数据。运行时构造时会创建 session-owning worker 并等待 Magika Session 初始化完成，因此
+不会主动再克隆一份完整数据。worker 会将拥有数据的 `Vec` 转为 `Box<[u8]>`；若需要收缩未使用容量，
+`into_boxed_slice` 仍可能重新分配，因此不能据此承诺零分配。运行时构造时会创建 session-owning
+worker 并等待 Magika Session 初始化完成，因此
 当前没有额外的 `prepare()` API；builder 的 `build()` 就是准备阶段。采样工作在 worker
 上运行，async operation future 负责服务范围读取，不会阻塞执行器线程。
 
@@ -458,8 +486,10 @@ runtime/字节容量会保持 `Pending`，甚至可能一直如此。调用方�
 managed 和 scope-less provider 入口都遵循此生命周期。
 
 子操作的业务结果与资源释放是两件事。推理成功记录为 `Succeeded`；worker 返回错误时记录
-`Failed`，调用方仍会收到原始错误；worker panic 则记录为 `Panicked`。即使调用方已经
-取走结果、资源也已释放，终态结果仍可从子操作状态中读取。
+`Failed`，调用方仍会收到原始错误。runtime 捕获推理 worker panic 后，也会将公开的 managed
+子操作结果记为 `Failed(MimeError)`，并在 runtime snapshot 中设置 `faulted`。shutdown report
+的 `worker_panicked` 则表示 join worker 时观察到未捕获 panic。即使调用方已经取走结果、资源也已
+释放，终态结果仍可从子操作状态中读取。
 
 worker panic 后，runtime 会关闭新请求准入，将排队任务以 backend 错误终结，并丢弃
 session；Magika 与 ONNX Runtime 均未说明 unwind 后可安全恢复 session。该 runtime 不能再用于
