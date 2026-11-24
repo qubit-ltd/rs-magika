@@ -1148,14 +1148,10 @@ fn test_range_runtime_cancel_is_observable_at_driver_wait_boundaries() {
         state.wait_stopped(),
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !bridge.wait_for_test_waiters(0, 1, Duration::from_millis(1)) {
-        assert!(driver.as_mut().poll(&mut context).is_pending());
-        assert!(
-            std::time::Instant::now() < deadline,
-            "worker request was not delivered to driver"
-        );
-        std::thread::park_timeout(Duration::from_millis(1));
-    }
+    assert!(
+        bridge.wait_for_test_waiters(0, 1, deadline.saturating_duration_since(std::time::Instant::now())),
+        "worker request was not published before driver polling"
+    );
     let rejected = loop {
         if let Poll::Ready(result) = driver.as_mut().poll(&mut context) {
             break Some(result);
