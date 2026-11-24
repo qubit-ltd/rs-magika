@@ -16,8 +16,10 @@ use crate::managed_runtime::task_state::TaskState;
 
 /// Keeps the provider input and bridge driver alive until sampling has ended.
 ///
-/// If a provider read was pending when this guard is dropped, completion of
-/// provider-native work is unknown and the driver remains reported as active.
+/// On drop, the provider input and bridge driver are destroyed locally and
+/// driver completion is published. If provider I/O was still pending, its
+/// native completion remains unknown, so request capacity stays reserved even
+/// though the local future, input, and driver have been dropped.
 ///
 /// # Type Parameters
 ///
@@ -46,7 +48,9 @@ impl<I> ProviderDriverGuard<I> {
     ///
     /// # Returns
     ///
-    /// A guard that releases the input and driver when sampling completes.
+    /// A guard that owns the input and driver until sampling ends, then drops
+    /// both locally before publishing driver completion. Unconfirmed provider
+    /// I/O is reported separately and keeps request capacity reserved.
     #[cfg(test)]
     pub(super) fn new(input: I, driver: AsyncSampleDriver, state: Arc<TaskState>) -> Self {
         Self::new_with_io_status(input, driver, state, None)
@@ -69,7 +73,9 @@ impl<I> ProviderDriverGuard<I> {
     /// # Returns
     ///
     /// A guard that retains input resources while provider I/O is unconfirmed
-    /// and releases them after confirmed completion.
+    /// and drops both local values before publishing driver completion. A
+    /// pending provider read remains unconfirmed; dropping its local future
+    /// does not establish native I/O completion.
     pub(super) fn new_with_io_status(
         input: I,
         driver: AsyncSampleDriver,
@@ -86,9 +92,11 @@ impl<I> ProviderDriverGuard<I> {
     }
 }
 
-/// Completes safe driver lifetimes and preserves unknown provider I/O.
+/// Destroys local input and driver values, then reports completion facts.
 impl<I> Drop for ProviderDriverGuard<I> {
-    /// Drops owned provider resources and records only confirmed completion.
+    /// Drops the input and driver before publishing driver completion. A
+    /// pending provider read is marked unconfirmed first; this notification
+    /// does not claim that its native operation completed.
     fn drop(&mut self) {
         if self
             .io_in_flight

@@ -52,6 +52,8 @@ pub(super) fn execute_classified<T>(work: impl FnOnce() -> MimeResult<T>) -> (Mi
 /// * `receiver` - Bounded queue of accepted jobs.
 /// * `gate` - Admission gate closed after an inference panic.
 /// * `infer` - Inference implementation for production or tests.
+/// * `on_fault` - Callback after the worker closes admission for a fault; it
+///   notifies affected provider tasks that were not queued to the worker.
 /// * `after_business` - Hook after result publication and bridge closure.
 /// * `before_exit` - Hook after the queue closes or a panic drains it.
 pub(super) fn run_worker(
@@ -73,8 +75,8 @@ pub(super) fn run_worker(
 /// * `gate` - Admission state synchronized with the queue.
 /// * `infer` - Inference operation run for each input.
 /// * `before_first_recv` - Hook called before receiving the first job.
-/// * `on_fault` - Callback after the worker fault is linearized with admission;
-///   it closes admission and publishes the fault to affected task states.
+/// * `on_fault` - Callback after the worker closes admission for a fault;
+///   it notifies affected provider tasks that were not queued to the worker.
 /// * `after_business` - Hook called after publishing each business result.
 /// * `before_exit` - Hook called before the worker exits.
 pub(super) fn run_worker_with_before_first_recv(

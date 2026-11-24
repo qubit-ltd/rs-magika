@@ -343,8 +343,12 @@ returned registry with `resolve_selected`, then call
 `create_configured(&MimeConfig)`; do not discard the registry after
 registration. Shut the runtime down after detectors stop accepting requests.
 Detectors created by this provider share its worker, request capacity, byte
-budget, and shutdown domain. The runtime byte budget must cover each detector's
-configured `max_buffer_size`. Inventory submits only
+budget, and shutdown domain. `ManagedInferenceRuntime::new` sets the aggregate
+`max_in_flight_bytes` limit across all detectors sharing that runtime; each
+detector's `MimeConfig::max_buffer_size` is a separate per-request limit. Set
+the aggregate limit to cover the combined payloads you expect to have in
+flight, and ensure it can admit a request at each detector's configured
+maximum. Inventory submits only
 `MagikaMimeDetectorProvider::new()` without a runtime; register a configured
 provider explicitly in an independent registry when sharing an
 application-owned runtime.
@@ -606,16 +610,20 @@ assumed to be seconds. `wait_settlement_until(deadline)` returns
 is a bounded observation, not a release confirmation. The deadline must come
 from the operation's clock domain. The example matches both variants and checks
 `all_released()` on a ready report. `Ready(report)` is terminal but can contain
-negative release evidence; preserve that report for recovery. `Pending(snapshot)`
-only means this wait reached its deadline, so callers may continue observing.
-Unknown provider I/O can produce a ready negative report with an unreleased
-resource. The built-in cleanup policy retains its capacity, and retrying that
-cleanup without new completion evidence produces another failure. Recovery
-must use the registered recovery policy/handle; resubmitting inference does not
-release the prior request. `shutdown_application` returns `DetectorPending` with the
+negative release evidence, including resources owned elsewhere in the scope;
+preserve that report for recovery. `Pending(snapshot)` only means this wait
+reached its deadline, so callers may continue observing. When this request's
+Provider I/O completion is unconfirmed, Magika retains its capacity and the
+scope can report an unreleased resource. Stopping the request still drops its
+local future, reader, and driver; that does not confirm native or remote I/O
+completion. The built-in cleanup policy cannot receive new completion evidence
+for discarded provider I/O, so retrying it cannot release that capacity. A
+`RecoveryHandle` can inspect the state, retry the registered policy, or transfer
+responsibility; resubmitting inference does not release the prior request.
+`shutdown_application` returns `DetectorPending` with the
 diagnostic report so the caller can retry detector shutdown before closing the
 manager. `ManagerPending` retains both its snapshot and handle for another
-`wait_for`; `Completed` carries the final manager report. Keep shutdown at a synchronous application
+`wait_for`; `ShutdownProgress::Complete` carries the final manager report. Keep shutdown at a synchronous application
 shutdown boundary. An async-only host should run that boundary on its own
 blocking executor facility after it stops admission and awaits active requests.
 

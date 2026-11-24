@@ -272,8 +272,10 @@ fn register_provider() -> Result<(MimeDetectorRegistry, Arc<ManagedInferenceRunt
 应用应在整个生命周期内保留返回的 registry 和 `Arc` runtime。随后从该 registry 调用
 `resolve_selected` 选择 `magika`，再用 `create_configured(&MimeConfig)` 创建 detector；不要在注册后
 丢弃 registry。detector 停止接收请求后再关闭 runtime。该 Provider 创建的 detector 共享同一 worker、
-请求容量、字节预算和关闭域。runtime 字节预算必须覆盖每个 detector 配置的
-`max_buffer_size`。Inventory 只提交不带 runtime 的 `MagikaMimeDetectorProvider::new()`；需要共享
+请求容量、字节预算和关闭域。`ManagedInferenceRuntime::new` 设置的
+`max_in_flight_bytes` 是所有共享该 runtime 的 detector 共用的聚合上限；每个 detector 的
+`MimeConfig::max_buffer_size` 则是单请求上限。聚合值应能容纳预期同时在途的 payload 总量，也应足以单独接纳
+每个 detector 按配置上限发起的请求。Inventory 只提交不带 runtime 的 `MagikaMimeDetectorProvider::new()`；需要共享
 应用 runtime 时，应在独立 registry 中显式注册配置后的 Provider。
 
 ## Media refinement 支持范围
@@ -497,12 +499,13 @@ fn shutdown_application(
 `Result<SettlementWait, ObservationError>`。`SettlementWait::Pending(snapshot)` 只表示
 本次有界观察结束，不能证明资源已释放。截止时间必须来自 operation 使用的 clock domain。
 示例显式匹配 Ready 和 Pending，并在 Ready 时检查 `all_released()`。`Ready(report)` 表示本次结算已终结，
-但报告仍可能包含资源未释放等负面证据；应保留报告以便恢复。`Pending(snapshot)` 只表示等待到达截止时间，
-调用方可继续观察。Provider I/O 无法确认时，可能得到仍保留资源的 Ready 负面报告。内置清理策略会继续保留
-容量；如果没有新的完成证据，重试清理仍会失败。恢复时应使用已登记的 recovery policy/handle，重新提交推理
-请求不会释放先前请求的资源。关闭函数返回
+但报告仍可能包含资源未释放等负面证据，也可能来自 scope 中其他资源；应保留报告以便恢复。
+`Pending(snapshot)` 只表示等待到达截止时间，调用方可继续观察。只有本次请求的 Provider I/O 完成状态未确认时，
+Magika 才会保留自己的容量。停止请求仍会析构本地 future、reader 和 driver，但这不能证明 native 或远端 I/O
+已经完成。内置清理无法接收已丢弃 Provider I/O 的新完成证据，因此重试不能释放这笔容量。`RecoveryHandle`
+可查看状态、重试已登记的策略或转移责任；重新提交推理请求不会释放先前请求的资源。关闭函数返回
 `DetectorPending` 时应先保留报告并重试 detector shutdown，不要继续关闭 manager；`ManagerPending`
-保留 snapshot 和 handle，可再次 `wait_for`；`Completed` 携带最终 manager report。`shutdown_application`
+保留 snapshot 和 handle，可再次 `wait_for`；`ShutdownProgress::Complete` 携带最终 manager report。`shutdown_application`
 应放在同步应用关闭边界；仅支持 async 的宿主应在停止接收请求并
 等待活动请求完成后，使用自身的阻塞执行机制调用它。
 
