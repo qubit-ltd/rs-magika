@@ -287,8 +287,17 @@ impl MagikaMimeDetector {
             .register_on_parent(scope, &mut handoff_guard, &mut outcome)
             .await
         {
-            Some(outcome) => outcome,
-            None => outcome.await,
+            crate::managed_runtime::request_admission_handoff::BodyStartOr::Outcome(outcome) => {
+                outcome
+            }
+            crate::managed_runtime::request_admission_handoff::BodyStartOr::BodyStarted => {
+                outcome.await
+            }
+            crate::managed_runtime::request_admission_handoff::BodyStartOr::Closed(reason) => {
+                drop(outcome);
+                let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                return Err(MimeError::detector_backend("magika", reason.as_str()));
+            }
         };
         let outcome = outcome.map_err(|error| {
             MimeError::detector_backend(
@@ -1413,6 +1422,18 @@ mod tests {
             crate::internal::async_sample_bridge::closed_error(),
         ));
         assert!(matches!(closed_bridge, MimeError::DetectorBackend { .. }));
+        let observed_stop = crate::internal::map_provider_magika_error(Error::IOError(
+            crate::internal::provider_input::observed_read_stopped_error(),
+        ));
+        assert!(matches!(observed_stop, MimeError::DetectorBackend { .. }));
+        let session_stop = crate::internal::map_provider_magika_error(Error::IOError(
+            crate::internal::session_read_stopped_io_error(),
+        ));
+        assert!(matches!(session_stop, MimeError::DetectorBackend { .. }));
+        let provider_interrupted = crate::internal::map_provider_magika_error(Error::IOError(
+            std::io::Error::new(std::io::ErrorKind::Interrupted, "provider interrupted"),
+        ));
+        assert!(matches!(provider_interrupted, MimeError::Io(_)));
     }
 
     #[test]

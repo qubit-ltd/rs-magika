@@ -11,8 +11,8 @@ mod body_start_or;
 mod handoff_state;
 mod request_admission_handoff_guard;
 
-pub(super) use body_start_or::BodyStartOr;
-pub(super) use handoff_state::HandoffCloseReason;
+pub(crate) use body_start_or::BodyStartOr;
+pub(crate) use handoff_state::HandoffCloseReason;
 pub(super) use handoff_state::HandoffState;
 pub(super) use handoff_state::RequestAdmissionPayload;
 pub(crate) use request_admission_handoff_guard::RequestAdmissionHandoffGuard;

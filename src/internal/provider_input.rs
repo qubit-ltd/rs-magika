@@ -234,9 +234,7 @@ pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
         let bytes = match outcome {
             Ok(outcome) => outcome.into_bytes(),
             Err(ObservedReadError::Stopped) => {
-                return Err(
-                    io::Error::new(io::ErrorKind::Interrupted, "provider read stopped").into(),
-                );
+                return Err(observed_read_stopped_error().into());
             }
             Err(ObservedReadError::Provider(error)) => return Err(error.into_io_error().into()),
         };
@@ -370,6 +368,15 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
             if crate::internal::async_sample_bridge::is_closed_error(&error) {
                 return MimeError::detector_backend("magika", "provider inference stopped");
             }
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<ObservedReadStopped>())
+            {
+                return MimeError::detector_backend("magika", "provider read stopped");
+            }
+            if crate::internal::is_session_stop_error(&error) {
+                return MimeError::detector_backend("magika", "provider session read stopped");
+            }
             if let Some(MimeError::BufferLimitExceeded { requested, limit }) = error
                 .get_ref()
                 .and_then(|source| source.downcast_ref::<MimeError>())
@@ -383,4 +390,19 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
         }
         error => MimeError::detector_backend("magika", error.to_string()),
     }
+}
+
+#[derive(Debug)]
+struct ObservedReadStopped;
+
+impl std::fmt::Display for ObservedReadStopped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("provider read stopped")
+    }
+}
+
+impl std::error::Error for ObservedReadStopped {}
+
+pub(crate) fn observed_read_stopped_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, ObservedReadStopped)
 }

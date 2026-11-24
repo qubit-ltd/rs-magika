@@ -15,9 +15,18 @@ use super::super::super::worker_input::WorkerInput;
 use super::super::RequestAdmission;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::managed_runtime::request_admission_handoff) enum HandoffCloseReason {
-    RequestStopped,
+pub(crate) enum HandoffCloseReason {
+    RequestStopped(&'static str),
     Abandoned,
+}
+
+impl HandoffCloseReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestStopped(reason) => reason,
+            Self::Abandoned => "request admission handoff closed",
+        }
+    }
 }
 
 /// Admission and input moved together while the handoff is synchronized.
