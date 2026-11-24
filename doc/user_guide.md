@@ -411,12 +411,18 @@ lengths do not cap total process memory, including provider buffers and
 transient allocations. After shutdown, ruled sync inputs can still return
 directly; requests needing model inference use the closed runtime and fail.
 
-Both legacy hooks can return their business result before resource settlement
-is confirmed. The managed API exposes the resource report separately: a
-bounded observation can be `Pending`, and `Ready` can still report that release
-is unconfirmed. Capacity remains reserved while provider I/O or worker access
-is unconfirmed, including after a local stop request. Use the managed APIs when
-the application needs to observe resource release independently of the result.
+The legacy content hook normally waits for its internal operation to settle;
+the legacy Provider hook normally waits for its business result. Runtime
+cancellation can make either hook return a stop error early. The managed API
+exposes settlement separately: a bounded observation can be `Pending`, and
+terminal `Ready(report)` can still have `all_released() == false`. Capacity
+remains reserved while provider I/O or worker access is unconfirmed, including
+after a local stop request. This behavior is covered by
+[`test_unmanaged_content_waits_for_worker_settlement_after_business_result`](../src/managed_runtime/managed_inference_runtime/tests.rs)
+and
+[`test_legacy_async_hook_returns_cancel_result_while_provider_resources_remain_held`](../tests/provider_path_tests.rs).
+Use managed APIs when the application needs release observation independently
+of the result.
 
 The async content hook returns the backend's raw Magika candidate list, like
 the synchronous content hook. It does not apply high-level MIME selection or
@@ -594,16 +600,6 @@ worker; conversion may reallocate to trim unused capacity, so this is not a
 zero-allocation guarantee. Sampling and
 inference run on the session-owning worker; async provider reads are serviced
 by the operation future without blocking its executor.
-
-Provider future cancellation has a narrower meaning than native I/O
-cancellation. The `rs-fs` contract says dropping a pending provider future
-stops local polling, but provider-native or remote work may continue. Magika
-has no completion observer for that work and never treats future `Drop` as
-proof that I/O ended. If a pending provider future is dropped and completion
-cannot be observed, the child release observation and runtime/byte capacity
-remain `Pending`, potentially indefinitely. Cancellation can stop the
-caller from waiting promptly; it does not guarantee that native work was
-interrupted.
 
 When no provider read is pending, dropping the request closes its sampling
 bridge and releases driver ownership. If a read has returned `Ready`, its I/O

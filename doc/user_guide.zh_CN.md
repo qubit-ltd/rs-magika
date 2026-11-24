@@ -486,15 +486,14 @@ worker 并等待 Magika Session 初始化完成，因此
 上运行，async operation future 负责服务范围读取，不会阻塞执行器线程。
 
 旧版 `MimeDetector` hooks 仍可供不管理 operation scope 的调用方使用。当前上游 trait 不
-传递 parent scope，因此旧 hooks 无法把请求关联到父 scope。迁移时，需要按 scope 观察接纳和
-资源状态的 async provider 调用应改为显式调用 managed API。
-
-Provider future 的取消不等于底层 I/O 已停止。`rs-fs` 约定：丢弃仍处于 Pending 的
-Provider future，只会停止本地轮询；Provider 启动的 native 或远端工作仍可能继续。Magika
-没有观察这些工作何时完成的接口，也不会把 future `Drop` 当成 I/O 已结束的证据。因此，
-如果请求在 Provider future 尚未完成时被丢弃，且无法观察底层完成时间，子操作的释放观察和
-runtime/字节容量会保持 `Pending`，甚至可能一直如此。调用方可以尽快停止等待，但不能据此
-断言 native 工作已中断。
+传递 parent scope，因此旧 hooks 无法把请求关联到父 scope。旧 content hook 通常等待内部操作结算；
+旧 Provider hook 通常等待业务结果。runtime 取消时，两者都可能提前返回停止错误。受管 API 会单独
+提供结算观察：有界等待可能返回 `Pending`，终态 `Ready(report)` 中 `all_released()` 也可能为 false。
+Provider I/O 或 worker 访问未确认结束时，容量继续保留。该行为由
+[`test_unmanaged_content_waits_for_worker_settlement_after_business_result`](../src/managed_runtime/managed_inference_runtime/tests.rs)
+和
+[`test_legacy_async_hook_returns_cancel_result_while_provider_resources_remain_held`](../tests/provider_path_tests.rs)
+覆盖。迁移时，需要按 scope 观察接纳和资源状态的 async provider 调用应改为显式调用 managed API。
 
 如果丢弃请求时没有尚未完成的 Provider 范围读取，关闭采样 bridge 后即可结束 driver 所有权。
 若最后一次读取已经返回 `Ready`，I/O 完成状态可确认；worker 也完成后就会释放容量。显式

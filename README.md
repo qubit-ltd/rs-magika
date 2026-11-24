@@ -117,23 +117,24 @@ work to that scope so its report can track release separately from the
 business result. Create the runtime and detector at startup, pass the scope to
 each managed request, and drain the runtime during application shutdown.
 The returned detection result is the business outcome. The scope observer
-reports release separately: `Pending(snapshot)` is only a bounded wait, and
-`Ready(report)` may still contain unreleased resources. Unknown provider I/O
-keeps capacity reserved; the built-in cleanup policy does not release it on a
-retry without new completion evidence. `worker_stopped == true` means the
-worker joined; `false` means join is unconfirmed. Either value is independent
-of the resource report, which callers should read separately.
+reports settlement separately: a bounded wait may return `Pending(snapshot)`;
+it may also return terminal `Ready(report)` while `all_released()` is false.
+Capacity remains reserved in that case. Built-in cleanup has no way to receive
+completion evidence for discarded provider I/O, and retrying its current policy
+cannot release that capacity. A `RecoveryHandle` can inspect the state, retry
+the policy, or transfer responsibility. `worker_stopped` reports worker join
+independently of settlement and release.
 
 The inventory submits a synchronous `MimeDetectorSpec` factory only. It does
 not add a provider to `qubit-mime`'s separate async provider registry or attach
 an application scope. Selecting this sync-only `magika` provider through the
 scope-aware async `MimeRuntime` route returns `AsyncUnsupported`; it does not
-fall back to synchronous inference. Both legacy hooks can return their
-business result before resource settlement is confirmed. A caller that needs
-settlement can use the managed API and read its resource report separately: a
-bounded wait can be `Pending`, while `Ready` can still report that release is
-unconfirmed. Locally stopping a request does not release capacity while
-provider I/O or worker access remains unconfirmed. See the
+fall back to synchronous inference. The legacy content hook normally waits for
+its internal operation to settle; the legacy Provider hook normally waits for
+its business result. Runtime cancellation can make either return a stop error
+early. Use the managed API when settlement needs separate observation. Locally
+stopping a request does not release capacity while provider I/O or worker
+access remains unconfirmed. See the
 [managed lifecycle guide](doc/user_guide.md#migration-guide) for shutdown and
 worker reporting semantics.
 
