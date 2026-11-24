@@ -1990,6 +1990,126 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
 }
 
 #[test]
+fn test_provider_input_drops_before_begin_rejection_releases_admission() {
+    struct DropObservedInput {
+        runtime: Arc<ManagedInferenceRuntime>,
+        state: Arc<super::super::task_state::TaskState>,
+        observed_bytes: Arc<std::sync::atomic::AtomicUsize>,
+        observed_released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for DropObservedInput {
+        fn drop(&mut self) {
+            self.observed_bytes.store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
+            self.observed_released.store(
+                self.state.wait_released_blocking(Duration::ZERO),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+    impl magika::AsyncInput for DropObservedInput {
+        fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+            std::future::ready(Ok(1))
+        }
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+        OperationManager::new(ManagerOptions::default()).unwrap(),
+        8,
+        Box::new(|_| Ok(None)),
+        Box::new(|| {}),
+    ));
+    let admission = runtime.reserve_for_provider(None, 4).unwrap();
+    let state = Arc::clone(&admission.state);
+    state.request_stop();
+    let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let result = block_on(runtime.detect_async_input_admitted_test(
+        admission,
+        DropObservedInput {
+            runtime: Arc::clone(&runtime),
+            state: Arc::clone(&state),
+            observed_bytes: Arc::clone(&observed_bytes),
+            observed_released: Arc::clone(&observed_released),
+        },
+        4,
+        map_provider_test_error,
+    ));
+    assert!(result.is_err());
+    assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!observed_released.load(std::sync::atomic::Ordering::Acquire));
+    assert!(state.wait_released_blocking(Duration::ZERO));
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+}
+
+#[test]
+fn test_provider_input_drops_before_dispatch_rejection_releases_admission() {
+    struct DropObservedInput {
+        runtime: Arc<ManagedInferenceRuntime>,
+        state: Arc<super::super::task_state::TaskState>,
+        observed_bytes: Arc<std::sync::atomic::AtomicUsize>,
+        observed_released: Arc<std::sync::atomic::AtomicBool>,
+        close_gate_on_length: bool,
+    }
+    impl Drop for DropObservedInput {
+        fn drop(&mut self) {
+            self.observed_bytes.store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
+            self.observed_released.store(
+                self.state.wait_released_blocking(Duration::ZERO),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+    impl magika::AsyncInput for DropObservedInput {
+        fn length(&self) -> impl Future<Output = Result<u64, magika::Error>> {
+            let runtime = Arc::clone(&self.runtime);
+            let close_gate = self.close_gate_on_length;
+            async move {
+                if close_gate {
+                    runtime.admission_gate.lock().unwrap().cancelling = true;
+                }
+                Ok(1)
+            }
+        }
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), magika::Error>> {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    for close_sender in [false, true] {
+        let runtime = borrowed_test_runtime(8);
+        if close_sender {
+            runtime.sender.lock().unwrap().take();
+        }
+        let admission = runtime.reserve_for_provider(None, 4).unwrap();
+        let state = Arc::clone(&admission.state);
+        let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let result = block_on(runtime.detect_async_input_admitted_test(
+            admission,
+            DropObservedInput {
+                runtime: Arc::clone(&runtime),
+                state: Arc::clone(&state),
+                observed_bytes: Arc::clone(&observed_bytes),
+                observed_released: Arc::clone(&observed_released),
+                close_gate_on_length: !close_sender,
+            },
+            4,
+            map_provider_test_error,
+        ));
+        assert!(result.is_err());
+        assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!observed_released.load(std::sync::atomic::Ordering::Acquire));
+        assert!(state.wait_released_blocking(Duration::ZERO));
+        assert_eq!(0, runtime.snapshot().reserved_bytes);
+        let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    }
+}
+
+#[test]
 fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
     struct ThreadWake(std::thread::Thread);
     impl std::task::Wake for ThreadWake {
@@ -2550,6 +2670,7 @@ fn test_drain_reserved_content_can_submit_operation_after_gate_closes() {
                 submit_tx.send(()).unwrap();
                 release_rx.lock().unwrap().recv().unwrap();
             },
+            |_| {},
         ))
     });
     submit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -3221,46 +3342,134 @@ fn test_receiver_disconnect_settles_undelivered_dispatch() {
 fn test_rejected_bytes_drop_before_worker_release_is_published() {
     struct DropOrderProbe {
         state: Arc<super::super::task_state::TaskState>,
+        runtime: Arc<ManagedInferenceRuntime>,
+        started: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
         observed_released: Arc<std::sync::atomic::AtomicBool>,
+        observed_bytes: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl Drop for DropOrderProbe {
         fn drop(&mut self) {
             let released = self.state.wait_released_blocking(Duration::ZERO);
+            self.observed_bytes.store(self.runtime.snapshot().reserved_bytes, std::sync::atomic::Ordering::Release);
             self.observed_released
                 .store(released, std::sync::atomic::Ordering::Release);
+            self.started.send(()).unwrap();
+            self.release.recv().unwrap();
         }
     }
 
-    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_before_first_recv(
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         OperationManager::new(ManagerOptions::default()).unwrap(),
         8,
         Box::new(|_| Ok(None)),
-        Box::new(|| panic!("test worker exits before receiving")),
+        Box::new(|| {}),
     ));
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !runtime.worker.lock().unwrap().handle.as_ref().unwrap().is_finished() {
-        assert!(std::time::Instant::now() < deadline, "test worker did not exit");
-        std::thread::yield_now();
-    }
     let admission = runtime.reserve_request(None, 1).unwrap();
+    runtime.admission_gate.lock().unwrap().cancelling = true;
     let state = Arc::clone(&admission.state);
-    let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let _result = runtime
-        .dispatch(
+    let observed_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let dispatch_runtime = Arc::clone(&runtime);
+    let probe_state = Arc::clone(&state);
+    let probe_observed_released = Arc::clone(&observed_released);
+    let probe_observed_bytes = Arc::clone(&observed_bytes);
+    let dispatch = std::thread::spawn(move || {
+        dispatch_runtime.dispatch(
             admission,
             WorkerInput::Bytes(WorkerBytes::with_drop_probe(
                 vec![b'x'].into_boxed_slice(),
                 Box::new(DropOrderProbe {
-                    state: Arc::clone(&state),
-                    observed_released: Arc::clone(&observed_released),
+                    state: probe_state,
+                    runtime: Arc::clone(&dispatch_runtime),
+                    started: started_tx,
+                    release: release_rx,
+                    observed_released: probe_observed_released,
+                    observed_bytes: probe_observed_bytes,
                 }),
             )),
         )
-        .unwrap();
-    assert!(!observed_released.load(std::sync::atomic::Ordering::Acquire));
+    });
+    let drop_started = started_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    let bytes_during_drop = observed_bytes.load(std::sync::atomic::Ordering::Acquire);
+    let released_during_drop = observed_released.load(std::sync::atomic::Ordering::Acquire);
+    let bytes_before_release = runtime.snapshot().reserved_bytes;
+    let _ = release_tx.send(());
+    let dispatch_result = dispatch.join();
+    assert!(drop_started, "payload destructor did not reach its barrier");
+    assert_eq!(1, bytes_during_drop);
+    assert!(!released_during_drop);
+    assert_eq!(1, bytes_before_release);
+    assert!(dispatch_result.unwrap().is_err());
     assert!(state.wait_released_blocking(Duration::ZERO));
     assert_eq!(0, runtime.snapshot().reserved_bytes);
     let _ = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+}
+
+#[test]
+fn test_scope_less_scope_registration_rejection_drops_payload_before_release() {
+    struct DropOrderProbe {
+        runtime: Arc<ManagedInferenceRuntime>,
+        state: Arc<super::super::task_state::TaskState>,
+        started: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        observed: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for DropOrderProbe {
+        fn drop(&mut self) {
+            let held = self.runtime.snapshot().reserved_bytes == 4
+                && !self.state.wait_released_blocking(Duration::ZERO);
+            self.observed.store(held, std::sync::atomic::Ordering::Release);
+            self.started.send(()).unwrap();
+            self.release.recv().unwrap();
+        }
+    }
+
+    let runtime = borrowed_test_runtime(8);
+    let admission = runtime.reserve_for_provider(None, 4).unwrap();
+    let state = Arc::clone(&admission.state);
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let submit_runtime = Arc::clone(&runtime);
+    let probe_runtime = Arc::clone(&runtime);
+    let probe_state = Arc::clone(&state);
+    let probe_observed = Arc::clone(&observed);
+    let submit = std::thread::spawn(move || {
+        block_on(submit_runtime.submit_operation_admitted_with_hook(
+            None,
+            admission,
+            WorkerInput::Bytes(WorkerBytes::with_drop_probe(
+                vec![b'x'].into_boxed_slice(),
+                Box::new(DropOrderProbe {
+                    runtime: probe_runtime,
+                    state: probe_state,
+                    started: started_tx,
+                    release: release_rx,
+                    observed: probe_observed,
+                }),
+            )),
+            || {},
+            |scope| {
+                let _ = scope.request_stop(StopReason::UserCancelled);
+            },
+        ))
+    });
+    let drop_started = started_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    let held_during_drop = observed.load(std::sync::atomic::Ordering::Acquire);
+    let bytes_before_release = runtime.snapshot().reserved_bytes;
+    let _ = release_tx.send(());
+    let submit_result = submit.join();
+    assert!(drop_started, "payload destructor did not reach its barrier");
+    assert!(held_during_drop);
+    assert_eq!(4, bytes_before_release);
+    assert!(submit_result.unwrap().is_err());
+    assert!(state.wait_released_blocking(Duration::ZERO));
+    assert_eq!(0, runtime.snapshot().reserved_bytes);
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
 }
 
 #[test]

@@ -62,6 +62,19 @@ mod worker_state;
 
 use self::worker_state::WorkerState;
 
+/// Keeps undispatched input destruction ahead of admission release.
+struct UndispatchedRequest {
+    admission: Option<RequestAdmission>,
+    input: Option<WorkerInput>,
+}
+
+impl Drop for UndispatchedRequest {
+    fn drop(&mut self) {
+        drop(self.input.take());
+        drop(self.admission.take());
+    }
+}
+
 #[path = "internal/worker_loop.rs"]
 mod worker_loop;
 
@@ -437,7 +450,7 @@ impl ManagedInferenceRuntime {
         admission: RequestAdmission,
         input: WorkerInput,
     ) -> MimeResult<Option<String>> {
-        self.submit_operation_admitted_with_hook(parent, admission, input, || {})
+        self.submit_operation_admitted_with_hook(parent, admission, input, || {}, |_| {})
             .await
     }
 
@@ -462,20 +475,29 @@ impl ManagedInferenceRuntime {
         admission: RequestAdmission,
         input: WorkerInput,
         before_submit: impl FnOnce(),
+        before_retain: impl FnOnce(&OperationScope) + Send + 'static,
     ) -> MimeResult<Option<String>> {
         let runtime = Arc::clone(self);
         let cancellation_won = Arc::new(AtomicBool::new(false));
         let body_cancellation_won = Arc::clone(&cancellation_won);
         let state = Arc::clone(&admission.state);
-        let (request_handoff, mut request_handoff_guard, body_admission, body_input) = match parent {
+        let (request_handoff, mut request_handoff_guard, body_payload) = match parent {
             Some(_) => {
                 let (handoff, guard) =
                     super::request_admission_handoff::RequestAdmissionHandoff::new_with_input(admission, Some(input));
-                (Some(handoff), Some(guard), None, None)
+                (Some(handoff), Some(guard), None)
             }
-            None => (None, None, Some(admission), Some(input)),
+            None => (
+                None,
+                None,
+                Some(UndispatchedRequest {
+                    admission: Some(admission),
+                    input: Some(input),
+                }),
+            ),
         };
         let body_handoff = request_handoff.as_ref().map(Arc::clone);
+        let mut before_retain = Some(before_retain);
         let body = move |scope| async move {
             let (admission, input) = if let Some(handoff) = body_handoff {
                 handoff.body_started();
@@ -497,12 +519,18 @@ impl ManagedInferenceRuntime {
                     }
                 }
             } else {
-                let mut admission = body_admission.expect("scope-less request retains its admission");
-                admission.retain_in_scope(&scope)?;
-                (
-                    admission,
-                    body_input.expect("scope-less request retains its worker input"),
-                )
+                let mut payload = body_payload.expect("scope-less request retains its payload");
+                let mut admission = payload.admission.take().expect("payload retains its admission");
+                let input = payload.input.take().expect("payload retains its worker input");
+                if let Some(hook) = before_retain.take() {
+                    hook(&scope);
+                }
+                if let Err(error) = admission.retain_in_scope(&scope) {
+                    drop(input);
+                    drop(admission);
+                    return Err(error);
+                }
+                (admission, input)
             };
             let mut inference = Box::pin(runtime.dispatch(admission, input)?);
             let mut stop = Box::pin(scope.context().stop_requested());
@@ -622,7 +650,11 @@ impl ManagedInferenceRuntime {
         let stop_state = Arc::clone(&state_for_stop);
         let setup_runtime = self;
         let setup = async move {
-            admission.begin_provider_operation()?;
+            if let Err(error) = admission.try_begin_provider_operation() {
+                drop(input);
+                drop(admission);
+                return Err(error);
+            }
             let length_result = input.length().await;
             admission.provider_operation_completed();
             let length = match length_result {
@@ -634,9 +666,10 @@ impl ManagedInferenceRuntime {
             };
             let bridge = AsyncSampleBridge::new(length);
             let driver = bridge.driver();
-            let inference = setup_runtime.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
             let io_in_flight = input.io_in_flight();
-            let guard = ProviderDriverGuard::new_with_io_status(input, driver, state, io_in_flight);
+            admission.require_provider_driver();
+            let guard = ProviderDriverGuard::new_with_io_status(input, driver, Arc::clone(&state), io_in_flight);
+            let inference = setup_runtime.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
             Ok::<_, MimeError>((guard, inference))
         };
         let mut setup = Box::pin(setup);
@@ -665,7 +698,11 @@ impl ManagedInferenceRuntime {
     where
         I: AsyncInput + Send,
     {
-        admission.begin_provider_operation()?;
+        if let Err(error) = admission.try_begin_provider_operation() {
+            drop(input);
+            drop(admission);
+            return Err(error);
+        }
         let length_result = input.length().await;
         admission.provider_operation_completed();
         let length = match length_result {
@@ -678,8 +715,10 @@ impl ManagedInferenceRuntime {
         let bridge = AsyncSampleBridge::new(length);
         let driver = bridge.driver();
         let state = Arc::clone(&admission.state);
+        admission.require_provider_driver();
+        let guard = ProviderDriverGuard::new(input, driver, Arc::clone(&state));
         let inference = self.dispatch(admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-        drive_async_input(ProviderDriverGuard::new(input, driver, state), inference).await
+        drive_async_input(guard, inference).await
     }
 
     /// Dispatches owned bytes using capacity reserved by the caller.
@@ -876,22 +915,28 @@ impl ManagedInferenceRuntime {
             } else {
                 "runtime admission is closed after cancellation"
             };
+            drop(admission_gate);
+            drop(input);
             let mut admission = admission;
             admission.settle_error(MimeError::detector_backend("magika", message));
             return Err(MimeError::detector_backend("magika", message));
         }
-        let sent_state = {
+        let dispatch_result = {
             let sender = self.sender.lock().unwrap_or_else(|error| error.into_inner());
             admission.state.mark_dispatched();
             match sender.as_ref() {
-                Some(sender) => admission.dispatch(input, sender)?,
+                Some(sender) => admission.dispatch(input, sender),
                 None => {
                     let (sender, _receiver) = mpsc::sync_channel(0);
-                    admission.dispatch(input, &sender)?
+                    admission.dispatch(input, &sender)
                 }
             }
         };
         drop(admission_gate);
+        let sent_state = match dispatch_result {
+            Ok(state) => state,
+            Err(rejected) => RequestAdmission::settle_rejected_job(rejected),
+        };
         Ok(InferenceFuture::new(sent_state))
     }
 

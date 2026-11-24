@@ -432,6 +432,7 @@ mod tests {
     use qubit_operation::OperationManager;
     use qubit_operation::OperationOptions;
     use qubit_operation::OperationOutcome;
+    use qubit_operation::ScopeLimits;
 
     use super::super::byte_budget::ByteBudget;
     use super::super::request_admission::RequestAdmission;
@@ -440,6 +441,8 @@ mod tests {
     use super::BodyStartOr;
     use super::HandoffCloseReason;
     use super::RequestAdmissionHandoff;
+    use crate::managed_runtime::worker_input::WorkerBytes;
+    use crate::managed_runtime::worker_input::WorkerInput;
 
     #[test]
     fn test_child_outcome_before_body_start_releases_admission() {
@@ -473,6 +476,90 @@ mod tests {
             OperationOutcome::Succeeded(())
         ));
         assert!(block_on(operation.wait_settlement()).all_released());
+    }
+
+    #[test]
+    fn test_parent_scope_commit_rejection_drops_input_before_admission() {
+        struct DropProbe {
+            active: Arc<AtomicUsize>,
+            budget: Arc<ByteBudget>,
+            state: Arc<TaskState>,
+            sender: std::sync::mpsc::Sender<bool>,
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let held = self.active.load(Ordering::SeqCst) == 1
+                    && self.budget.try_acquire(8).is_none()
+                    && !self.state.wait_released_blocking(std::time::Duration::ZERO);
+                self.sender.send(held).unwrap();
+            }
+        }
+        let manager = OperationManager::new(ManagerOptions::default()).unwrap();
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let active_for_parent = Arc::clone(&active_requests);
+        let budget_for_parent = Arc::clone(&byte_budget);
+        let (drop_facts_tx, drop_facts_rx) = std::sync::mpsc::channel();
+        let (state_tx, state_rx) = std::sync::mpsc::channel();
+        let mut parent = manager
+            .as_async()
+            .try_submit(
+                OperationOptions {
+                    limits: ScopeLimits { resources: 1, ..ScopeLimits::default() },
+                    ..OperationOptions::default()
+                },
+                move |scope| async move {
+                    let _held = scope.manage(()).unwrap();
+                    let state = Arc::new(TaskState::new(8991, None));
+                    let admission = RequestAdmission::new(
+                        Arc::clone(&state),
+                        ServicePermit::try_acquire(&active_for_parent, 1).unwrap(),
+                        budget_for_parent.try_acquire(8).unwrap(),
+                    );
+                    let payload = WorkerInput::Bytes(WorkerBytes::with_drop_probe(
+                        vec![b'x'].into_boxed_slice(),
+                        Box::new(DropProbe {
+                            active: Arc::clone(&active_for_parent),
+                            budget: Arc::clone(&budget_for_parent),
+                            state: Arc::clone(&state),
+                            sender: drop_facts_tx,
+                        }),
+                    ));
+                    let (handoff, mut guard) = RequestAdmissionHandoff::new_with_input(admission, Some(payload));
+                    let child_handoff = Arc::clone(&handoff);
+                    let mut child = scope
+                        .manager()
+                        .as_async()
+                        .try_submit(OperationOptions::default(), move |child_scope| async move {
+                            child_handoff.body_started();
+                            let result = child_handoff
+                                .wait_for_child_admission(&child_scope)
+                                .await
+                                .expect("handoff provides the registration error");
+                            assert!(result.is_err());
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
+                    let mut outcome = Box::pin(child.wait_outcome());
+                    assert!(matches!(
+                        handoff.register_on_parent(&scope, &mut guard, &mut outcome).await,
+                        super::BodyStartOr::BodyStarted
+                    ));
+                    assert!(matches!(outcome.await.unwrap(), OperationOutcome::Succeeded(())));
+                    state_tx.send(state).unwrap();
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(block_on(parent.wait_outcome()).unwrap(), OperationOutcome::Succeeded(())));
+        assert!(drop_facts_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        assert!(state_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap().wait_released_blocking(
+            std::time::Duration::ZERO
+        ));
+        assert_eq!(0, active_requests.load(Ordering::SeqCst));
+        assert!(byte_budget.try_acquire(8).is_some());
+        assert!(block_on(parent.wait_settlement()).all_released());
     }
 
     #[test]
