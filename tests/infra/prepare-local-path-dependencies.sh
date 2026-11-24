@@ -40,6 +40,7 @@ fi
 
 if [[ "$1" == init ]]; then
     mkdir -p "$2"
+    mkdir -p "$2/.git"
     printf 'mock source\n' > "$2/fixture.txt"
     exit 0
 fi
@@ -50,6 +51,12 @@ if [[ "$1" == -C ]]; then
     case "$1" in
         remote|checkout) exit 0 ;;
         rev-parse)
+            if [[ "${2:-}" == --show-toplevel ]]; then
+                cursor=$checkout
+                while [[ "$cursor" != / && ! -e "$cursor/.git" ]]; do cursor=$(dirname "$cursor"); done
+                printf '%s\n' "$cursor"
+                exit 0
+            fi
             [[ -f "$checkout/fixture.txt" ]] || exit 128
             printf '%s\n' "$MOCK_GIT_HEAD"
             exit 0
