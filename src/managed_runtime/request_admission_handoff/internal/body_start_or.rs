@@ -15,7 +15,8 @@ use super::handoff_close_reason::HandoffCloseReason;
 ///
 /// * `T` - Outcome returned when the operation finishes before body start.
 pub(crate) enum BodyStartOr<T> {
-    /// The child body entered and is waiting for its admission.
+    /// The child crossed its start boundary, and its caller-specific handoff
+    /// step completed the transfer or root payload claim.
     BodyStarted,
     /// The handoff closed before the child body started.
     Closed(
