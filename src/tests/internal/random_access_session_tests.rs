@@ -832,27 +832,196 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         .unwrap();
     let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
     let path = Path::parse("/bridge/legacy").unwrap();
-    let heartbeats = AtomicUsize::new(0);
-    let poll_gate = Arc::clone(&engine_gate);
-    let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
-        &detector,
-        &file_system,
-        &path,
-        6,
-    ));
-    let candidates = block_on(std::future::poll_fn(|cx| {
-        if heartbeats.fetch_add(1, Ordering::SeqCst) > 0 {
-            let (released, changed) = &*poll_gate;
+    #[derive(Debug, PartialEq)]
+    enum WorkerEvent {
+        DetectionPending,
+        Heartbeat,
+        ReadyBeforePending,
+    }
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut heartbeats = 0usize;
+        let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
+            &detector,
+            &file_system,
+            &path,
+            6,
+        ));
+        let mut pending_observed = false;
+        let mut heartbeat_observed = false;
+        let result = block_on(std::future::poll_fn(|cx| {
+            match detection.as_mut().poll(cx) {
+                Poll::Ready(result) => {
+                    if !pending_observed {
+                        let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
+                    }
+                    Poll::Ready(result)
+                }
+                Poll::Pending => {
+                    if !pending_observed {
+                        pending_observed = true;
+                        let _ = events_tx.send(WorkerEvent::DetectionPending);
+                    }
+                    heartbeats += 1;
+                    if !heartbeat_observed && heartbeats > 1 {
+                        heartbeat_observed = true;
+                        let _ = events_tx.send(WorkerEvent::Heartbeat);
+                    }
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }));
+        (result, heartbeats)
+    });
+
+    let first_poll = crate::tests::internal::bridge_wait::wait_for_stage(
+        &events_rx,
+        &WorkerEvent::DetectionPending,
+        "legacy detection first Pending",
+        Duration::from_secs(5),
+        || {
+            let (released, changed) = &*engine_gate;
             *released.lock().unwrap() = true;
-            changed.notify_one();
-        }
-        cx.waker().wake_by_ref();
-        detection.as_mut().poll(cx)
-    }))
-    .unwrap()
-    .0;
+            changed.notify_all();
+        },
+    );
+    if let Err(stage) = first_poll {
+        let _ = crate::tests::internal::bridge_wait::join_before(
+            worker,
+            &stage,
+            Duration::from_secs(5),
+        );
+        panic!("{stage}");
+    }
+    let heartbeat = crate::tests::internal::bridge_wait::wait_for_stage(
+        &events_rx,
+        &WorkerEvent::Heartbeat,
+        "legacy detection worker heartbeat after Pending",
+        Duration::from_secs(5),
+        || {
+            let (released, changed) = &*engine_gate;
+            *released.lock().unwrap() = true;
+            changed.notify_all();
+        },
+    );
+    if let Err(stage) = heartbeat {
+        let _ = crate::tests::internal::bridge_wait::join_before(
+            worker,
+            &stage,
+            Duration::from_secs(5),
+        );
+        panic!("{stage}");
+    }
+    let (released, changed) = &*engine_gate;
+    *released.lock().unwrap() = true;
+    changed.notify_all();
+    let (detection_result, heartbeats) = crate::tests::internal::bridge_wait::join_before(
+        worker,
+        "legacy provider bridge completion",
+        Duration::from_secs(5),
+    );
+    let candidates = detection_result.unwrap().0;
     assert_eq!(vec!["application/x-fixture"], candidates);
-    assert!(heartbeats.load(Ordering::SeqCst) > 1);
+    assert!(heartbeats > 1);
+}
+
+#[test]
+fn test_blocked_single_poll_is_supervised_and_released_by_parent_thread() {
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let worker_gate = Arc::clone(&gate);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        struct BlockInsidePoll {
+            gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+            entered: std::sync::mpsc::Sender<()>,
+        }
+        impl Future for BlockInsidePoll {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let _ = self.entered.send(());
+                let (released, changed) = &*self.gate;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                Poll::Ready(())
+            }
+        }
+
+        let wake = Arc::new(ThreadWake {
+            thread: std::thread::current(),
+            notified: AtomicBool::new(false),
+        });
+        let waker = std::task::Waker::from(wake);
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(BlockInsidePoll {
+            gate: worker_gate,
+            entered: entered_tx,
+        });
+        let result = future.as_mut().poll(&mut context);
+        let ready = result.is_ready();
+        let _ = finished_tx.send(ready);
+        ready
+    });
+
+    let entered = crate::tests::internal::bridge_wait::wait_for_stage(
+        &entered_rx,
+        &(),
+        "synthetic poll entered its blocking call",
+        Duration::from_secs(5),
+        || {
+            let (released, changed) = &*gate;
+            *released.lock().unwrap() = true;
+            changed.notify_all();
+        },
+    );
+    if let Err(stage) = entered {
+        let _ = crate::tests::internal::bridge_wait::join_before(
+            worker,
+            &stage,
+            Duration::from_secs(5),
+        );
+        panic!("{stage}");
+    }
+
+    let blocked_poll = crate::tests::internal::bridge_wait::wait_for_stage(
+        &finished_rx,
+        &true,
+        "synthetic poll remained blocked through watchdog deadline",
+        Duration::from_millis(50),
+        || {
+            let (released, changed) = &*gate;
+            *released.lock().unwrap() = true;
+            changed.notify_all();
+        },
+    );
+    let timeout_failure = match blocked_poll {
+        Err(stage) => stage,
+        Ok(()) => {
+            let _ = crate::tests::internal::bridge_wait::join_before(
+                worker,
+                "synthetic poll unexpectedly completed before watchdog deadline",
+                Duration::from_secs(5),
+            );
+            panic!("synthetic poll completed before the watchdog deadline");
+        }
+    };
+    let ready_after_release = crate::tests::internal::bridge_wait::join_before(
+        worker,
+        &timeout_failure,
+        Duration::from_secs(5),
+    );
+    assert!(
+        timeout_failure.contains("timed out"),
+        "watchdog failure should remain recorded: {timeout_failure}"
+    );
+    assert!(
+        ready_after_release,
+        "poll should return Ready after its gate is opened"
+    );
 }
 
 #[test]

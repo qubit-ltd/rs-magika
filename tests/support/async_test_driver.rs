@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 
+use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,6 +17,31 @@ use std::task::Poll;
 use std::task::Wake;
 use std::time::Duration;
 use std::time::Instant;
+
+/// Waits for one expected worker signal, recording the failed stage before
+/// releasing its gate.
+pub(crate) fn wait_for_stage<T: Debug + PartialEq>(
+    events: &std::sync::mpsc::Receiver<T>,
+    expected: &T,
+    stage: &str,
+    timeout: Duration,
+    release: impl FnOnce(),
+) -> Result<(), String> {
+    let failure = match events.recv_timeout(timeout) {
+        Ok(actual) if &actual == expected => return Ok(()),
+        Ok(actual) => format!(
+            "unexpected signal at stage={stage}: expected {expected:?}, got {actual:?}"
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            format!("timed out waiting for stage={stage}: expected {expected:?}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            format!("signal channel disconnected at stage={stage}: expected {expected:?}")
+        }
+    };
+    release();
+    Err(failure)
+}
 
 /// Waits for a spawned test thread to finish before joining it.
 pub(crate) fn join_before<T>(worker: std::thread::JoinHandle<T>, stage: &str, timeout: Duration) -> T {

@@ -45,6 +45,7 @@ use crate::support::detector;
 use crate::support::join_before;
 use crate::support::run_ready;
 use crate::support::run_until;
+use crate::support::wait_for_stage;
 
 const PYTHON: &[u8] = b"#!/usr/bin/env python3\nprint('hello')\n";
 
@@ -706,6 +707,7 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     // this test thread. The request observer uses the guide's async result and
     // release APIs throughout.
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Open);
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
     let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_random_access()
         .with_async_gate(Arc::clone(&gate));
@@ -721,28 +723,72 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(5));
 
-    let first_wait = async {
+    #[derive(Debug, PartialEq)]
+    enum GuideEvent {
+        ResultPending,
+        Heartbeat,
+        ReadyBeforePending,
+    }
+    let first_wait = async move {
         let outcome = first.wait_outcome().await.unwrap();
         let settlement = first.wait_settlement().await;
         (outcome, settlement)
     };
     let mut first_wait = Box::pin(first_wait);
-    let heartbeat_reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let heartbeat_flag = Arc::clone(&heartbeat_reached);
-    let mut heartbeat = Box::pin(async move {
-        heartbeat_flag.store(true, Ordering::SeqCst);
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut heartbeat = Box::pin(async {});
+        let mut pending_observed = false;
+        let mut heartbeat_observed = false;
+        run_until(
+            std::future::poll_fn(|context| match first_wait.as_mut().poll(context) {
+                Poll::Ready(result) => {
+                    if !pending_observed {
+                        let _ = events_tx.send(GuideEvent::ReadyBeforePending);
+                    }
+                    Poll::Ready(result)
+                }
+                Poll::Pending => {
+                    if !pending_observed {
+                        pending_observed = true;
+                        let _ = events_tx.send(GuideEvent::ResultPending);
+                    }
+                    if !heartbeat_observed && heartbeat.as_mut().poll(context).is_ready() {
+                        heartbeat_observed = true;
+                        let _ = events_tx.send(GuideEvent::Heartbeat);
+                    }
+                    Poll::Pending
+                }
+            }),
+            Duration::from_secs(30),
+        )
     });
-    let mut heartbeat_done = false;
-    run_ready(std::future::poll_fn(|context| {
-        let _ = first_wait.as_mut().poll(context);
-        if !heartbeat_done && heartbeat.as_mut().poll(context).is_ready() {
-            heartbeat_done = true;
-        }
-        if heartbeat_done { Poll::Ready(()) } else { Poll::Pending }
-    }));
-    assert!(heartbeat_reached.load(Ordering::SeqCst));
+    let result_pending = wait_for_stage(
+        &events_rx,
+        &GuideEvent::ResultPending,
+        "managed guide result Pending while provider gate is closed",
+        Duration::from_secs(5),
+        || gate.release(),
+    );
+    if let Err(stage) = result_pending {
+        let _ = join_before(worker, &stage, Duration::from_secs(5));
+        panic!("{stage}");
+    }
+    let heartbeat = wait_for_stage(
+        &events_rx,
+        &GuideEvent::Heartbeat,
+        "managed guide same-thread heartbeat after Pending",
+        Duration::from_secs(5),
+        || gate.release(),
+    );
+    if let Err(stage) = heartbeat {
+        let _ = join_before(worker, &stage, Duration::from_secs(5));
+        panic!("{stage}");
+    }
     gate.release();
-    let (first_outcome, first_settlement) = run_ready(first_wait);
+    let first_result = join_before(worker, "managed guide first result", Duration::from_secs(5))
+        .expect("managed guide worker should complete after provider gate release");
+    let (first_outcome, first_settlement) = first_result;
     assert!(matches!(
         first_outcome,
         qubit_operation::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
