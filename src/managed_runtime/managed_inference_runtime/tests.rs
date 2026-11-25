@@ -539,10 +539,17 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     let request = request.expect("bridge remains open while the retained driver owns it");
     assert_eq!(0, request.offset());
     assert_eq!(4, request.len());
-    request.respond(Ok(vec![1, 2, 3, 4]));
-    request_thread
-        .join()
-        .expect("completed sampling request thread must be reclaimable");
+    let respond_thread = std::thread::spawn(move || request.respond(Ok(vec![1, 2, 3, 4])));
+    crate::tests::internal::bridge_wait::join_before(
+        respond_thread,
+        "sampling request response",
+        Duration::from_secs(5),
+    );
+    crate::tests::internal::bridge_wait::join_before(
+        request_thread,
+        "sampling request receiver thread exit",
+        Duration::from_secs(5),
+    );
     let worker_state = Arc::clone(&state);
     assert!(
         crate::tests::internal::bridge_wait::join_before(
@@ -3370,13 +3377,6 @@ fn test_provider_driver_safe_drop_before_range_read_releases_queued_capacity() {
 
 #[test]
 fn test_admitted_owned_bytes_return_worker_result() {
-    struct ThreadWake(std::thread::Thread);
-    impl std::task::Wake for ThreadWake {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
@@ -3385,15 +3385,11 @@ fn test_admitted_owned_bytes_return_worker_result() {
         Box::new(|| {}),
     ));
     let admission = runtime.reserve_for_provider(None, 3).unwrap();
-    let mut future = Box::pin(runtime.detect_bytes_admitted(admission, vec![1, 2, 3]));
-    let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let result = loop {
-        if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
-            break result;
-        }
-        std::thread::park_timeout(Duration::from_secs(1));
-    };
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.detect_bytes_admitted(admission, vec![1, 2, 3]),
+        "admitted owned-bytes worker result",
+        Duration::from_secs(5),
+    );
     assert_eq!(result.unwrap().as_deref(), Some("application/x-bytes-3"));
     assert!(
         runtime
@@ -3422,7 +3418,7 @@ fn assert_current_bridge_closes_for_engine(
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let release_rx = Arc::new(Mutex::new(release_rx));
     let release_wait = Arc::clone(&release_rx);
-    let runtime = ManagedInferenceRuntime::with_engine(
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
         4,
         engine,
@@ -3434,7 +3430,7 @@ fn assert_current_bridge_closes_for_engine(
                 .recv_timeout(Duration::from_secs(2))
                 .expect("worker callback release barrier");
         }),
-    );
+    ));
     let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(0);
     let driver = bridge.driver();
     let _inference = runtime
@@ -3443,40 +3439,110 @@ fn assert_current_bridge_closes_for_engine(
             WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error),
         )
         .unwrap();
-    let state = runtime.tasks.lock().unwrap()[0].clone();
+    let task_runtime = Arc::clone(&runtime);
+    let state = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || task_runtime.tasks.lock().unwrap()[0].clone()),
+        "current bridge task registry observation",
+        Duration::from_secs(2),
+    );
 
     business_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(state.inner.lock().unwrap().business, Some(expected));
-    assert!(!state.inner.lock().unwrap().worker_done);
-    assert!(!state.inner.lock().unwrap().released);
+    let initial_state = Arc::clone(&state);
+    let (business, worker_done, released) = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || {
+            let inner = initial_state.inner.lock().unwrap();
+            (inner.business, inner.worker_done, inner.released)
+        }),
+        "current bridge initial task state observation",
+        Duration::from_secs(2),
+    );
+    assert_eq!(business, Some(expected));
+    assert!(!worker_done);
+    assert!(!released);
     assert!(runtime.byte_budget.try_acquire(4).is_none());
 
     release_tx.send(()).unwrap();
     let (closed_tx, closed_rx) = mpsc::sync_channel(1);
     let waiting_bridge = Arc::clone(&bridge);
     let closure_observer = std::thread::spawn(move || {
-        crate::tests::internal::bridge_wait::poll_before(
-            waiting_bridge.closed(),
-            "current bridge closure after worker completion",
-            Duration::from_secs(2),
-        );
-        closed_tx.send(()).unwrap();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::tests::internal::bridge_wait::poll_before(
+                waiting_bridge.closed(),
+                "current bridge closure after worker completion",
+                Duration::from_secs(2),
+            );
+        }))
+        .map(|()| closed_tx.send(()).unwrap())
     });
     if closed_rx.recv_timeout(Duration::from_secs(2)).is_err() {
-        drop(driver);
-        closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        closure_observer.join().unwrap();
+        crate::tests::internal::bridge_wait::join_before(
+            std::thread::spawn(move || drop(driver)),
+            "worker did not close the current bridge: retained driver cleanup",
+            Duration::from_secs(2),
+        );
+        let _observer_outcome = crate::tests::internal::bridge_wait::join_before(
+            closure_observer,
+            "worker did not close the current bridge: closure observer cleanup",
+            Duration::from_secs(3),
+        );
         panic!("worker did not close the current bridge");
     }
-    closure_observer.join().unwrap();
-    assert!(state.wait_worker_done_blocking(Duration::from_secs(2)));
-    assert!(!state.inner.lock().unwrap().released);
+    let observer_outcome = crate::tests::internal::bridge_wait::join_before(
+        closure_observer,
+        "current bridge closure observer exit",
+        Duration::from_secs(2),
+    );
+    assert!(
+        observer_outcome.is_ok(),
+        "current bridge closure observer must finish successfully"
+    );
+    assert!(crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn({
+            let state = Arc::clone(&state);
+            move || state.wait_worker_done_blocking(Duration::from_secs(2))
+        }),
+        "current bridge worker completion observation",
+        Duration::from_secs(3),
+    ));
+    let completion_state = Arc::clone(&state);
+    let released_before_driver = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || completion_state.inner.lock().unwrap().released),
+        "current bridge pre-release task state observation",
+        Duration::from_secs(2),
+    );
+    assert!(!released_before_driver);
     assert!(runtime.byte_budget.try_acquire(4).is_none());
 
-    drop(driver);
-    state.mark_driver_done();
-    assert!(state.wait_released_blocking(Duration::from_secs(2)));
-    assert!(runtime.byte_budget.try_acquire(4).is_some());
+    let driver_state = Arc::clone(&state);
+    crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || {
+            drop(driver);
+            driver_state.mark_driver_done();
+        }),
+        "current bridge driver release and completion publication",
+        Duration::from_secs(2),
+    );
+    assert!(crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn({
+            let state = Arc::clone(&state);
+            move || state.wait_released_blocking(Duration::from_secs(2))
+        }),
+        "current bridge resource release observation",
+        Duration::from_secs(3),
+    ));
+    let release_state = Arc::clone(&state);
+    let released_after_driver = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || release_state.inner.lock().unwrap().released),
+        "current bridge post-release task state observation",
+        Duration::from_secs(2),
+    );
+    assert!(released_after_driver);
+    let budget_runtime = Arc::clone(&runtime);
+    assert!(crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || budget_runtime.byte_budget.try_acquire(4).is_some()),
+        "current bridge released byte budget observation",
+        Duration::from_secs(2),
+    ));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
 }
