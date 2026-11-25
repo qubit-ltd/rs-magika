@@ -401,7 +401,12 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
         .recv_timeout(Duration::from_secs(5))
         .expect("engine must enter before the active-request snapshot");
 
-    let states = runtime.tasks.lock().unwrap().clone();
+    let registry_runtime = Arc::clone(&runtime);
+    let states = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || registry_runtime.tasks.lock().unwrap().clone()),
+        "active request registry check",
+        Duration::from_secs(5),
+    );
     assert_eq!(states.len(), 1, "real submitted request must be registered");
     let active = snapshot_before(&runtime, "active request snapshot");
     assert_eq!(1, active.worker_running);
@@ -484,10 +489,13 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
     assert_eq!(0, final_snapshot.worker_running);
     assert_eq!(0, final_snapshot.awaiting_release);
     assert_eq!(0, final_snapshot.reserved_bytes);
-    assert!(
-        runtime.tasks.lock().unwrap().is_empty(),
-        "released task must leave the registry"
+    let registry_runtime = Arc::clone(&runtime);
+    let registry_empty = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || registry_runtime.tasks.lock().unwrap().is_empty()),
+        "final request registry check",
+        Duration::from_secs(5),
     );
+    assert!(registry_empty, "released task must leave the registry");
     assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst));
 }
 
@@ -507,7 +515,12 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
             WorkerInput::Bridge(Arc::clone(&bridge), 4, map_provider_test_error),
         )
         .unwrap();
-    let state = runtime.tasks.lock().unwrap()[0].clone();
+    let registry_runtime = Arc::clone(&runtime);
+    let state = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || registry_runtime.tasks.lock().unwrap()[0].clone()),
+        "driver request registry check",
+        Duration::from_secs(5),
+    );
 
     let (request_tx, request_rx) = mpsc::sync_channel(1);
     let request_bridge = Arc::clone(&bridge);
@@ -530,14 +543,25 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     request_thread
         .join()
         .expect("completed sampling request thread must be reclaimable");
+    let worker_state = Arc::clone(&state);
     assert!(
-        state.wait_worker_done_blocking(Duration::from_secs(5)),
+        crate::tests::internal::bridge_wait::join_before(
+            std::thread::spawn(move || worker_state.wait_worker_done_blocking(Duration::from_secs(5))),
+            "sampled worker completion observation",
+            Duration::from_secs(5),
+        ),
         "worker must finish sampling"
     );
     let waiting = snapshot_before(&runtime, "driver release waiting snapshot");
     assert_eq!(1, waiting.awaiting_release);
     assert_eq!(4, waiting.reserved_bytes);
-    assert!(!state.inner.lock().unwrap().released);
+    let release_state = Arc::clone(&state);
+    let released = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || release_state.inner.lock().unwrap().released),
+        "driver release state observation",
+        Duration::from_secs(5),
+    );
+    assert!(!released);
 
     let (observer_ready_tx, observer_ready_rx) = mpsc::sync_channel(1);
     let (observer_done_tx, observer_done_rx) = mpsc::sync_channel(1);
@@ -583,8 +607,14 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
         snapshot.admission_closed
     });
 
-    drop(driver);
-    state.mark_driver_done();
+    crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || {
+            drop(driver);
+            state.mark_driver_done();
+        }),
+        "driver release and completion publication",
+        Duration::from_secs(5),
+    );
     assert_eq!(
         crate::tests::internal::bridge_wait::poll_before(
             inference,
@@ -618,10 +648,13 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     assert_eq!(0, final_snapshot.worker_running);
     assert_eq!(0, final_snapshot.awaiting_release);
     assert_eq!(0, final_snapshot.reserved_bytes);
-    assert!(
-        runtime.tasks.lock().unwrap().is_empty(),
-        "released task must leave the registry"
+    let registry_runtime = Arc::clone(&runtime);
+    let registry_empty = crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || registry_runtime.tasks.lock().unwrap().is_empty()),
+        "final driver registry check",
+        Duration::from_secs(5),
     );
+    assert!(registry_empty, "released task must leave the registry");
     assert_eq!(0, runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst));
 }
 

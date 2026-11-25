@@ -414,8 +414,15 @@ mod tests {
             Duration::from_secs(2),
         );
         assert!(!released, "release must remain pending while the gate is held");
-        state.mark_worker_done();
-        state.mark_released();
+        let release_state = Arc::clone(&state);
+        crate::tests::internal::bridge_wait::join_before(
+            std::thread::spawn(move || {
+                release_state.mark_worker_done();
+                release_state.mark_released();
+            }),
+            "worker completion and release publication",
+            Duration::from_secs(2),
+        );
 
         assert_eq!(
             Some("text/plain"),
