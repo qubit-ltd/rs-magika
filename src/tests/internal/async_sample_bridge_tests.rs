@@ -144,11 +144,18 @@ fn test_dropping_async_driver_closes_pending_bridge_and_wakes_worker() {
         "worker should await driver drop"
     );
     drop(driver);
+    let error = join_before(worker, "driver drop", Duration::from_secs(2)).unwrap_err();
+    assert_eq!(std::io::ErrorKind::Interrupted, error.kind());
+    assert!(
+        crate::internal::async_sample_bridge::is_closed_error(&error),
+        "driver drop must preserve the bridge-close source type"
+    );
     assert_eq!(
-        std::io::ErrorKind::Interrupted,
-        join_before(worker, "driver drop", Duration::from_secs(2))
-            .unwrap_err()
-            .kind(),
+        "async sample bridge closed",
+        error
+            .get_ref()
+            .expect("bridge-close marker must remain the I/O error source")
+            .to_string()
     );
     drop(request);
 }

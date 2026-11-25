@@ -37,6 +37,7 @@ use crate::internal::SyncProviderInput;
 use crate::internal::is_session_stop_error;
 use crate::internal::provider_input::copy_exact;
 use crate::internal::provider_input::invalid_input;
+use crate::internal::provider_input::is_observed_read_stopped_error;
 use crate::internal::provider_input::map_provider_magika_error;
 use crate::internal::provider_input::read_async_segments_observed;
 use crate::internal::provider_input::read_options;
@@ -352,7 +353,22 @@ fn test_legacy_yield_clears_actual_io_before_observing_cancellation() {
     assert!(wake.notified.swap(false, Ordering::AcqRel));
     assert!(!in_flight.load(Ordering::Acquire));
     assert!(!stop_seen.load(Ordering::Acquire));
-    assert!(matches!(future.as_mut().poll(&mut context), Poll::Ready(Err(_))));
+    let error = match future.as_mut().poll(&mut context) {
+        Poll::Ready(Err(Error::IOError(error))) => error,
+        result => panic!("observer cancellation should produce its typed I/O error: {result:?}"),
+    };
+    assert_eq!(std::io::ErrorKind::Interrupted, error.kind());
+    assert!(
+        is_observed_read_stopped_error(&error),
+        "observer cancellation must preserve its source type"
+    );
+    assert_eq!(
+        "provider read stopped",
+        error
+            .get_ref()
+            .expect("observer-stop marker must remain the I/O error source")
+            .to_string()
+    );
     assert!(stop_seen.load(Ordering::Acquire));
     assert_eq!(1, observations.opens.load(Ordering::SeqCst));
     assert_eq!(64, observations.read_bytes.load(Ordering::SeqCst));

@@ -246,16 +246,8 @@ mod tests {
             returned_while_locked,
             "cleanup Drop must return while state lock is held"
         );
-        crate::tests::internal::bridge_wait::join_before(
-            lock_holder,
-            "state lock holder exit",
-            Duration::from_secs(2),
-        );
-        crate::tests::internal::bridge_wait::join_before(
-            dropper,
-            "cleanup Drop exit",
-            Duration::from_secs(2),
-        );
+        crate::tests::internal::bridge_wait::join_before(lock_holder, "state lock holder exit", Duration::from_secs(2));
+        crate::tests::internal::bridge_wait::join_before(dropper, "cleanup Drop exit", Duration::from_secs(2));
         let state = Arc::clone(&state);
         crate::tests::internal::bridge_wait::join_before(
             std::thread::spawn(move || {
@@ -352,12 +344,8 @@ mod tests {
             assert!(!worker_done);
             assert!(!released);
             completion.finish();
-            crate::tests::internal::bridge_wait::join_before(
-                waiter,
-                "blocking waiter cleanup",
-                Duration::from_secs(2),
-            )
-            .expect("blocking waiter result send must succeed");
+            crate::tests::internal::bridge_wait::join_before(waiter, "blocking waiter cleanup", Duration::from_secs(2))
+                .expect("blocking waiter result send must succeed");
             match operation_id {
                 102 => assert_eq!(observed.unwrap().as_deref(), Some("text/plain")),
                 _ => assert_eq!(
