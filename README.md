@@ -96,11 +96,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-`ManagedInferenceRuntime::new` initializes the model and ONNX Runtime session
-synchronously before returning. Detectors created with that runtime through
+Constructors that create a runtime initialize the model and ONNX Runtime
+session synchronously before returning. A runtime supplied through
 `MagikaMimeDetectorBuilder::managed_runtime` or
-`MagikaMimeDetectorProvider::managed_runtime` reuse it directly and do not
-initialize another session.
+`MagikaMimeDetectorProvider::managed_runtime` is reused as-is, without another
+session initialization; the builder validates its byte budget against the
+detector's configured buffer limit.
 
 ## Provider Names
 
@@ -240,10 +241,11 @@ runtime, register `MagikaMimeDetectorProvider::new().managed_runtime(...)`
 explicitly and keep the runtime alive for the detector lifetime; the
 [provider runtime example](doc/user_guide.md#sharing-an-application-managed-inference-runtime)
 shows the setup and shared budget/shutdown behavior.
-Detector construction synchronously waits for the worker to initialize the
-embedded Magika model and ONNX Runtime session. Build it during application
-startup, create it once, and share it (for example with `Arc`). Inference calls
-on its shared runtime are serialized internally.
+When construction creates a runtime, it synchronously waits for the worker to
+initialize the embedded Magika model and ONNX Runtime session. Injecting an
+existing runtime reuses it and checks the configured byte budget. Build the
+detector during application startup, create it once, and share it (for example
+with `Arc`). Inference calls on its shared runtime are serialized internally.
 
 Synchronous borrowed content, reader, and local-file calls sample on the caller
 thread; model work runs on the worker and the call waits for its result. A

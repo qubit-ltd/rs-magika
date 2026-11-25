@@ -547,8 +547,9 @@ fn shutdown_application(
 runtime 关闭后，可调用 `detector.runtime_snapshot()` 查看共享运行状态。
 `ManagedInferenceSnapshot` 是非原子观测：字段可能来自略有差异的时刻，且统计
 包含共享该 runtime 的所有 detector。`faulted` 表示推理 session 曾捕获 panic；
-关闭报告的 `worker_panicked` 只表示 join 时观察到未捕获 panic。非零
-`unconfirmed_provider_io` 表示某个 Pending Provider 操作被丢弃，完成状态无法确认。
+关闭报告的 `worker_panicked` 只表示 join 时观察到未捕获 panic。
+`unconfirmed_provider_io` 统计 Provider 操作完成或清理状态未确认的未释放请求，包括丢弃
+Pending I/O 操作，以及输入析构在清理期间 panic。单凭该计数无法判断底层 I/O 是否仍在运行。
 快照不能证明资源已结算。保留 operation observer，并使用其 `wait_settlement_until(deadline)`
 观察该 operation 所属 scope 的结算；deadline 必须来自相同的 clock domain。`Pending(snapshot)` 表示
 有界等待到达截止时间；`Ready(report)` 是终态，但仍可能含有资源未释放等负面证据，也可能包含该
@@ -631,7 +632,8 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 - 如果 `MagikaMimeDetector::new()` 或 `from_mime_config(...)` 失败，检查 ONNX Runtime feature
   选择以及 `MimeError` 携带的 runtime/model 错误；这两个入口会创建并初始化新的 runtime。如果通过
   `builder().managed_runtime(...)` 或配置后的 Provider 创建失败，检查注入 runtime 的字节预算是否不小于
-  detector 的 buffer limit，并确认该 runtime 已成功初始化。
+  detector 的 buffer limit。ONNX Runtime 初始化错误属于新建 runtime 的路径；注入已有 runtime 会复用它，
+  并报告配置校验错误，例如字节预算不足。
 - 如果文件名检测和内容检测结果不同，请注意前者使用 `qubit-mime` 仓库规则，后者
   使用 Magika 推理；应根据输入选择合适的 `qubit-mime` 策略。
 - 如果 provider 注册或选择失败，应先注册 provider，再解析 `ProviderSelection`，并

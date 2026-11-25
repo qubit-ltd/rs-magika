@@ -679,9 +679,12 @@ After runtime shutdown, inspect the shared runtime with `detector.runtime_snapsh
 The `ManagedInferenceSnapshot` is a non-atomic observation: fields may reflect
 different instants, and counts include every detector sharing that runtime.
 `faulted` records a caught inference-session panic; `worker_panicked` only records
-an uncaught panic observed while joining the worker. A nonzero
-`unconfirmed_provider_io` means a pending Provider operation was dropped before
-completion could be confirmed. A snapshot does not prove settlement. Retain the
+an uncaught panic observed while joining the worker.
+`unconfirmed_provider_io` counts unreleased requests whose Provider operation
+completion or cleanup is unconfirmed. This includes dropped pending I/O and an
+input destructor that panicked during teardown. The count alone does not show
+whether underlying I/O is still running. A snapshot does not prove settlement.
+Retain the
 operation observer and use `wait_settlement_until(deadline)` with a deadline from
 the same clock domain to observe settlement for that operation's scope.
 `Pending(snapshot)` means the bounded wait reached its deadline; `Ready(report)`
@@ -781,8 +784,10 @@ startup and handle per-input errors at the boundary where the input is read.
   ONNX Runtime feature choice and the runtime/model error carried by
   `MimeError`; these constructors create and initialize a new runtime. If
   `builder().managed_runtime(...)` or a configured provider fails, check that
-  the injected runtime's byte budget meets the detector's configured buffer
-  limit and that the runtime itself initialized successfully.
+  the injected runtime's byte budget is at least the detector's configured
+  buffer limit. ONNX Runtime initialization errors apply to paths that create a
+  new runtime; injection reuses the existing runtime and reports configuration
+  validation errors such as an insufficient byte budget.
 - If filename detection and content detection disagree, remember that filename
   detection uses `qubit-mime` repository rules while content detection uses
   Magika inference. Choose the `qubit-mime` policy appropriate for the input.

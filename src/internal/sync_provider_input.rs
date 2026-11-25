@@ -34,7 +34,8 @@ pub(crate) struct SyncProviderInput<'a> {
 impl<'a> SyncProviderInput<'a> {
     /// Creates a synchronous input for one resource and cumulative byte limit.
     ///
-    /// The borrowed filesystem and path must remain valid through inference.
+    /// The borrowed filesystem and path must remain valid through synchronous
+    /// feature sampling. Worker inference receives the extracted features.
     /// `version` constrains each range read when present.
     ///
     /// # Parameters
@@ -65,7 +66,7 @@ impl<'a> SyncProviderInput<'a> {
     }
 
     /// Creates a session-backed input retaining the opened object through
-    /// inference.
+    /// synchronous feature extraction.
     ///
     /// # Parameters
     ///

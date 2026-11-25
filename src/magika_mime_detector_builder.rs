@@ -166,7 +166,8 @@ impl MagikaMimeDetectorBuilder {
         self
     }
 
-    /// Initializes the Magika session and constructs the detector.
+    /// Builds a detector, initializing a new Magika session unless a runtime
+    /// was supplied.
     ///
     /// # Returns
     ///

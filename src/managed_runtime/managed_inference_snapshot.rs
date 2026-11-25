@@ -36,7 +36,10 @@ pub struct ManagedInferenceSnapshot {
     pub worker_running: usize,
     /// Requests whose worker completed but whose resources remain retained.
     pub awaiting_release: usize,
-    /// Unreleased requests dropped while provider I/O completion was unknown.
+    /// Unreleased requests whose Provider operation completion or cleanup is
+    /// unconfirmed. This includes dropped pending I/O and input teardown that
+    /// panicked. The count alone does not show whether underlying I/O is still
+    /// running.
     pub unconfirmed_provider_io: usize,
     /// Currently reserved aggregate payload bytes.
     pub reserved_bytes: usize,
