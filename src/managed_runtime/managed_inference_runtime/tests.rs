@@ -2875,11 +2875,7 @@ fn test_provider_driver_panic_after_real_pending_io_preserves_result_and_capacit
             magika::AsyncInput::length(&self.0)
         }
 
-        fn read_at(
-            &mut self,
-            buffer: &mut [u8],
-            offset: u64,
-        ) -> impl Future<Output = Result<(), MagikaError>> {
+        fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> impl Future<Output = Result<(), MagikaError>> {
             magika::AsyncInput::read_at(&mut self.0, buffer, offset)
         }
     }
@@ -2910,7 +2906,7 @@ fn test_provider_driver_panic_after_real_pending_io_preserves_result_and_capacit
         None,
         1,
     );
-    let io_in_flight = input.io_in_flight().unwrap();
+    let io_in_flight = input.io_in_flight();
     assert!(!io_in_flight.load(Ordering::Acquire));
     let mut guard = ProviderDriverGuard::new_with_io_status(
         PanickingDropInput(input),
@@ -2933,8 +2929,14 @@ fn test_provider_driver_panic_after_real_pending_io_preserves_result_and_capacit
             assert!(poll.is_pending(), "the real Provider read must remain Pending");
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "Provider read never reached its Pending poll");
-        assert!(poll.is_pending(), "Provider read completed before the gated Pending poll");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Provider read never reached its Pending poll"
+        );
+        assert!(
+            poll.is_pending(),
+            "Provider read completed before the gated Pending poll"
+        );
         std::thread::yield_now();
     }
     assert!(io_in_flight.load(Ordering::Acquire));
