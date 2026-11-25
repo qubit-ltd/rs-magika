@@ -21,6 +21,66 @@ use std::task::Wake;
 use std::task::Waker;
 use std::time::Duration;
 
+fn wait_for_shutdown_callers(ready_rx: &mpsc::Receiver<usize>, timeout: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut ready = [false; 2];
+    for _ in 0..2 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let caller = ready_rx
+            .recv_timeout(remaining)
+            .map_err(|error| format!("shutdown caller readiness timed out or disconnected: {error}"))?;
+        let slot = ready
+            .get_mut(caller)
+            .ok_or_else(|| format!("shutdown caller readiness reported invalid caller {caller}"))?;
+        if *slot {
+            return Err(format!("shutdown caller {caller} reported readiness twice"));
+        }
+        *slot = true;
+    }
+    Ok(())
+}
+
+fn spawn_gated_shutdown_callers<T, F, G>(
+    first: F,
+    second: G,
+    timeout: Duration,
+) -> Result<(std::thread::JoinHandle<T>, std::thread::JoinHandle<T>), String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    G: FnOnce() -> T + Send + 'static,
+{
+    let (ready_tx, ready_rx) = mpsc::sync_channel(2);
+    let (first_gate_tx, first_gate_rx) = mpsc::sync_channel(1);
+    let (second_gate_tx, second_gate_rx) = mpsc::sync_channel(1);
+    let spawn = |caller: usize, gate_rx: mpsc::Receiver<()>, call: Box<dyn FnOnce() -> T + Send>| {
+        let ready_tx = ready_tx.clone();
+        std::thread::spawn(move || {
+            ready_tx
+                .send(caller)
+                .unwrap_or_else(|_| panic!("shutdown caller {caller} readiness channel disconnected"));
+            gate_rx.recv_timeout(timeout).unwrap_or_else(|error| {
+                panic!("shutdown caller {caller} release gate timed out or disconnected: {error}")
+            });
+            call()
+        })
+    };
+    let first = spawn(0, first_gate_rx, Box::new(first));
+    let second = spawn(1, second_gate_rx, Box::new(second));
+    drop(ready_tx);
+    if let Err(error) = wait_for_shutdown_callers(&ready_rx, timeout) {
+        drop((first_gate_tx, second_gate_tx));
+        return Err(format!("shutdown caller handshake failed: {error}"));
+    }
+    first_gate_tx
+        .send(())
+        .map_err(|_| "shutdown caller 0 release gate disconnected".to_owned())?;
+    second_gate_tx
+        .send(())
+        .map_err(|_| "shutdown caller 1 release gate disconnected".to_owned())?;
+    Ok((first, second))
+}
+
 use magika::Error as MagikaError;
 use qubit_mime::MimeError;
 use qubit_operation::ChildOutcomeKind;
@@ -4318,24 +4378,18 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
         .unwrap(),
         None
     );
-    let barrier = Arc::new(std::sync::Barrier::new(3));
     let first_runtime = Arc::clone(&runtime);
-    let first_barrier = Arc::clone(&barrier);
-    let first_shutdown = std::thread::spawn(move || {
-        first_barrier.wait();
-        first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
-    });
     let second_runtime = Arc::clone(&runtime);
-    let second_barrier = Arc::clone(&barrier);
-    let second_shutdown = std::thread::spawn(move || {
-        second_barrier.wait();
-        second_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
-    });
-    barrier.wait();
+    let (first_shutdown, second_shutdown) = spawn_gated_shutdown_callers(
+        move || first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2)),
+        move || second_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2)),
+        Duration::from_secs(2),
+    )
+    .expect("both drain shutdown callers should reach the release gate");
     assert!(
         crate::tests::internal::bridge_wait::join_before(
             first_shutdown,
-            "first drain caller after shutdown barrier",
+            "first drain caller after shutdown gate",
             Duration::from_secs(2),
         )
         .worker_stopped
@@ -4343,11 +4397,23 @@ fn test_drain_timeout_can_be_observed_again_by_multiple_shutdown_callers() {
     assert!(
         crate::tests::internal::bridge_wait::join_before(
             second_shutdown,
-            "second drain caller after shutdown barrier",
+            "second drain caller after shutdown gate",
             Duration::from_secs(2),
         )
         .worker_stopped
     );
+}
+
+#[test]
+fn test_shutdown_caller_handshake_reports_missing_participant_without_waiting() {
+    let (ready_tx, ready_rx) = mpsc::sync_channel(2);
+    ready_tx.send(0).unwrap();
+    drop(ready_tx);
+
+    let error = wait_for_shutdown_callers(&ready_rx, Duration::from_secs(1)).unwrap_err();
+
+    assert!(error.contains("shutdown caller readiness"), "{error}");
+    assert!(error.contains("disconnected"), "{error}");
 }
 
 #[test]
@@ -4989,28 +5055,22 @@ fn test_shutdown_timeout_observes_joinable_worker_while_admission_is_held() {
     }
 
     let admission = runtime.reserve_request(None, 4).unwrap();
-    let barrier = Arc::new(std::sync::Barrier::new(3));
     let first_runtime = Arc::clone(&runtime);
-    let first_barrier = Arc::clone(&barrier);
-    let first_shutdown = std::thread::spawn(move || {
-        first_barrier.wait();
-        first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(50))
-    });
     let second_runtime = Arc::clone(&runtime);
-    let second_barrier = Arc::clone(&barrier);
-    let second_shutdown = std::thread::spawn(move || {
-        second_barrier.wait();
-        second_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50))
-    });
-    barrier.wait();
+    let (first_shutdown, second_shutdown) = spawn_gated_shutdown_callers(
+        move || first_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_millis(50)),
+        move || second_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_millis(50)),
+        Duration::from_secs(2),
+    )
+    .expect("both shutdown callers should reach the release gate");
     let first = crate::tests::internal::bridge_wait::join_before(
         first_shutdown,
-        "first shutdown caller after held admission barrier",
+        "first shutdown caller after held admission gate",
         Duration::from_secs(2),
     );
     let second = crate::tests::internal::bridge_wait::join_before(
         second_shutdown,
-        "second shutdown caller after held admission barrier",
+        "second shutdown caller after held admission gate",
         Duration::from_secs(2),
     );
 
