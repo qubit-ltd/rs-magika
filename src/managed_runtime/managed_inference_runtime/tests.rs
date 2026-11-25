@@ -21,14 +21,40 @@ use std::task::Wake;
 use std::task::Waker;
 use std::time::Duration;
 
+use magika::Error as MagikaError;
+use qubit_mime::MimeError;
+use qubit_operation::ChildOutcomeKind;
+use qubit_operation::GroupOptions;
+use qubit_operation::ManagerOptions;
+use qubit_operation::OperationManager;
+use qubit_operation::OperationOptions;
+use qubit_operation::OperationOutcome;
+use qubit_operation::ScopeLimits;
+use qubit_operation::ShutdownMode;
+use qubit_operation::StopReason;
+
+use super::super::inference_future::InferenceFuture;
+use super::super::provider_driver_guard::ProviderDriverGuard;
+use super::super::request_admission_handoff::RequestAdmissionHandoff;
+use super::super::worker_input::WorkerBytes;
+use super::ManagedInferenceRuntime;
+use super::WorkerInput;
+use super::worker_loop::execute_classified;
+
 fn wait_for_shutdown_callers(ready_rx: &mpsc::Receiver<usize>, timeout: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + timeout;
     let mut ready = [false; 2];
     for _ in 0..2 {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let caller = ready_rx
-            .recv_timeout(remaining)
-            .map_err(|error| format!("shutdown caller readiness timed out or disconnected: {error}"))?;
+        let caller = ready_rx.recv_timeout(remaining).map_err(|error| {
+            let missing = ready
+                .iter()
+                .enumerate()
+                .filter_map(|(caller, is_ready)| (!is_ready).then_some(caller.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("shutdown caller readiness missing caller(s) {missing}, timed out or disconnected: {error}")
+        })?;
         let slot = ready
             .get_mut(caller)
             .ok_or_else(|| format!("shutdown caller readiness reported invalid caller {caller}"))?;
@@ -80,26 +106,6 @@ where
         .map_err(|_| "shutdown caller 1 release gate disconnected".to_owned())?;
     Ok((first, second))
 }
-
-use magika::Error as MagikaError;
-use qubit_mime::MimeError;
-use qubit_operation::ChildOutcomeKind;
-use qubit_operation::GroupOptions;
-use qubit_operation::ManagerOptions;
-use qubit_operation::OperationManager;
-use qubit_operation::OperationOptions;
-use qubit_operation::OperationOutcome;
-use qubit_operation::ScopeLimits;
-use qubit_operation::ShutdownMode;
-use qubit_operation::StopReason;
-
-use super::super::inference_future::InferenceFuture;
-use super::super::provider_driver_guard::ProviderDriverGuard;
-use super::super::request_admission_handoff::RequestAdmissionHandoff;
-use super::super::worker_input::WorkerBytes;
-use super::ManagedInferenceRuntime;
-use super::WorkerInput;
-use super::worker_loop::execute_classified;
 
 struct ThreadWake(std::thread::Thread);
 
@@ -4413,6 +4419,7 @@ fn test_shutdown_caller_handshake_reports_missing_participant_without_waiting() 
     let error = wait_for_shutdown_callers(&ready_rx, Duration::from_secs(1)).unwrap_err();
 
     assert!(error.contains("shutdown caller readiness"), "{error}");
+    assert!(error.contains("missing caller(s) 1"), "{error}");
     assert!(error.contains("disconnected"), "{error}");
 }
 
