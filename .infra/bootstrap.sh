@@ -63,11 +63,21 @@ else
         echo "error: invalid bootstrap lock timeout '$lock_timeout_seconds' (expected 1-86400 seconds); lock: $lock" >&2
         exit 2
     }
+    handle_lock_signal() {
+        local signal_name=$1 exit_status=$2
+        trap - EXIT
+        trap '' TERM INT HUP
+        echo "error: bootstrap received $signal_name; preserving manager lock at $lock. Confirm this bootstrap and its cache-writing child processes have stopped before removing the lock directory and retrying." >&2
+        exit "$exit_status"
+    }
     lock_started_at=$SECONDS
     while true; do
         if lock_error=$(mkdir "$lock" 2>&1); then
             cleanup_lock() { rm -rf -- "$lock"; }
             trap cleanup_lock EXIT
+            trap 'handle_lock_signal TERM 143' TERM
+            trap 'handle_lock_signal INT 130' INT
+            trap 'handle_lock_signal HUP 129' HUP
             if ! printf '%s\n' "$$" > "$lock/pid"; then
                 echo "error: unable to write bootstrap lock owner; lock: $lock" >&2
                 exit 1
@@ -115,7 +125,7 @@ else
         mv "$manager_bin.tmp" "$manager_bin"
     fi
     cleanup_lock
-    trap - EXIT
+    trap - EXIT TERM INT HUP
 fi
 
 export RS_INFRA_PROJECT_ROOT="$project_root"
