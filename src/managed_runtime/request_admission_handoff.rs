@@ -549,6 +549,58 @@ mod tests {
     use crate::managed_runtime::worker_input::WorkerBytes;
     use crate::managed_runtime::worker_input::WorkerInput;
 
+    fn admission_handoff_fixture() -> (
+        Arc<RequestAdmissionHandoff>,
+        super::RequestAdmissionHandoffGuard,
+    ) {
+        let active_requests = Arc::new(AtomicUsize::new(0));
+        let byte_budget = Arc::new(ByteBudget::new(8));
+        let admission = RequestAdmission::new(
+            Arc::new(TaskState::new(798, None)),
+            ServicePermit::try_acquire(&active_requests, 1).unwrap(),
+            byte_budget.try_acquire(8).unwrap(),
+        );
+        RequestAdmissionHandoff::new(admission)
+    }
+
+    #[derive(Default)]
+    struct WakerProbe(AtomicUsize);
+
+    impl Wake for WakerProbe {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_root_claim_before_poll_reports_started_without_waking() {
+        let (handoff, _guard) = admission_handoff_fixture();
+        assert!(handoff.take_for_root().is_some());
+
+        let probe = Arc::new(WakerProbe::default());
+        let waker = Waker::from(Arc::clone(&probe));
+        let mut context = std::task::Context::from_waker(&waker);
+        assert_eq!(Some(true), handoff.poll_body_started(&mut context));
+        assert_eq!(0, probe.0.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_root_poll_before_claim_registers_and_notifies_waker() {
+        let (handoff, _guard) = admission_handoff_fixture();
+        let probe = Arc::new(WakerProbe::default());
+        let waker = Waker::from(Arc::clone(&probe));
+        let mut context = std::task::Context::from_waker(&waker);
+
+        assert_eq!(None, handoff.poll_body_started(&mut context));
+        assert!(handoff.take_for_root().is_some());
+        assert_eq!(1, probe.0.load(Ordering::SeqCst));
+        assert_eq!(Some(true), handoff.poll_body_started(&mut context));
+    }
+
     #[test]
     fn test_handoff_waker_replacements_drop_after_state_unlock() {
         struct DropProbe {
@@ -574,14 +626,7 @@ mod tests {
             }
         }
 
-        let active_requests = Arc::new(AtomicUsize::new(0));
-        let byte_budget = Arc::new(ByteBudget::new(8));
-        let admission = RequestAdmission::new(
-            Arc::new(TaskState::new(799, None)),
-            ServicePermit::try_acquire(&active_requests, 1).unwrap(),
-            byte_budget.try_acquire(8).unwrap(),
-        );
-        let (handoff, _guard) = RequestAdmissionHandoff::new(admission);
+        let (handoff, _guard) = admission_handoff_fixture();
 
         let caller_unlocked = Arc::new(AtomicBool::new(false));
         let caller_wake_count = Arc::new(AtomicUsize::new(0));
