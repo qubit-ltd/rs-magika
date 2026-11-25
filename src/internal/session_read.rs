@@ -122,8 +122,12 @@ fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut
 /// * `should_stop` - Predicate checked before each provider attempt.
 /// * `completed_steps` - Number of provider futures that returned `Ready` since
 ///   the last cooperative yield.
-/// * `io_in_flight` - Optional marker set only while polling the provider
-///   future; it remains false during cooperative yields.
+/// * `io_in_flight` - Optional actual-I/O marker. It is set immediately before
+///   polling the provider read, remains set when that poll returns `Pending`,
+///   and is cleared when it returns `Ready`. Cooperative yields occur after a
+///   completed read, so the marker remains clear during those yields. If this
+///   local future is dropped while the read is `Pending`, the marker stays set
+///   so the owner can settle the uncertain resource correctly.
 ///
 /// # Returns
 ///

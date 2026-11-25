@@ -624,11 +624,15 @@ impl ManagedInferenceRuntime {
 
     /// Drives provider reads for an already admitted async input.
     ///
-    /// `scope` is observed during provider setup and while driving reads. If
-    /// it stops the request, this future returns a Magika stop error; owned
-    /// setup values are dropped before admission is released. A provider read
-    /// already polled to `Pending` remains unconfirmed even after its local
-    /// future, input, and driver are dropped.
+    /// `scope` is observed during provider setup and while driving reads. A
+    /// published worker result takes precedence over a concurrent stop; this
+    /// future returns a Magika stop error only when cancellation wins the
+    /// observation race. The driver checks for a published result before
+    /// checking stop notifications, and checks again if a provider read returns
+    /// the internal stop marker in the same poll. Owned setup values are
+    /// dropped before admission is released. A provider read already polled to
+    /// `Pending` remains unconfirmed even after its local future, input, and
+    /// driver are dropped.
     ///
     /// # Parameters
     ///
