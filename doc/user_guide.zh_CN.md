@@ -391,13 +391,10 @@ provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
 `MimeContentBackend::detect_reader` 从当前 cursor 检测到 EOF。取得原位置后，即使检测返回错误，
 reader 检测也会尝试恢复游标。恢复成功时保留检测结果或原检测错误；恢复 seek 失败时，返回该
 `MimeError::Io`，其优先级高于检测结果或原错误，且不保证 reader 的游标位置。
-Provider path 检测优先使用随机读取 session：只打开一次，并从同一个对象的多个位置采样。
-打开时报告的长度只限定可读取偏移，不是内容快照。只有打开 session 返回
-`UnsupportedOperation` 或 `UnsupportedCapability` 才回退到旧的按路径读取；其他打开错误和
-session 读取错误直接传播，不会重新按路径打开。旧路由逐段按路径打开，并在支持时为每一段
-附带相同的条件 ETag；没有该条件就不能保证多段期间内容一致。`max_bytes` 是所有采样读取的
-累计预算。不支持范围读取时可能额外探测 1 字节以判断超限，并对超限资源返回错误。Magika 的
-`Unknown` 和 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
+Provider path 优先使用随机读取 session；各路由、`max_bytes` 和 `read_all` 回退行为见
+[Provider Path 示例](#provider-path-示例)。旧范围路由逐段按路径读取，并在支持时对每一段
+附带相同的条件 ETag；没有条件读取就无法保证多段期间内容一致。Magika 的 `Unknown` 和
+`Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
 
 本地文件媒体细化仅适用于普通文件。目录和符号链接会跳过细化；使用 `Freedesktop` 时，若存在文件名候选则可以选中，使用
 `VerifyContent` 时则在没有内容的情况下返回 `None`。FIFO、Unix socket 等其他本地类型在内容检测的元数据检查阶段返回
