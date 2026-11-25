@@ -610,18 +610,22 @@ impl MagikaMimeDetector {
     ///
     /// Zero or one MIME type candidates.
     ///
-    /// Only regular files are opened for content detection. Symlinks and
-    /// directories retain their empty-candidate behavior; other local file
-    /// types return [`MimeError::Io`] with
-    /// [`std::io::ErrorKind::Unsupported`]. After the path-based type check,
-    /// content detection validates the metadata of the opened handle and reads
-    /// from that same handle. On Unix, opening does not follow the final
-    /// symlink and does not wait for a FIFO writer. Other platforms retain
-    /// their standard open behavior and validate the resulting handle type.
-    /// The path can change after the initial metadata check, in which case
-    /// opening or reading it may return an I/O error. This does not constrain
-    /// ancestor resolution or changes to a regular file's contents while it is
-    /// being read.
+    /// This path-based entry first screens the path's final component.
+    /// Directories and final symlinks retain their empty-candidate behavior;
+    /// other local file types, including FIFOs and Unix sockets, return
+    /// [`MimeError::Io`] with [`std::io::ErrorKind::Unsupported`]. For a path
+    /// screened as a regular file, detection opens it, validates the opened
+    /// handle's type, and samples through that same handle. On Unix, opening
+    /// does not follow the final symlink and does not wait for a FIFO writer.
+    /// Other platforms use their standard open behavior and validate the
+    /// resulting handle type, without those Unix open-stage guarantees.
+    /// Changes to the path between screening and opening can cause an I/O
+    /// error. This check does not constrain ancestor resolution or guarantee
+    /// that the file's contents remain unchanged while being read.
+    ///
+    /// This backend entry performs content detection only. The higher-level
+    /// detector's optional media refinement is a separate path-based
+    /// operation and does not use this validated handle.
     ///
     /// # Errors
     ///
@@ -861,9 +865,11 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// Returns [`MimeError::Io`] when file metadata or content cannot be read.
     /// FIFO, Unix socket, and other unsupported local file types also return
     /// [`MimeError::Io`] with [`std::io::ErrorKind::Unsupported`]; directories
-    /// and final symlinks instead produce no candidates. Metadata inspection
-    /// and opening are separate operations, so path replacement between them
-    /// is not prevented. Returns [`MimeError::DetectorBackend`] when inference
+    /// and final symlinks instead produce no candidates. Path screening and
+    /// opening are separate operations, so path replacement between them can
+    /// cause an I/O error. The higher-level detector's optional media
+    /// refinement is a separate path-based operation and may open the path
+    /// independently. Returns [`MimeError::DetectorBackend`] when inference
     /// fails, including worker inference.
     fn guess_from_file(&self, file: &Path) -> MimeResult<(Vec<String>, Vec<u8>)> {
         Ok((self.guess_from_magika_file(file)?, Vec::new()))
