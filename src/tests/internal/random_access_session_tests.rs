@@ -850,6 +850,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         .unwrap();
     let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
     let path = Path::parse("/bridge/legacy").unwrap();
+
     #[derive(Debug, PartialEq)]
     enum WorkerEvent {
         DetectionPending,
@@ -857,19 +858,22 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         ReadyBeforePending,
         CompletionPending,
         CompletionNotified,
-        ActiveWakeNotified,
+        ReadyBeforeCompletionNotification,
     }
     let (events_tx, events_rx) = std::sync::mpsc::channel();
-    let (observe_tx, observe_rx) = std::sync::mpsc::channel();
-    let (completion_tx, completion_rx) = std::sync::mpsc::channel();
-    let (active_wake_tx, active_wake_rx) = std::sync::mpsc::channel();
     let (startup_tx, startup_rx) = std::sync::mpsc::channel();
-    let (active_start_tx, active_start_rx) = std::sync::mpsc::channel();
+    let (active_permit_tx, active_permit_rx) = std::sync::mpsc::channel();
+    let active_permit_tx = std::sync::Mutex::new(Some(active_permit_tx));
+    let active_wakes = Arc::new(AtomicUsize::new(0));
+    let worker_active_wakes = Arc::clone(&active_wakes);
+    let startup_wakes = Arc::new(AtomicUsize::new(0));
+    let worker_startup_wakes = Arc::clone(&startup_wakes);
     let completion_wakes = Arc::new(AtomicUsize::new(0));
     let worker_completion_wakes = Arc::clone(&completion_wakes);
+
     let worker = std::thread::spawn(move || {
         struct StartupWake {
-            startup_count: Arc<AtomicUsize>,
+            count: Arc<AtomicUsize>,
             startup: std::sync::mpsc::Sender<()>,
         }
         impl Wake for StartupWake {
@@ -877,13 +881,13 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
                 self.wake_by_ref();
             }
             fn wake_by_ref(self: &Arc<Self>) {
-                self.startup_count.fetch_add(1, Ordering::SeqCst);
+                self.count.fetch_add(1, Ordering::SeqCst);
                 let _ = self.startup.send(());
             }
         }
         struct ActiveWake {
             count: Arc<AtomicUsize>,
-            notification: std::sync::mpsc::Sender<WorkerEvent>,
+            driver: std::task::Waker,
         }
         impl Wake for ActiveWake {
             fn wake(self: Arc<Self>) {
@@ -891,13 +895,13 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
             }
             fn wake_by_ref(self: &Arc<Self>) {
                 self.count.fetch_add(1, Ordering::SeqCst);
-                let _ = self.notification.send(WorkerEvent::ActiveWakeNotified);
+                self.driver.wake_by_ref();
             }
         }
         struct CompletionWake {
-            events: std::sync::mpsc::Sender<WorkerEvent>,
-            completion: std::sync::mpsc::Sender<()>,
             count: Arc<AtomicUsize>,
+            events: std::sync::mpsc::Sender<WorkerEvent>,
+            driver: std::task::Waker,
         }
         impl Wake for CompletionWake {
             fn wake(self: Arc<Self>) {
@@ -906,137 +910,137 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
             fn wake_by_ref(self: &Arc<Self>) {
                 self.count.fetch_add(1, Ordering::SeqCst);
                 let _ = self.events.send(WorkerEvent::CompletionNotified);
-                let _ = self.completion.send(());
+                self.driver.wake_by_ref();
             }
         }
-        let active_wakes = Arc::new(AtomicUsize::new(0));
-        let startup_wakes = Arc::new(AtomicUsize::new(0));
-        let mut heartbeats = 0usize;
+        #[derive(Clone, Copy)]
+        enum DriverPhase {
+            FirstPoll,
+            AwaitHeartbeatPoll,
+            AwaitCompletion,
+        }
+
+        let startup_waker = std::task::Waker::from(Arc::new(StartupWake {
+            count: worker_startup_wakes,
+            startup: startup_tx,
+        }));
         let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
             &detector,
             &file_system,
             &path,
             6,
         ));
-        let startup_waker = std::task::Waker::from(Arc::new(StartupWake {
-            startup_count: Arc::clone(&startup_wakes),
-            startup: startup_tx,
-        }));
-        let mut startup_context = Context::from_waker(&startup_waker);
-        let first = detection.as_mut().poll(&mut startup_context);
-        if let Poll::Ready(result) = first {
-            let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
-            return (
-                result,
-                heartbeats,
-                active_wakes.load(Ordering::SeqCst),
-                startup_wakes.load(Ordering::SeqCst),
-            );
-        }
-        let _ = events_tx.send(WorkerEvent::DetectionPending);
-        if active_start_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-            panic!("timed out waiting for active-wake phase permit");
-        }
-        // This real test-controlled waker notification advances the heartbeat.
-        let active_waker = std::task::Waker::from(Arc::new(ActiveWake {
-            count: Arc::clone(&active_wakes),
-            notification: active_wake_tx,
-        }));
-        active_waker.wake_by_ref();
-        assert_eq!(
-            active_wake_rx.recv_timeout(Duration::from_secs(5)),
-            Ok(WorkerEvent::ActiveWakeNotified)
-        );
-        let _ = events_tx.send(WorkerEvent::Heartbeat(active_wakes.load(Ordering::SeqCst)));
-        heartbeats += 1;
-        if observe_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-            panic!("timed out waiting for completion observation request");
-        }
-        // Observe the in-flight inference with a phase-specific waker after the
-        // engine entered its closed gate. Startup wakes cannot satisfy this.
-        let completion_waker = std::task::Waker::from(Arc::new(CompletionWake {
-            events: events_tx.clone(),
-            completion: completion_tx,
-            count: worker_completion_wakes,
-        }));
-        let mut completion_context = Context::from_waker(&completion_waker);
-        let pending = detection.as_mut().poll(&mut completion_context);
-        assert!(pending.is_pending(), "inference must remain behind the closed gate");
-        heartbeats += 1;
-        let _ = events_tx.send(WorkerEvent::CompletionPending);
-        let notified = completion_rx.recv_timeout(Duration::from_secs(5));
-        assert!(notified.is_ok(), "completion-stage waker notification");
-        match detection.as_mut().poll(&mut completion_context) {
-            Poll::Ready(result) => (
-                result,
-                heartbeats,
-                active_wakes.load(Ordering::SeqCst),
-                startup_wakes.load(Ordering::SeqCst),
-            ),
-            Poll::Pending => panic!("completion notification did not make detection ready"),
-        }
+        let mut phase = DriverPhase::FirstPoll;
+        let mut completion_waker = None;
+        let mut heartbeats = 0usize;
+        block_on(std::future::poll_fn(|driver_cx| match phase {
+            DriverPhase::FirstPoll => {
+                let mut startup_cx = Context::from_waker(&startup_waker);
+                match detection.as_mut().poll(&mut startup_cx) {
+                    Poll::Ready(result) => {
+                        let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
+                        Poll::Ready((result, heartbeats))
+                    }
+                    Poll::Pending => {
+                        let _ = events_tx.send(WorkerEvent::DetectionPending);
+                        match active_permit_rx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(()) => {
+                                phase = DriverPhase::AwaitHeartbeatPoll;
+                                let active_waker = std::task::Waker::from(Arc::new(ActiveWake {
+                                    count: Arc::clone(&worker_active_wakes),
+                                    driver: driver_cx.waker().clone(),
+                                }));
+                                active_waker.wake_by_ref();
+                                Poll::Pending
+                            }
+                            Err(error) => panic!("active-wake phase permit unavailable: {error}"),
+                        }
+                    }
+                }
+            }
+            DriverPhase::AwaitHeartbeatPoll => {
+                heartbeats += 1;
+                let _ = events_tx.send(WorkerEvent::Heartbeat(worker_active_wakes.load(Ordering::SeqCst)));
+                let waker = completion_waker.get_or_insert_with(|| {
+                    std::task::Waker::from(Arc::new(CompletionWake {
+                        count: Arc::clone(&worker_completion_wakes),
+                        events: events_tx.clone(),
+                        driver: driver_cx.waker().clone(),
+                    }))
+                });
+                let mut completion_cx = Context::from_waker(waker);
+                match detection.as_mut().poll(&mut completion_cx) {
+                    Poll::Pending => {
+                        phase = DriverPhase::AwaitCompletion;
+                        let _ = events_tx.send(WorkerEvent::CompletionPending);
+                        Poll::Pending
+                    }
+                    Poll::Ready(result) => {
+                        let _ = events_tx.send(WorkerEvent::ReadyBeforeCompletionNotification);
+                        Poll::Ready((result, heartbeats))
+                    }
+                }
+            }
+            DriverPhase::AwaitCompletion => {
+                let waker = completion_waker.as_ref().expect("completion waker was registered");
+                let mut completion_cx = Context::from_waker(waker);
+                match detection.as_mut().poll(&mut completion_cx) {
+                    Poll::Ready(result) => Poll::Ready((result, heartbeats)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }))
     });
+
+    let release_gate = || {
+        let (released, changed) = &*engine_gate;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+    };
+    let cleanup = || {
+        drop(active_permit_tx.lock().unwrap().take());
+        release_gate();
+    };
 
     let first_poll = crate::tests::internal::bridge_wait::wait_for_stage(
         &events_rx,
         &WorkerEvent::DetectionPending,
         "legacy detection first Pending",
         Duration::from_secs(5),
-        || {
-            let (released, changed) = &*engine_gate;
-            *released.lock().unwrap() = true;
-            changed.notify_all();
-            let _ = active_start_tx.send(());
-            let _ = observe_tx.send(());
-        },
+        || cleanup(),
     );
     if let Err(stage) = first_poll {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
     if engine_entered_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+        cleanup();
         let stage = "timed out waiting for synthetic inference to enter its gate";
-        let (released, changed) = &*engine_gate;
-        *released.lock().unwrap() = true;
-        changed.notify_all();
-        let _ = active_start_tx.send(());
-        let _ = observe_tx.send(());
         let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
         panic!("{stage}");
     }
     if startup_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+        cleanup();
         let stage = "timed out waiting for independent startup notification";
-        let (released, changed) = &*engine_gate;
-        *released.lock().unwrap() = true;
-        changed.notify_all();
-        let _ = active_start_tx.send(());
-        let _ = observe_tx.send(());
         let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
         panic!("{stage}");
     }
-    let _ = active_start_tx.send(());
+
+    if active_permit_tx.lock().unwrap().as_ref().unwrap().send(()).is_err() {
+        cleanup();
+        let stage = "worker disconnected before active-wake phase permit";
+        let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
+        panic!("{stage}");
+    }
     let heartbeat = crate::tests::internal::bridge_wait::wait_for_stage(
         &events_rx,
         &WorkerEvent::Heartbeat(1),
-        "legacy detection worker heartbeat after startup notification",
+        "driver poll after one active wake",
         Duration::from_secs(5),
-        || {
-            let (released, changed) = &*engine_gate;
-            *released.lock().unwrap() = true;
-            changed.notify_all();
-            let _ = observe_tx.send(());
-        },
+        || cleanup(),
     );
     if let Err(stage) = heartbeat {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-    if observe_tx.send(()).is_err() {
-        let stage = "worker disconnected before completion observation request";
-        let (released, changed) = &*engine_gate;
-        *released.lock().unwrap() = true;
-        changed.notify_all();
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
         panic!("{stage}");
     }
     let completion_pending = crate::tests::internal::bridge_wait::wait_for_stage(
@@ -1044,33 +1048,27 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         &WorkerEvent::CompletionPending,
         "completion-stage poll pending behind closed inference gate",
         Duration::from_secs(5),
-        || {
-            let (released, changed) = &*engine_gate;
-            *released.lock().unwrap() = true;
-            changed.notify_all();
-            let _ = observe_tx.send(());
-        },
+        || cleanup(),
     );
     if let Err(stage) = completion_pending {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
+
     let completion_wakes_before_release = completion_wakes.load(Ordering::SeqCst);
-    let (released, changed) = &*engine_gate;
-    *released.lock().unwrap() = true;
-    changed.notify_all();
+    release_gate();
     let completion_notification = crate::tests::internal::bridge_wait::wait_for_stage(
         &events_rx,
         &WorkerEvent::CompletionNotified,
         "completion-stage waker notification",
         Duration::from_secs(5),
-        || {},
+        || cleanup(),
     );
     if let Err(stage) = completion_notification {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
-    let (detection_result, heartbeats, active_wakes, startup_wakes) = crate::tests::internal::bridge_wait::join_before(
+    let (detection_result, heartbeats) = crate::tests::internal::bridge_wait::join_before(
         worker,
         "legacy provider bridge completion",
         Duration::from_secs(5),
@@ -1083,16 +1081,20 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
     assert_eq!(
         completion_wakes.load(Ordering::SeqCst),
         1,
-        "completion observation requires its registered waker notification"
+        "completion stage requires its registered waker notification"
     );
     assert_eq!(vec!["application/x-fixture"], candidates);
-    assert!(heartbeats > 1);
     assert_eq!(
-        active_wakes, 1,
-        "only the first Pending branch may actively wake the worker"
+        heartbeats, 1,
+        "the active wake must drive exactly one subsequent heartbeat poll"
+    );
+    assert_eq!(
+        active_wakes.load(Ordering::SeqCst),
+        1,
+        "only the first Pending branch may actively wake the driver"
     );
     assert!(
-        startup_wakes > 0,
+        startup_wakes.load(Ordering::SeqCst) > 0,
         "legacy startup notification must be observed independently"
     );
 }
