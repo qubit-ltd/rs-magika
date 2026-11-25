@@ -310,9 +310,21 @@ fn test_snapshot_concurrent_with_shutdown_finishes_within_deadline() {
         }
     });
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    let shutdown_runtime = Arc::clone(&runtime);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
+    });
+    let report = crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "shutdown concurrent with snapshot observer",
+        Duration::from_secs(3),
+    );
     assert!(report.worker_stopped);
-    observer.join().expect("concurrent snapshot observer should finish");
+    crate::tests::internal::bridge_wait::join_before(
+        observer,
+        "concurrent snapshot observer",
+        Duration::from_secs(3),
+    );
 }
 
 struct ReleaseGate(Option<mpsc::SyncSender<()>>);
@@ -332,22 +344,40 @@ impl Drop for ReleaseGate {
 }
 
 fn wait_for_snapshot(
-    runtime: &ManagedInferenceRuntime,
-    stage: &str,
-    condition: impl Fn(&super::super::ManagedInferenceSnapshot) -> bool,
+    runtime: Arc<ManagedInferenceRuntime>,
+    stage: &'static str,
+    condition: impl Fn(&super::super::ManagedInferenceSnapshot) -> bool + Send + 'static,
 ) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let snapshot = runtime.snapshot();
-        if condition(&snapshot) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {stage}: {snapshot:?}"
-        );
-        std::thread::yield_now();
-    }
+    crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let snapshot = runtime.snapshot();
+                if condition(&snapshot) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {stage}: {snapshot:?}"
+                );
+                std::thread::yield_now();
+            }
+        }),
+        stage,
+        Duration::from_secs(6),
+    );
+}
+
+fn snapshot_before(
+    runtime: &Arc<ManagedInferenceRuntime>,
+    stage: &'static str,
+) -> super::super::ManagedInferenceSnapshot {
+    let runtime = Arc::clone(runtime);
+    crate::tests::internal::bridge_wait::join_before(
+        std::thread::spawn(move || runtime.snapshot()),
+        stage,
+        Duration::from_secs(5),
+    )
 }
 
 #[test]
@@ -378,7 +408,7 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
 
     let states = runtime.tasks.lock().unwrap().clone();
     assert_eq!(states.len(), 1, "real submitted request must be registered");
-    let active = runtime.snapshot();
+    let active = snapshot_before(&runtime, "active request snapshot");
     assert_eq!(1, active.worker_running);
     assert_eq!(3, active.reserved_bytes);
 
@@ -420,7 +450,7 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
     shutdown_started_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("shutdown thread must start");
-    wait_for_snapshot(&runtime, "shutdown admission closure", |snapshot| {
+    wait_for_snapshot(Arc::clone(&runtime), "shutdown admission closure", |snapshot| {
         snapshot.admission_closed
     });
 
@@ -443,10 +473,18 @@ fn test_snapshot_active_request_release_and_shutdown_are_bounded() {
     observer_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("snapshot observer must finish after registry cleanup");
-    shutdown.join().expect("completed shutdown thread must be reclaimable");
-    observer.join().expect("completed snapshot thread must be reclaimable");
+    crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "shutdown thread exit after request release",
+        Duration::from_secs(2),
+    );
+    crate::tests::internal::bridge_wait::join_before(
+        observer,
+        "snapshot thread exit after registry cleanup",
+        Duration::from_secs(2),
+    );
 
-    let final_snapshot = runtime.snapshot();
+    let final_snapshot = snapshot_before(&runtime, "final request release snapshot");
     assert!(final_snapshot.admission_closed);
     assert_eq!(0, final_snapshot.worker_running);
     assert_eq!(0, final_snapshot.awaiting_release);
@@ -501,7 +539,7 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
         state.wait_worker_done_blocking(Duration::from_secs(5)),
         "worker must finish sampling"
     );
-    let waiting = runtime.snapshot();
+    let waiting = snapshot_before(&runtime, "driver release waiting snapshot");
     assert_eq!(1, waiting.awaiting_release);
     assert_eq!(4, waiting.reserved_bytes);
     assert!(!state.inner.lock().unwrap().released);
@@ -546,7 +584,7 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     shutdown_started_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("shutdown thread must start");
-    wait_for_snapshot(&runtime, "shutdown admission closure", |snapshot| {
+    wait_for_snapshot(Arc::clone(&runtime), "shutdown admission closure", |snapshot| {
         snapshot.admission_closed
     });
 
@@ -569,10 +607,18 @@ fn test_snapshot_driver_release_and_registry_cleanup_are_bounded() {
     observer_done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("snapshot observer must finish after registry cleanup");
-    shutdown.join().expect("completed shutdown thread must be reclaimable");
-    observer.join().expect("completed snapshot thread must be reclaimable");
+    crate::tests::internal::bridge_wait::join_before(
+        shutdown,
+        "shutdown thread exit after driver release",
+        Duration::from_secs(2),
+    );
+    crate::tests::internal::bridge_wait::join_before(
+        observer,
+        "snapshot thread exit after registry cleanup",
+        Duration::from_secs(2),
+    );
 
-    let final_snapshot = runtime.snapshot();
+    let final_snapshot = snapshot_before(&runtime, "final driver release snapshot");
     assert!(final_snapshot.admission_closed);
     assert_eq!(0, final_snapshot.worker_running);
     assert_eq!(0, final_snapshot.awaiting_release);
@@ -2156,6 +2202,7 @@ fn test_unmanaged_content_waits_for_worker_settlement_after_business_result() {
     let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let callback_gate = Arc::clone(&release_gate);
     let (business_tx, business_rx) = mpsc::sync_channel(1);
+    let (settlement_pending_tx, settlement_pending_rx) = mpsc::sync_channel(1);
     let (result_tx, result_rx) = mpsc::sync_channel(1);
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor,
@@ -2170,6 +2217,10 @@ fn test_unmanaged_content_waits_for_worker_settlement_after_business_result() {
             }
         }),
     ));
+    *runtime
+        .settlement_wait_observer
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(settlement_pending_tx);
     let gate_cleanup = ReleaseWorkerGate(Arc::clone(&release_gate));
     let request_runtime = Arc::clone(&runtime);
     let request = std::thread::spawn(move || {
@@ -2182,6 +2233,9 @@ fn test_unmanaged_content_waits_for_worker_settlement_after_business_result() {
             .unwrap();
     });
     business_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    settlement_pending_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("operation outcome was consumed and actual settlement future returned Pending");
     assert!(matches!(result_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
     assert!(runtime.byte_budget.try_acquire(8).is_none());
 

@@ -133,6 +133,9 @@ pub struct ManagedInferenceRuntime {
     tasks: Arc<Mutex<Vec<Arc<TaskState>>>>,
     /// Serializes admission and provider-start boundaries with shutdown.
     admission_gate: Arc<Mutex<AdmissionGate>>,
+    /// Optional test observer for the actual unmanaged settlement future.
+    #[cfg(test)]
+    settlement_wait_observer: Mutex<Option<SyncSender<()>>>,
 }
 
 impl std::fmt::Debug for ManagedInferenceRuntime {
@@ -288,6 +291,8 @@ impl ManagedInferenceRuntime {
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks,
             admission_gate,
+            #[cfg(test)]
+            settlement_wait_observer: Mutex::new(None),
         })
     }
 
@@ -588,6 +593,24 @@ impl ManagedInferenceRuntime {
             // Legacy unmanaged calls have no public handle through which a
             // caller can observe eventual settlement, so return only after
             // this operation's resources have actually been released.
+            #[cfg(test)]
+            {
+                let mut settlement = std::pin::pin!(operation.wait_settlement());
+                if let Some(observer) = self
+                    .settlement_wait_observer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    let waker = std::task::Waker::noop();
+                    let mut context = Context::from_waker(waker);
+                    if settlement.as_mut().poll(&mut context).is_pending() {
+                        let _ = observer.send(());
+                    }
+                }
+                let _settlement = settlement.await;
+            }
+            #[cfg(not(test))]
             let _settlement = operation.wait_settlement().await;
         }
         map_operation_outcome(outcome, INFERENCE_OUTCOME)

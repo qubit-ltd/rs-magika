@@ -1161,14 +1161,11 @@ mod tests {
         assert!(failed.unwrap_err().to_string().contains("provider read failed"));
 
         let manager = OperationManager::new(ManagerOptions::default()).expect("manager should initialize");
-        let mut handle = manager
+        let handle = manager
             .as_sync()
             .try_submit(OperationOptions::default(), |scope| Ok::<_, MimeError>(scope.id()))
             .expect("operation should be admitted");
-        let operation_id = match handle.wait_outcome().expect("operation should finish") {
-            OperationOutcome::Succeeded(operation_id) => operation_id,
-            other => panic!("operation did not succeed: {other:?}"),
-        };
+        let operation_id = handle.id();
         let child_failure = ChildFailureSummary {
             operation_id,
             outcome: ChildOutcomeSummary {

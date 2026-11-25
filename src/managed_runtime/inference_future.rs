@@ -29,6 +29,9 @@ pub(super) struct InferenceFuture {
     /// Test handshake sent after the blocking waiter owns the state lock.
     #[cfg(test)]
     wait_started: Option<Sender<()>>,
+    /// Test handshake sent after a settled waiter enters the release wait.
+    #[cfg(test)]
+    release_wait_started: Option<Sender<()>>,
 }
 
 impl InferenceFuture {
@@ -43,6 +46,8 @@ impl InferenceFuture {
             completed: false,
             #[cfg(test)]
             wait_started: None,
+            #[cfg(test)]
+            release_wait_started: None,
         }
     }
 
@@ -74,11 +79,17 @@ impl InferenceFuture {
     /// Waits for the business result and then for the worker to release the
     /// admitted input. Synchronous detector paths preserve their legacy
     /// guarantee that returning the result also releases caller-owned capacity.
-    pub(super) fn wait_blocking_settled(self) -> MimeResult<Option<String>> {
+    pub(super) fn wait_blocking_settled(mut self) -> MimeResult<Option<String>> {
         let state = Arc::clone(&self.state);
+        #[cfg(test)]
+        let mut release_wait_started = self.release_wait_started.take();
         let result = self.wait_blocking();
         let mut inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
         while !inner.released {
+            #[cfg(test)]
+            if let Some(release_wait_started) = release_wait_started.take() {
+                let _ = release_wait_started.send(());
+            }
             inner = state.released.wait(inner).unwrap_or_else(|error| error.into_inner());
         }
         result
@@ -187,67 +198,59 @@ mod tests {
                 ChildOutcomeKind::Failed,
             ),
         ] {
+            struct CompleteOnDrop(Arc<TaskState>);
+            impl Drop for CompleteOnDrop {
+                fn drop(&mut self) {
+                    // Ensure every exit path wakes a blocked waiter. Result
+                    // publication is write-once, so this only fills an
+                    // otherwise missing result during cleanup.
+                    self.0.finish_business(
+                        Err(qubit_mime::MimeError::detector_backend("test", "waiter cleanup")),
+                        ChildOutcomeKind::Failed,
+                    );
+                    self.0.mark_worker_done();
+                    self.0.mark_released();
+                }
+            }
+
             let state = Arc::new(TaskState::new(operation_id, None));
-            let (started, observed, worker_done, released, released_pending, waiter_panicked) =
-                std::thread::scope(|scope| {
-                    struct CompleteOnDrop(Arc<TaskState>);
-                    impl Drop for CompleteOnDrop {
-                        fn drop(&mut self) {
-                            // Ensure every exit path wakes a blocked waiter. Result
-                            // publication is write-once, so this only fills an
-                            // otherwise missing result during cleanup.
-                            self.0.finish_business(
-                                Err(qubit_mime::MimeError::detector_backend("test", "waiter cleanup")),
-                                ChildOutcomeKind::Failed,
-                            );
-                            self.0.mark_worker_done();
-                            self.0.mark_released();
-                        }
-                    }
+            let completion = CompleteOnDrop(Arc::clone(&state));
+            let (started_tx, started_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            let mut future = InferenceFuture::new(Arc::clone(&state));
+            future.wait_started = Some(started_tx);
+            let waiter = std::thread::spawn(move || result_tx.send(future.wait_blocking()));
 
-                    let completion = CompleteOnDrop(Arc::clone(&state));
-                    let (started_tx, started_rx) = mpsc::channel();
-                    let (result_tx, result_rx) = mpsc::channel();
-                    let mut future = InferenceFuture::new(Arc::clone(&state));
-                    future.wait_started = Some(started_tx);
-                    let waiter = scope.spawn(move || {
-                        let _ = result_tx.send(future.wait_blocking());
-                    });
-
-                    let started = started_rx.recv_timeout(Duration::from_secs(2));
-                    let observed = if started.is_ok() {
-                        state.finish_business(result, business);
-                        result_rx.recv_timeout(Duration::from_secs(2))
-                    } else {
-                        Err(mpsc::RecvTimeoutError::Disconnected)
-                    };
-                    let (worker_done, released) = {
-                        let inner = state.inner.lock().unwrap();
-                        (inner.worker_done, inner.released)
-                    };
-                    let released_pending = !state.inner.lock().unwrap().released;
-                    drop(completion);
-                    let waiter_panicked = waiter.join().is_err();
-                    (
-                        started,
-                        observed,
-                        worker_done,
-                        released,
-                        released_pending,
-                        waiter_panicked,
-                    )
-                });
-
-            assert!(started.is_ok(), "waiter entered Condvar wait: {started:?}");
-            assert!(
-                observed.is_ok(),
-                "result notification wakes waiter before release: {observed:?}"
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("waiter entered Condvar wait");
+            let publish_state = Arc::clone(&state);
+            crate::tests::internal::bridge_wait::join_before(
+                std::thread::spawn(move || publish_state.finish_business(result, business)),
+                "publish result to blocking waiter",
+                Duration::from_secs(2),
+            );
+            let observed = result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("result notification wakes waiter before release");
+            let fact_state = Arc::clone(&state);
+            let (worker_done, released) = crate::tests::internal::bridge_wait::join_before(
+                std::thread::spawn(move || {
+                    let inner = fact_state.inner.lock().unwrap();
+                    (inner.worker_done, inner.released)
+                }),
+                "read blocking waiter release facts",
+                Duration::from_secs(2),
             );
             assert!(!worker_done);
             assert!(!released);
-            assert!(released_pending);
-            assert!(!waiter_panicked);
-            let observed = observed.expect("result notification wakes waiter before release");
+            drop(completion);
+            crate::tests::internal::bridge_wait::join_before(
+                waiter,
+                "blocking waiter cleanup",
+                Duration::from_secs(2),
+            )
+            .expect("blocking waiter result send must succeed");
             match operation_id {
                 102 => assert_eq!(observed.unwrap().as_deref(), Some("text/plain")),
                 _ => assert_eq!(
@@ -291,24 +294,46 @@ mod tests {
         })
         .join();
         state.finish_business(Ok(Some("text/plain".to_owned())), ChildOutcomeKind::Succeeded);
+        let (release_wait_tx, release_wait_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         let waiter_state = Arc::clone(&state);
         let waiter = std::thread::spawn(move || {
-            let future = InferenceFuture::new(waiter_state);
+            let mut future = InferenceFuture::new(waiter_state);
+            future.release_wait_started = Some(release_wait_tx);
             let _ = result_tx.send(future.wait_blocking_settled());
         });
 
-        assert!(matches!(
-            result_rx.recv_timeout(Duration::from_millis(20)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        release_wait_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("settled waiter entered the release wait after business result");
+        let fact_state = Arc::clone(&state);
+        let released = crate::tests::internal::bridge_wait::join_before(
+            std::thread::spawn(move || {
+                fact_state
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .released
+            }),
+            "read release fact before releasing settled waiter",
+            Duration::from_secs(2),
+        );
+        assert!(!released, "release must remain pending while the gate is held");
         state.mark_worker_done();
         state.mark_released();
 
-        assert!(matches!(
-            result_rx.recv_timeout(Duration::from_secs(2)),
-            Ok(Ok(Some(mime))) if mime == "text/plain"
-        ));
-        waiter.join().unwrap();
+        assert_eq!(
+            Some("text/plain"),
+            result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("release notification wakes settled waiter")
+                .unwrap()
+                .as_deref()
+        );
+        crate::tests::internal::bridge_wait::join_before(
+            waiter,
+            "settled waiter thread exit",
+            Duration::from_secs(2),
+        );
     }
 }
