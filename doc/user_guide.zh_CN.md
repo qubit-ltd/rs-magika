@@ -364,7 +364,8 @@ fn create_detector() -> Result<MagikaMimeDetector, Box<dyn Error>> {
 该环境是进程级全局状态，只能 commit 一次。
 
 仓库的[`dynamic_loader` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml)
-使用相同的 ONNX Runtime 版本和 feature 集合。Linux CI 按 host 过滤 metadata，先检查该 fixture 的 feature 图，再运行以下普通二进制编译检查：
+使用相同的 ONNX Runtime 版本和 feature 集合。[Linux CI 的 `dynamic-loader` job](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
+按 host 过滤 metadata，先检查该 fixture 的 feature 图，再运行以下普通二进制编译检查：
 
 ```bash
 cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture

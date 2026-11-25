@@ -431,10 +431,19 @@ execution-provider libraries are discoverable by the dynamic loader. The
 committed once.
 
 The repository's [`dynamic_loader` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml)
-uses the same ONNX Runtime version and feature set. The Linux CI job filters
-feature-graph metadata for the host, checks this fixture's graph, and compiles
-its ordinary binary with
-`cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture`. Run this command from the repository root to verify the ordinary application dependency graph can compile `ort::init_from`. CI then checks the locked `readme_consumer` graphs with default and `inventory` features plus a negative graph for a dependency limited to another platform, compiles the default consumer, and runs both configurations with ONNX Runtime
+uses the same ONNX Runtime version and feature set. The
+[`dynamic-loader` job in Linux CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
+filters feature-graph metadata for the host, checks this fixture's graph, and
+compiles its ordinary binary to verify that normal application dependencies
+can build `ort::init_from`. Run this command from the repository root:
+
+```bash
+cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture
+```
+
+CI then checks the locked `readme_consumer` graphs with default and `inventory`
+features plus a negative graph for a dependency limited to another platform,
+compiles the default consumer, and runs both configurations with ONNX Runtime
 1.24.2, initializing the shared library, constructing a detector, and verifying
 that Python content is classified as `text/x-python`. These graph checks ensure
 bundled runtime downloads are disabled. `ORT_LIBRARY_PATH` must name the

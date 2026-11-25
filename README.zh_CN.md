@@ -154,6 +154,9 @@ runtime 取消时，两者都可能提前返回停止错误。受管 API 会单�
 cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/dynamic_loader/Cargo.toml
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/readme_consumer/Cargo.toml
+```
+
+```bash
 cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture
 ```
 
