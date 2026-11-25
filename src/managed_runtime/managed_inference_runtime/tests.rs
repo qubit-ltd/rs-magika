@@ -1108,11 +1108,11 @@ fn test_owned_bytes_conversion_accepted_after_reservation_and_releases_capacity(
     let result = crate::tests::internal::bridge_wait::poll_before(
         runtime.submit_owned_bytes(None, bytes, |bytes| {
             conversions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let remaining = runtime
-                .byte_budget
-                .try_acquire(1)
-                .expect("owned byte admission must reserve the logical length");
-            drop(remaining);
+            assert_eq!(
+                bytes.len(),
+                runtime.byte_budget.used(),
+                "owned byte admission must reserve exactly the logical length before conversion"
+            );
             assert_eq!(runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
             assert_eq!(bytes.len(), 7);
             bytes.into_boxed_slice()
