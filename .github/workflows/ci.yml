@@ -29,6 +29,8 @@ jobs:
   dynamic-loader:
     name: Dynamic ONNX Runtime consumer
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: sources/rs-magika
@@ -43,6 +45,31 @@ jobs:
         run: .infra/lib/check-locked-local-path-dependencies.sh
       - name: Install Rust
         run: rustup toolchain install 1.94.0 --profile minimal
+      - name: Generate bundled documentation consumer locks
+        id: consumer-locks
+        run: |
+          set +e
+          python3 -B .infra/check-readme-examples.py --run-example > "$RUNNER_TEMP/readme-consumer-check.log" 2>&1
+          readme_status=$?
+          python3 -B .infra/check-managed-guide-examples.py > "$RUNNER_TEMP/managed-guide-consumer-check.log" 2>&1
+          guide_status=$?
+          python3 -B .infra/record-consumer-ci-evidence.py \
+            --readme-exit "$readme_status" \
+            --guide-exit "$guide_status"
+          evidence_status=$?
+          cat "$RUNNER_TEMP/readme-consumer-check.log"
+          cat "$RUNNER_TEMP/managed-guide-consumer-check.log"
+          if [ "$readme_status" -ne 0 ]; then exit "$readme_status"; fi
+          if [ "$guide_status" -ne 0 ]; then exit "$guide_status"; fi
+          exit "$evidence_status"
+      - name: Upload bundled documentation consumer evidence
+        if: always() && steps.consumer-locks.outputs.evidence_present == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: magika-consumer-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.consumer-locks.outputs.artifact_paths }}
+          if-no-files-found: error
+          retention-days: 14
       - name: Download and verify ONNX Runtime 1.24.2 wheel
         run: |
           set -euo pipefail
