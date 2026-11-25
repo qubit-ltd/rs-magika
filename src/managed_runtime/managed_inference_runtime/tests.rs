@@ -1573,7 +1573,12 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
                 "driver should return the canonical stop error: {result:?}"
             );
         }
-        let worker_error = worker.join().unwrap().unwrap_err();
+        let worker_error = crate::tests::internal::bridge_wait::join_before(
+            worker,
+            "worker read after cancellation closes bridge",
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
         assert_eq!(std::io::ErrorKind::Interrupted, worker_error.kind());
         if !publish_business_error {
             assert!(
@@ -2935,8 +2940,12 @@ fn test_provider_driver_panic_teardown_closes_bridge_and_marks_io_unconfirmed() 
             Box::new(|_| Ok(None)),
             Box::new(|| {}),
         );
-        let admission = runtime.reserve_request(None, 4).unwrap();
+        let mut admission = runtime.reserve_request(None, 4).unwrap();
+        admission.require_provider_driver();
         let state = Arc::clone(&admission.state);
+        let owner = state
+            .request_resource_owner()
+            .expect("provider driver admission must retain a request resource owner");
         let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(4);
         let io_in_flight = Arc::new(AtomicBool::new(pending_io));
         let guard = ProviderDriverGuard::new_with_io_status(
@@ -2944,6 +2953,11 @@ fn test_provider_driver_panic_teardown_closes_bridge_and_marks_io_unconfirmed() 
             bridge.driver(),
             Arc::clone(&state),
             Some(io_in_flight),
+        );
+        owner.worker_done();
+        assert!(
+            !state.access_complete(),
+            "worker completion alone must not cross the provider access barrier"
         );
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2953,17 +2967,29 @@ fn test_provider_driver_panic_teardown_closes_bridge_and_marks_io_unconfirmed() 
             }
             drop(guard);
         }));
-        assert!(result.is_err(), "teardown must preserve the active panic");
+        let panic = result.expect_err("teardown must preserve the active panic");
+        let panic_message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        let expected_panic = if already_panicking {
+            "original caller panic"
+        } else {
+            "injected provider input teardown panic"
+        };
+        assert_eq!(Some(expected_panic), panic_message, "teardown must preserve the original panic");
         assert!(
             state.inner.lock().unwrap().unconfirmed_provider_io,
             "a panicking input teardown must conservatively retain capacity"
         );
         assert_eq!(4, runtime.snapshot().reserved_bytes);
+        assert!(state.access_complete(), "driver teardown must complete owner access");
         let mut closed = std::pin::pin!(bridge.closed());
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(closed.as_mut().poll(&mut context), Poll::Ready(())));
         drop(admission);
-        let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+        let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+        assert!(report.worker_stopped, "Cancel shutdown must observe worker completion: {report:?}");
     }
 }
 
@@ -3045,7 +3071,11 @@ fn test_provider_driver_panic_after_real_pending_io_preserves_result_and_capacit
         Err(MimeError::detector_backend("magika", "injected business result")),
         ChildOutcomeKind::Failed,
     );
-    state.mark_worker_done();
+    let owner = state
+        .request_resource_owner()
+        .expect("provider driver admission must retain a request resource owner");
+    owner.worker_done();
+    assert!(!state.access_complete(), "worker completion alone must not finish local access");
     drop(read);
     let teardown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)));
     assert!(teardown.is_err(), "normal teardown must resume the input panic");
@@ -3054,11 +3084,13 @@ fn test_provider_driver_panic_after_real_pending_io_preserves_result_and_capacit
     assert_eq!(Some(ChildOutcomeKind::Failed), inner.business);
     assert!(inner.unconfirmed_provider_io);
     drop(inner);
+    assert!(state.access_complete(), "driver teardown must complete owner access");
     assert_eq!(4, runtime.snapshot().reserved_bytes);
     let mut closed = std::pin::pin!(bridge.closed());
     assert!(matches!(closed.as_mut().poll(&mut context), Poll::Ready(())));
     drop(admission);
-    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+    let report = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(1));
+    assert!(report.worker_stopped, "Cancel shutdown must observe worker completion: {report:?}");
 }
 
 #[test]

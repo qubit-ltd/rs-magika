@@ -154,10 +154,17 @@ fn test_legacy_async_provider_yields_within_completed_io_budget_for_short_reads(
     // completed all 64 prefixes (4,096 one-byte reads) and returned Ready.
     // The event budget must instead bound each real poll to 128 completions.
     let mut pending_polls = 0;
+    let mut poll_count = 0;
     let mut max_completed_this_poll = 0;
     loop {
         let before = event_count.load(Ordering::SeqCst);
         let poll = future.as_mut().poll(&mut context);
+        poll_count += 1;
+        assert!(
+            poll_count <= 128,
+            "short reads exceeded 128 polls at poll {poll_count} after completing {} provider events",
+            event_count.load(Ordering::SeqCst)
+        );
         let completed_this_poll = event_count.load(Ordering::SeqCst) - before;
         assert!(
             completed_this_poll <= 128,
@@ -173,8 +180,14 @@ fn test_legacy_async_provider_yields_within_completed_io_budget_for_short_reads(
             Poll::Pending => {
                 pending_polls += 1;
                 assert!(
+                    completed_this_poll > 0,
+                    "always-ready short reads made no progress on Pending poll {poll_count} after {} completed events",
+                    event_count.load(Ordering::SeqCst)
+                );
+                assert!(
                     wake.notified.swap(false, Ordering::AcqRel),
-                    "cooperative yield must self-wake"
+                    "cooperative yield must self-wake after {} completed events on poll {poll_count}",
+                    event_count.load(Ordering::SeqCst)
                 );
             }
         }
