@@ -860,17 +860,25 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// Directories and final symlinks produce no candidates. The higher-level
     /// detector selects a MIME type and may apply media refinement.
     ///
+    /// This path-based check first screens the final path component. When it
+    /// identifies a regular file, detection opens the path, validates the
+    /// opened handle's type, and samples through that same handle. On Unix,
+    /// opening does not follow the final symlink and does not wait for a FIFO
+    /// writer. Other platforms use their standard open behavior and validate
+    /// the resulting handle type, without those Unix open-stage guarantees.
+    /// If the path changes between screening and opening, opening or reading
+    /// may return an I/O error. This check does not constrain ancestor
+    /// resolution or guarantee a snapshot of the file's contents while they
+    /// are being read.
+    ///
     /// # Errors
     ///
     /// Returns [`MimeError::Io`] when file metadata or content cannot be read.
     /// FIFO, Unix socket, and other unsupported local file types also return
     /// [`MimeError::Io`] with [`std::io::ErrorKind::Unsupported`]; directories
-    /// and final symlinks instead produce no candidates. Path screening and
-    /// opening are separate operations, so path replacement between them can
-    /// cause an I/O error. The higher-level detector's optional media
-    /// refinement is a separate path-based operation and may open the path
-    /// independently. Returns [`MimeError::DetectorBackend`] when inference
-    /// fails, including worker inference.
+    /// and final symlinks instead produce no candidates. Returns
+    /// [`MimeError::DetectorBackend`] when inference fails, including worker
+    /// inference.
     fn guess_from_file(&self, file: &Path) -> MimeResult<(Vec<String>, Vec<u8>)> {
         Ok((self.guess_from_magika_file(file)?, Vec::new()))
     }
