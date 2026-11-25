@@ -1485,6 +1485,81 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
 }
 
 #[test]
+fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() {
+    struct StopDuringReadInput {
+        admission_gate: Arc<Mutex<super::super::task_state::AdmissionGate>>,
+        session_stop: bool,
+    }
+
+    impl magika::AsyncInput for StopDuringReadInput {
+        fn length(&self) -> impl Future<Output = Result<u64, MagikaError>> {
+            std::future::ready(Ok(1))
+        }
+
+        fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), MagikaError>> {
+            let admission_gate = Arc::clone(&self.admission_gate);
+            let session_stop = self.session_stop;
+            std::future::poll_fn(move |_| {
+                admission_gate
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .cancelling = true;
+                let error = if session_stop {
+                    crate::internal::session_read_stopped_io_error()
+                } else {
+                    crate::internal::provider_input::observed_read_stopped_error()
+                };
+                Poll::Ready(Err(error.into()))
+            })
+        }
+    }
+
+    for session_stop in [false, true] {
+        let admission_gate = Arc::new(Mutex::new(super::super::task_state::AdmissionGate::new()));
+        let state = Arc::new(super::super::task_state::TaskState::new_registered(
+            9105,
+            None,
+            None,
+            Some(Arc::downgrade(&admission_gate)),
+        ));
+        let bridge = crate::internal::async_sample_bridge::AsyncSampleBridge::new(1);
+        state.attach_bridge(Arc::downgrade(&bridge));
+        let worker_bridge = Arc::clone(&bridge);
+        let worker = std::thread::spawn(move || {
+            let mut byte = [0];
+            worker_bridge.read_at(0, &mut byte)
+        });
+        let result = crate::tests::internal::bridge_wait::poll_before(
+            super::drive_async_input_with_stops(
+                ProviderDriverGuard::new(
+                    StopDuringReadInput {
+                        admission_gate: Arc::clone(&admission_gate),
+                        session_stop,
+                    },
+                    bridge.driver(),
+                    Arc::clone(&state),
+                ),
+                InferenceFuture::new(Arc::clone(&state)),
+                std::future::pending::<()>(),
+                std::future::pending::<()>(),
+            ),
+            "range driver closes bridge when cancellation interrupts provider read",
+            Duration::from_secs(2),
+        );
+        assert!(matches!(
+            result,
+            Err(MimeError::DetectorBackend { ref backend, ref reason })
+                if backend == "magika" && reason == "provider inference stopped"
+        ), "driver should return the canonical stop error: {result:?}");
+        let worker_error = worker.join().unwrap().unwrap_err();
+        assert!(
+            crate::internal::async_sample_bridge::is_closed_error(&worker_error),
+            "typed provider stop must not be sent through the bridge: {worker_error:?}"
+        );
+    }
+}
+
+#[test]
 fn test_managed_public_handoffs_close_without_repolling_caller() {
     use std::sync::atomic::Ordering;
 

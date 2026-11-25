@@ -142,6 +142,29 @@ impl TaskState {
             .stop_requested
     }
 
+    /// Reports cancellation separately from a terminal worker fault.
+    pub(super) fn cancellation_requested(&self) -> bool {
+        let gate = self.admission_gate.as_ref().and_then(Weak::upgrade);
+        if let Some(gate) = gate {
+            let gate = gate.lock().unwrap_or_else(|error| error.into_inner());
+            if gate.faulted {
+                return false;
+            }
+            if gate.cancelling {
+                return true;
+            }
+        }
+        self.stop_requested()
+    }
+
+    /// Reports whether provider work stopped because the worker faulted.
+    pub(super) fn worker_faulted(&self) -> bool {
+        self.admission_gate
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|gate| gate.lock().unwrap_or_else(|error| error.into_inner()).faulted)
+    }
+
     /// Reports whether worker and provider driver have stopped accessing local
     /// state.
     pub(super) fn access_complete(&self) -> bool {

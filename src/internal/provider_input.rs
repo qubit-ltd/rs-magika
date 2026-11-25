@@ -367,7 +367,7 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
             if crate::internal::async_sample_bridge::is_closed_error(&error) {
                 return MimeError::detector_backend("magika", "provider inference stopped");
             }
-            if error.get_ref().is_some_and(|source| source.is::<ObservedReadStopped>()) {
+            if is_observed_read_stopped_error(&error) {
                 return MimeError::detector_backend("magika", "provider read stopped");
             }
             if crate::internal::is_session_stop_error(&error) {
@@ -394,4 +394,17 @@ pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
 /// An I/O error carrying the private observer-stop marker as its source.
 pub(crate) fn observed_read_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, ObservedReadStopped)
+}
+
+/// Reports whether an I/O error carries the aggregate observer stop marker.
+///
+/// # Parameters
+///
+/// * `error` - Provider I/O error returned by an aggregate read.
+///
+/// # Returns
+///
+/// `true` when the error carries the private observer-stop marker.
+pub(crate) fn is_observed_read_stopped_error(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|source| source.is::<ObservedReadStopped>())
 }

@@ -1366,6 +1366,20 @@ where
                     match read.as_mut().poll(cx) {
                         Poll::Ready(result) => {
                             guard.unconfirmed_io.store(false, std::sync::atomic::Ordering::Relaxed);
+                            let provider_stopped = matches!(
+                                &result,
+                                Err(MagikaError::IOError(error))
+                                    if crate::internal::is_session_stop_error(error)
+                                        || crate::internal::provider_input::is_observed_read_stopped_error(error)
+                            );
+                            if provider_stopped
+                                && (guard.state.cancellation_requested()
+                                    || (!guard.state.worker_faulted()
+                                        && (scope_stop.as_mut().poll(cx).is_ready()
+                                            || request_stop.as_mut().poll(cx).is_ready())))
+                            {
+                                return Poll::Ready(ProviderReadEvent::Stopped);
+                            }
                             Poll::Ready(ProviderReadEvent::Read(result))
                         }
                         Poll::Pending => {
