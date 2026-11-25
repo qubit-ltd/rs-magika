@@ -103,11 +103,14 @@ path 或 patch，并使用自己的 lock 文件。
 
 在依赖中加入当前版本：
 
-截至 2026-11-24，crates.io 搜索返回 `qubit-magika` 0.16.0、`qubit-mime`
-0.21.1、`qubit-fs` 0.3.3 和 `qubit-operation` 0.3.1；本手册需要的版本分别为
-0.18、0.22、0.4 和 0.3.2。README 的 registry-only 检查仍无法解析
-`qubit-magika = "^0.18"`。所需版本发布前，请按[概念模型](#概念模型)中的固定源码
-checkout 步骤操作，并在源码仓库运行 `python3 .infra/check-managed-guide-examples.py`。
+上面的应用清单保留示例所需的直接依赖。`qubit-local-files ^0.6` 是
+`qubit-mime` 引入的生产依赖，应用无需直接声明它。截至 2026-11-25，crates.io
+最新非 yanked 版本为 `qubit-magika` 0.16.0、`qubit-mime` 0.21.1、`qubit-fs`
+0.3.3、`qubit-operation` 0.3.1 和 `qubit-local-files` 0.5.4。所需的 Magika
+0.18、MIME 0.22、FS 0.4 和 Operation 0.3.2 尚未发布，因此 registry-only
+检查无法解析 `qubit-magika = "^0.18"`。所需版本发布前，请按[概念模型](#概念模型)
+中的固定源码 checkout 步骤操作，并在源码仓库运行
+`python3 .infra/check-managed-guide-examples.py`。
 
 ```toml
 [dependencies]

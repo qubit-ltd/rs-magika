@@ -33,7 +33,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-The crates.io releases needed by this example are not all available yet (`qubit-magika` 0.18, `qubit-mime` 0.22, `qubit-fs` 0.4, and `qubit-operation` 0.3.2 or newer). On 2026-11-24, registry search returned 0.16.0, 0.21.1, 0.3.3, and 0.3.1 respectively, and `--registry-only` could not resolve `qubit-magika = "^0.18"`. Fixed source and `--registry-only` select dependency sources. Until those releases are available, use the fixed sibling source checkouts in [the dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv) and run `python3 .infra/check-readme-examples.py` from the repository root. The checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both consumers with default and `inventory` features. The locked `readme_consumer` fixture is an isolated dynamic-loading application with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loader CI filters feature-graph metadata for the host, checks the `dynamic_loader` graph, and compiles its ordinary binary to verify that normal application dependencies can build `ort::init_from`. It then checks `readme_consumer` with default and `inventory` features, verifies a negative dependency graph for another platform, compiles the default consumer, and runs both configurations with isolated ONNX Runtime loading.
+The application manifest above keeps the direct dependencies used by the examples. `qubit-local-files ^0.6` is brought in as a production dependency by `qubit-mime`; applications do not need to list it directly. As of 2026-11-25, the latest non-yanked crates.io versions are `qubit-magika` 0.16.0, `qubit-mime` 0.21.1, `qubit-fs` 0.3.3, `qubit-operation` 0.3.1, and `qubit-local-files` 0.5.4. The required Magika 0.18, MIME 0.22, FS 0.4, and Operation 0.3.2 releases are not yet available, so `--registry-only` cannot resolve this application. Use the fixed sibling source checkouts in [the dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv) and run `python3 .infra/check-readme-examples.py` from the repository root. The checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both consumers with default and `inventory` features. The locked `readme_consumer` fixture is an isolated dynamic-loading application with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loader CI filters feature-graph metadata for the host, checks the `dynamic_loader` graph, and compiles its ordinary binary to verify that normal application dependencies can build `ort::init_from`. It then checks `readme_consumer` with default and `inventory` features, verifies a negative dependency graph for another platform, compiles the default consumer, and runs both configurations with isolated ONNX Runtime loading.
 
 ## Quick Start
 
@@ -327,6 +327,10 @@ observation; use managed APIs when scope tracking is required.
 - [Locked local dependency revisions](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 
 ## Testing
+
+Building and testing this source checkout also requires the pinned sibling
+`../rs-fs-local` checkout, which provides `qubit-fs-local ^0.12`, listed in the
+[fixed dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv).
 
 ```bash
 # Run tests with the default feature set
