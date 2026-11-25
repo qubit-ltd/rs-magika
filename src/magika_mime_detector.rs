@@ -201,7 +201,15 @@ impl MagikaMimeDetector {
     /// provider I/O. Admission capacity is a permission/accounting reservation;
     /// it does not prove provider completion or resource release. The byte
     /// reservation bounds logical sampling and owned payload accounting; it
-    /// is not a bound on total process memory or provider/network work. The
+    /// is not a bound on total process memory or provider/network work.
+    /// Random-access session fallback occurs only when opening returns
+    /// `UnsupportedOperation` or `UnsupportedCapability`; other open errors
+    /// and every session read error propagate without reopening by path. The
+    /// legacy range route requires both range capability and a known resource
+    /// length. Unknown or unavailable lengths use `read_all`, even when range
+    /// reads are advertised. Known oversized resources on this full-read path
+    /// return [`MimeError::BufferLimitExceeded`]; overflow discovered by the
+    /// extra-byte probe remains a filesystem error. The
     /// `read_all` fallback moves its returned `Vec` into the async
     /// dispatch path without cloning its contents. That path converts it with
     /// `into_boxed_slice` before dispatching the input to the worker; the
@@ -446,8 +454,10 @@ impl MagikaMimeDetector {
     /// The timeout is one deadline for the mode-specific wait and worker exit
     /// attempt. `Drain` waits for accepted service operations to settle;
     /// `Cancel` waits for local provider access to finish before shutdown
-    /// closes the worker sender. If the deadline expires before the worker
-    /// exits,
+    /// closes the worker sender. Inline cancellation notifications and
+    /// destruction of a panic payload are synchronous and can make the whole
+    /// call take longer than the timeout. If the deadline expires before the
+    /// worker exits,
     /// [`ManagedInferenceShutdownReport::worker_stopped`] is false and the
     /// runtime retains the worker handle; a later call can continue observing
     /// and reap it. Shutdown does not forcibly interrupt native inference or
@@ -839,7 +849,16 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// Detects MIME candidates from a synchronous filesystem path.
     ///
     /// The complete file length is reported to Magika, while the cumulative
-    /// bytes requested by all reads are bounded by `max_bytes`.
+    /// bytes requested by all reads are bounded by `max_bytes`. A random-read
+    /// session is used unless opening returns `UnsupportedOperation` or
+    /// `UnsupportedCapability`; other open errors and all session-read errors
+    /// propagate without reopening by path. The legacy route uses range reads
+    /// only when length is known and range capability is declared. Unknown or
+    /// unavailable lengths use a complete `read_all`, even if range support is
+    /// declared. When range reads cannot be used, known lengths above
+    /// `max_bytes` are rejected before that full read with
+    /// [`MimeError::BufferLimitExceeded`]. If the length is unknown, overflow
+    /// discovered during `read_all` remains a filesystem error.
     ///
     /// # Parameters
     ///
@@ -850,7 +869,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// # Errors
     ///
     /// Returns a MIME error when metadata, filesystem reads, or Magika
-    /// inference fails.
+    /// inference fails. `max_bytes` is the cumulative logical sampling and
+    /// fallback-read budget; it does not cap provider/network traffic or total
+    /// process memory.
     fn guess_from_provider_path(
         &self,
         file_system: &FileSystem,
@@ -920,12 +941,24 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// cancellation may return its stop outcome before provider I/O completion
     /// is known or resources are released. This legacy hook has no parent
     /// operation scope and exposes no settlement observer.
+    /// Its legacy fallback uses range reads only when resource length is known
+    /// and range capability is declared. Unknown or unavailable lengths use
+    /// `read_all` even if range support is advertised. If ranges cannot be
+    /// used, a known length above `max_bytes` is rejected before the full read
+    /// with [`MimeError::BufferLimitExceeded`]; overflow discovered by
+    /// `read_all` remains a filesystem error. Other than unsupported session
+    /// opening, open failures and session-read errors propagate without
+    /// reopening by path. The `max_bytes` value is a logical sampling and
+    /// fallback-read budget, not a bound on provider/network traffic or total
+    /// process memory.
     ///
     /// # Parameters
     ///
     /// * `file_system` - Asynchronous filesystem used to access the path.
     /// * `path` - File path to inspect.
-    /// * `max_bytes` - Maximum cumulative bytes allowed across all reads.
+    /// * `max_bytes` - Maximum cumulative logical sampling and fallback-read
+    ///   bytes. This does not bound provider/network traffic or total process
+    ///   memory.
     ///
     /// # Errors
     ///

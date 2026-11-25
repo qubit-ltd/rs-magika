@@ -1974,6 +1974,66 @@ fn test_provider_path_async_legacy_ranges_respect_provider_limit() {
 }
 
 #[test]
+fn test_provider_path_sync_range_capability_without_length_uses_read_all() {
+    for provider in [
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .unknown_length(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .without_stat(),
+    ] {
+        let observations = provider.observations();
+        let result = detector().detect_path(
+            &provider.file_system(),
+            &path("/script.py"),
+            8192,
+            MimeDetectionPolicy::VerifyContent,
+        );
+        assert_eq!(
+            result.expect("unknown-length fallback should succeed"),
+            Some("text/x-python".to_owned())
+        );
+        let options = observations.options.lock().unwrap();
+        assert!(!options.is_empty(), "the fallback must read provider data");
+        assert!(options
+            .iter()
+            .all(|options| options.offset().is_none() && options.length().is_none()));
+        assert!(observations.read_bytes.load(Ordering::SeqCst) > 0);
+    }
+}
+
+#[test]
+fn test_provider_path_async_range_capability_without_length_uses_read_all() {
+    for provider in [
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .unknown_length(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .without_stat(),
+    ] {
+        let observations = provider.observations();
+        let result = run_ready(detector().detect_async_path(
+            &provider.async_file_system(),
+            &path("/script.py"),
+            8192,
+            MimeDetectionPolicy::VerifyContent,
+        ));
+        assert_eq!(
+            result.expect("async unknown-length fallback should succeed"),
+            Some("text/x-python".to_owned())
+        );
+        let options = observations.options.lock().unwrap();
+        assert!(!options.is_empty(), "the fallback must read provider data");
+        assert!(options
+            .iter()
+            .all(|options| options.offset().is_none() && options.length().is_none()));
+        assert!(observations.read_bytes.load(Ordering::SeqCst) > 0);
+    }
+}
+
+#[test]
 fn test_provider_path_sync_uses_one_random_access_session_without_stat() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();

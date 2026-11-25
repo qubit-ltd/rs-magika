@@ -93,7 +93,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-会创建 runtime 的构造入口会在返回前同步初始化模型和 ONNX Runtime Session。通过
+直接调用 `MagikaMimeDetector::new()` 或 `from_mime_config(...)` 会新建并初始化 runtime，
+初始化失败返回 `MimeError`。Provider 的 `create_configured(&MimeConfig)` 则返回
+`ProviderFailure<MimeError>`，并保留原始错误来源。通过
 `MagikaMimeDetectorBuilder::managed_runtime` 或
 `MagikaMimeDetectorProvider::managed_runtime` 注入已有 runtime 时会直接复用，不会再初始化
 Session；builder 会校验其字节预算不小于 detector 配置的 buffer limit。
@@ -133,8 +135,9 @@ registry 添加 Provider，也不会附加应用 scope。通过支持 scope 的 
 若需 scope 跟踪，可直接调用 Magika 的 managed API。旧 content hook 通常等待内部操作结算；旧 Provider hook 通常等待业务结果。
 runtime 取消时，两者都可能提前返回停止错误。受管 API 会单独提供资源报告：有界等待可能返回 `Pending`；
 `Ready` 报告也可能指出释放尚未确认。
-本地停止请求不会在 Provider I/O 或 worker 访问尚未确认结束时释放容量。关闭超时时，
-`worker_stopped == false` 表示尚未确认 worker 已 join；`true` 表示已 join，但不代表资源报告中的所有资源都已释放。
+本地停止请求不会在 Provider I/O 或 worker 访问尚未确认结束时释放容量。关闭期限用于观察请求和
+worker 进展；同步取消通知或 panic 载荷析构可能使整次调用超过期限。关闭不会强制中断 native
+推理或 Provider I/O。`worker_stopped == false` 表示尚未确认 worker 已 join；`true` 表示已 join，但不代表资源报告中的所有资源都已释放。
 `worker_panicked` 只记录 join 时观察到的未捕获 panic。详见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
 
 启用 inventory 时，`MimeDetectorRegistry::builtin()` 会发现未配置的同步 Provider；默认选择仍是
@@ -228,11 +231,12 @@ Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求
 读取会话时，Magika 只打开一次，并通过调用方缓冲区从同一已打开对象读取各个样本。打开时
 观察到的长度限定可读偏移，但不是内容快照。若打开返回 `UnsupportedOperation` 或
 `UnsupportedCapability`，则使用既有按路径路由；其他打开错误或会话读取错误都会直接返回，
-不按路径重新打开。旧路由逐段按路径打开，并在支持条件读取时为每一段附带相同的 ETag
-条件；没有条件读取时无法保证
-多段读取期间内容一致。不支持范围读取时，`qubit-fs::read_all` 为判断是否超限，可能额外探测第
-`max_bytes + 1` 个字节；已知长度超限时返回 `MimeError::BufferLimitExceeded`，
-在 `read_all` 中发现超限时返回 `MimeError::FileSystem`。Magika 返回
+不按路径重新打开。旧路由只有在资源长度已知时才按路径逐段读取，并在支持条件读取时为每一段附带相同的 ETag
+条件；没有条件读取时无法保证多段读取期间内容一致。若不支持范围读取，或长度未知、因 `stat`
+不受支持而无法取得长度，即使声明支持范围读取也会使用 `qubit-fs::read_all`。该回退限制可接受载荷为
+`max_bytes`，并可能额外探测 1 字节。只有不能使用范围读取时，才会在完整读取前因已知长度
+超过预算而返回 `MimeError::BufferLimitExceeded`；使用范围采样的已知长度资源不会仅因长度超预算而提前拒绝。
+在 `read_all` 中发现超限时仍返回 `MimeError::FileSystem`。Magika 返回
 `Unknown` 或 `Undefined` 时结果为
 `Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
 Provider 原生异步 I/O 由调用方 future 等待；若 Provider 一直不完成，future 也可能一直

@@ -202,12 +202,13 @@ fn detect_uploaded_path(
 如果支持随机读取 session，Magika 会优先打开一次，并从同一个已打开对象的多个位置采样。
 打开时报告的长度只限定可读取的偏移，并不代表内容快照。只有打开 session 时返回
 `UnsupportedOperation` 或 `UnsupportedCapability` 才会回退到旧的按路径读取路由；其他打开错误
-以及 session 读取错误都会直接传播，不会重新按路径打开。旧路由按路径逐段读取，并在支持时
-对每一段使用相同的条件 ETag；没有条件读取时，无法保证多段读取期间内容一致。`max_bytes`
-是所有采样读取共享的累计预算。不支持范围读取时，已知资源超过预算会在完整加载前被拒绝。
-`qubit-fs::read_all` 为判断是否超限，可能额外探测第 `max_bytes + 1` 个字节；
-已知长度超限时返回 `MimeError::BufferLimitExceeded`，在 `read_all` 中发现超限时
-返回 `MimeError::FileSystem`。异步版本是在
+以及 session 读取错误都会直接传播，不会重新按路径打开。旧范围路由按路径逐段读取，并在支持时
+对每一段使用相同的条件 ETag；没有条件读取时，无法保证多段读取期间内容一致。该路由只用于
+长度已知的资源。若不支持范围读取，或长度未知、因 `stat` 不受支持而无法取得长度，即使声明支持
+范围读取也会使用 `qubit-fs::read_all`。`max_bytes` 是所有采样读取共享的累计预算。`read_all`
+限制可接受载荷，并可能额外探测 1 字节以判断超限。只有不能使用范围读取时，才会在完整读取前因已知长度
+超过预算而返回 `MimeError::BufferLimitExceeded`；使用范围采样的已知长度资源不会仅因长度超预算而提前拒绝。
+在 `read_all` 中发现超限时仍返回 `MimeError::FileSystem`。异步版本是在
 `AsyncFileSystem` 上调用 `detect_async_path`。
 
 ## Media Classifier 示例
@@ -412,7 +413,9 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由 worker 采样和推理；future
 异步等待结果，且没有 parent scope。`detect_bytes_managed` 在追踪显式 scope 时执行相同的单请求
 和共享 runtime 预算。Provider `max_bytes` 是累计逻辑采样和回退读取预算。这些逻辑预算和复制的
-payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
+payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。旧范围采样要求长度已知且
+声明支持范围读取；长度未知或不可用时使用 `read_all`。只有不能使用范围采样时，才会在完整读取前拒绝
+已知超大资源。runtime 关闭后，规则
 分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
 
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
@@ -595,7 +598,8 @@ Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 
 `shutdown_blocking` 使用同一个 deadline 执行所选关闭模式并等待 worker 退出。`Drain` 会等待已接纳的服务操作结算。
 `Cancel` 会等待本地 Provider 访问结束，随后关闭 worker sender 并尝试 join；排队操作仍可能留在资源组快照中，
-直到其 executor 将其退休。超时时，`worker_stopped == false` 表示尚未确认 join，运行时会保留 worker handle；
+直到其 executor 将其退休。期限用于观察请求和 worker 进展；同步取消通知或 panic 载荷析构可能使整次调用超过期限。
+关闭不会强制中断 native 推理或 Provider I/O。超时时，`worker_stopped == false` 表示尚未确认 join，运行时会保留 worker handle；
 `true` 表示 worker 已 join，但不代表每项操作资源都已释放。应使用 operation observer 的有界 settlement wait
 观察具体请求所属 scope；`admission` 只报告服务组聚合计数，不能替代该观察。`worker_panicked` 表示 join 时观察到
 未捕获 panic。shutdown 不会强行中断 native 推理或 Provider I/O。
@@ -609,8 +613,8 @@ Rust panic，不涵盖 native 崩溃或 `panic = abort`。
    `create_configured(&MimeConfig)`。
 3. 将每次请求创建 `MagikaMimeDetector::new()` 改为启动时创建一次，并通过 `Arc`
    共享。
-4. 如果使用 provider path，把 `max_bytes` 视为所有读取累计预算。支持范围读取的
-   provider 可能执行多次有界读取；不支持范围读取的 provider 会拒绝已知的超大资源。
+4. 如果使用 provider path，把 `max_bytes` 视为所有读取累计预算。已知长度且支持范围读取的
+   provider 可能执行多次有界读取。长度未知或不可用时使用 `read_all`；不能使用范围读取时，已知超大资源会在完整读取前被拒绝。
 5. 如果应用自己管理 ONNX Runtime，关闭 default feature，并在创建 detector 前使用上面
    的自定义配置。
 
@@ -619,9 +623,12 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 
 ## 错误与诊断
 
-如果 Magika 或 ONNX Runtime 无法初始化，创建 detector 会返回 `MimeError`。检测过程
-中的输入 I/O、内容不完整、detector 或 runtime 字节上限、受理拒绝及后端推理失败，也会以
-`MimeError` 返回。async content hook 即使处理可由规则判定的内容也会使用共享 worker，因此可能
+直接调用 `MagikaMimeDetector::new()` 或 `from_mime_config(...)` 会新建并初始化 runtime；
+初始化失败返回 `MimeError`。
+`MagikaMimeDetectorProvider::create_configured` 返回 `ProviderFailure<MimeError>`，并将原始初始化
+`MimeError` 保留为来源。builder 注入已有 runtime 时会复用其已初始化 session；预算校验等配置错误直接返回
+`MimeError`，不会重新初始化该 runtime。检测过程中的输入 I/O、内容不完整、detector 或 runtime
+字节上限、受理拒绝及后端推理失败，也会以 `MimeError` 返回。async content hook 即使处理可由规则判定的内容也会使用共享 worker，因此可能
 返回受理错误。
 
 `Ok(None)` 表示 detector 没有找到 MIME 候选，不等同于初始化失败或 I/O 错误。应用应
@@ -632,8 +639,9 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 - 如果 `MagikaMimeDetector::new()` 或 `from_mime_config(...)` 失败，检查 ONNX Runtime feature
   选择以及 `MimeError` 携带的 runtime/model 错误；这两个入口会创建并初始化新的 runtime。如果通过
   `builder().managed_runtime(...)` 或配置后的 Provider 创建失败，检查注入 runtime 的字节预算是否不小于
-  detector 的 buffer limit。ONNX Runtime 初始化错误属于新建 runtime 的路径；注入已有 runtime 会复用它，
-  并报告配置校验错误，例如字节预算不足。
+  detector 的 buffer limit。ONNX Runtime 初始化错误属于新建 runtime 的路径；`create_configured` 会将
+  原始 `MimeError` 包装在 `ProviderFailure<MimeError>` 中，注入已有 runtime 则会复用它，并直接报告配置校验错误，
+  例如字节预算不足。
 - 如果文件名检测和内容检测结果不同，请注意前者使用 `qubit-mime` 仓库规则，后者
   使用 Magika 推理；应根据输入选择合适的 `qubit-mime` 策略。
 - 如果 provider 注册或选择失败，应先注册 provider，再解析 `ProviderSelection`，并

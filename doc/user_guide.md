@@ -272,12 +272,16 @@ without reopening by path. For a filesystem that advertises range reads,
 Magika requests bounded windows and can use a conditional ETag read. The legacy
 route opens by path separately for each segment, so the ETag condition is what
 can detect changes between segments; without conditional reads it does not
-provide a cross-segment content snapshot. The cumulative `max_bytes` budget
-applies across all Magika sampling reads. Without range support, a known resource
-larger than the budget is rejected before the full content is loaded;
-`qubit-fs::read_all` may probe one byte beyond `max_bytes` to detect an oversized
-resource. Known oversized lengths return `MimeError::BufferLimitExceeded`;
-overflow discovered during `read_all` returns `MimeError::FileSystem`. The
+provide a cross-segment content snapshot. This range route is used only when
+the resource length is known. If range reads are unsupported, or the length is
+unknown or unavailable because `stat` is unsupported, detection uses
+`qubit-fs::read_all` even if the provider advertises range capability. The
+cumulative `max_bytes` budget applies across all Magika sampling reads.
+`read_all` limits the accepted payload and may probe one extra byte to detect
+overflow. When range reads cannot be used, a known length above the budget is
+rejected before the full read with `MimeError::BufferLimitExceeded`; a known
+oversized resource that uses range sampling is not rejected on length alone.
+Overflow discovered during `read_all` returns `MimeError::FileSystem`. The
 asynchronous equivalent is `detect_async_path` on `AsyncFileSystem`.
 
 ## Media Classifier Example
@@ -504,7 +508,10 @@ owned-payload byte capacity before copying the input, and runs sampling and
 inference on the worker. It waits asynchronously and has no parent scope.
 `detect_bytes_managed` applies the same per-request and shared runtime budgets
 while tracking its explicit scope. Provider `max_bytes` is a cumulative logical
-sampling and fallback-read budget. These logical budgets and copied payload
+sampling and fallback-read budget. Legacy range sampling requires known length
+and declared range support; unknown or unavailable lengths use `read_all`.
+Known oversized resources are rejected before a full read only when range
+sampling cannot be used. These logical budgets and copied payload
 lengths do not cap total process memory, including provider buffers and
 transient allocations. After shutdown, ruled sync inputs can still return
 directly; requests needing model inference use the closed runtime and fail.
@@ -735,7 +742,10 @@ crashes or `panic = abort`.
 worker exit. `Drain` waits for accepted service operations to settle. `Cancel`
 waits for local provider access to finish, closes the worker sender, and tries
 to join; a queued operation may still appear in the resource-group snapshot
-until its executor retires it. On timeout, `worker_stopped == false` means join
+until its executor retires it. The deadline bounds observation of request and
+worker progress; synchronous cancellation notifications or panic-payload
+destruction can make the complete call take longer. Shutdown does not forcibly
+interrupt native inference or provider I/O. On timeout, `worker_stopped == false` means join
 has not been confirmed and the worker handle is retained; `true` means the
 worker was joined, not that every operation resource was released. Use the
 operation observer's bounded settlement wait to observe a specific request's
@@ -758,8 +768,9 @@ When upgrading a pre-0.14 integration, apply these changes in order:
 3. Replace per-request `MagikaMimeDetector::new()` calls with one startup
    detector shared through `Arc`.
 4. If you use provider paths, treat `max_bytes` as a cumulative budget across
-   all reads. Range-capable providers may therefore perform multiple bounded
-   reads, while non-range providers reject known oversized resources.
+   all reads. Known-length range-capable providers may perform multiple bounded
+   reads. Unknown or unavailable lengths use `read_all`; when ranges cannot be
+   used, known oversized resources are rejected before that full read.
 5. If the application owns ONNX Runtime, disable the default feature and use
    the custom configuration shown above before creating the detector.
 
@@ -768,9 +779,15 @@ The provider names `magika`, `magika-mime-detector`, and
 
 ## Errors and Diagnostics
 
-Detector construction returns `MimeError` when Magika or ONNX Runtime cannot
-initialize. Detection returns `MimeError` for input I/O failures, incomplete
-content, detector or runtime byte limits, admission rejection, and backend
+Direct calls to `MagikaMimeDetector::new()` and
+`MagikaMimeDetector::from_mime_config(...)` create and initialize a runtime
+and return `MimeError` if initialization fails. `MagikaMimeDetectorProvider::create_configured` returns
+`ProviderFailure<MimeError>` and preserves the initialization `MimeError` as
+its source. A builder that injects an existing runtime reuses its initialized
+session and reports validation errors, such as an insufficient runtime byte
+budget, as `MimeError`; it does not reinitialize that runtime. Detection
+returns `MimeError` for input I/O failures, incomplete content, detector or
+runtime byte limits, admission rejection, and backend
 inference failures. The async content hook can return admission errors because
 it uses the shared worker even for rule-classifiable content.
 
@@ -786,8 +803,10 @@ startup and handle per-input errors at the boundary where the input is read.
   `builder().managed_runtime(...)` or a configured provider fails, check that
   the injected runtime's byte budget is at least the detector's configured
   buffer limit. ONNX Runtime initialization errors apply to paths that create a
-  new runtime; injection reuses the existing runtime and reports configuration
-  validation errors such as an insufficient byte budget.
+  new runtime; `create_configured` wraps the original `MimeError` in
+  `ProviderFailure<MimeError>`, while builder injection reuses the runtime and
+  reports configuration validation errors such as an insufficient byte budget
+  directly as `MimeError`.
 - If filename detection and content detection disagree, remember that filename
   detection uses `qubit-mime` repository rules while content detection uses
   Magika inference. Choose the `qubit-mime` policy appropriate for the input.

@@ -96,8 +96,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-Constructors that create a runtime initialize the model and ONNX Runtime
-session synchronously before returning. A runtime supplied through
+Direct calls to `MagikaMimeDetector::new()` and `from_mime_config(...)` create
+a runtime, initialize the model and ONNX Runtime session synchronously, and
+return `MimeError` if initialization fails. `create_configured(&MimeConfig)`
+returns `ProviderFailure<MimeError>` with the original `MimeError` preserved as
+its source. Other constructors that create a runtime initialize it before
+returning. A runtime supplied through
 `MagikaMimeDetectorBuilder::managed_runtime` or
 `MagikaMimeDetectorProvider::managed_runtime` is reused as-is, without another
 session initialization; the builder validates its byte budget against the
@@ -216,10 +220,13 @@ worker error reporting, and shutdown timeouts.
 
 Unknown and undefined Magika predictions have no MIME candidate and produce
 `Ok(None)`, allowing the selected `MimeDetectionPolicy` to decide filename
-fallback. A shutdown timeout does not forcibly interrupt native inference or
-provider I/O. `worker_stopped == false` means join was not confirmed before
-the deadline; `true` means the worker joined, independently of resource
-settlement. `worker_panicked` records an uncaught panic observed during join.
+fallback. The shutdown timeout bounds observation of request and worker progress.
+Synchronous cancellation notifications and destruction of a panic payload may
+make the whole call take longer than that timeout. Shutdown does not forcibly
+interrupt native inference or provider I/O. `worker_stopped == false` means
+join was not confirmed before the deadline; `true` means the worker joined,
+independently of resource settlement. `worker_panicked` records an uncaught
+panic observed during join.
 A panic caught while running inference is reported as a failed operation and
 a faulted runtime. If join was not confirmed, a later shutdown call can
 continue observing the retained worker handle.
@@ -287,10 +294,15 @@ caller buffer. The open-time length bounds readable offsets but is not a
 content snapshot. If opening returns `UnsupportedOperation` or
 `UnsupportedCapability`, detection uses the existing path-based route; other open failures and session read errors
 propagate without reopening by path. The legacy route uses bounded windows and
-an ETag condition when conditional reads are available. Without range support,
-`qubit-fs::read_all` may probe one byte beyond `max_bytes` to detect overflow;
-known oversized resources return `MimeError::BufferLimitExceeded`, while an
-overflow discovered during `read_all` returns `MimeError::FileSystem`. Unknown and
+an ETag condition when conditional reads are available, but only when the
+resource length is known. If range capability is absent, or the length is
+unknown or unavailable because `stat` is unsupported, detection uses
+`qubit-fs::read_all` even when range reads are advertised. That fallback limits
+the accepted payload to `max_bytes` and may probe one extra byte. When range
+reads cannot be used, a known length above the budget is rejected before the
+full read with `MimeError::BufferLimitExceeded`; an oversized known-length
+resource that uses range sampling is not rejected on length alone. Overflow
+discovered during `read_all` remains `MimeError::FileSystem`. Unknown and
 undefined Magika types return `Ok(None)`, allowing the selected
 `MimeDetectionPolicy` to apply filename fallback consistently.
 Provider-native asynchronous I/O is awaited by the calling future and can remain
