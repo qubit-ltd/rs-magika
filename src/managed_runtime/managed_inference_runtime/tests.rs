@@ -2954,14 +2954,19 @@ fn test_scope_less_pending_read_keeps_budget_after_worker_done() {
     });
     let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
+    let handshake_deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         match started_rx.try_recv() {
             Ok(()) => break,
             Err(mpsc::TryRecvError::Disconnected) => panic!("provider input dropped before read"),
-            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Empty) => {
+                let remaining = handshake_deadline
+                    .checked_duration_since(std::time::Instant::now())
+                    .unwrap_or_else(|| panic!("首次 Provider 读取握手阶段超过期限"));
+                assert!(future.as_mut().poll(&mut context).is_pending());
+                std::thread::park_timeout(remaining.min(Duration::from_millis(10)));
+            }
         }
-        assert!(future.as_mut().poll(&mut context).is_pending());
-        std::thread::park_timeout(Duration::from_millis(10));
     }
     let state = runtime.tasks.lock().unwrap().first().unwrap().clone();
     drop(future);
