@@ -846,18 +846,18 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// # Returns
     ///
     /// Zero or more MIME candidates and an empty additional-content buffer.
-    /// The higher-level detector selects a MIME type and may apply media
-    /// refinement.
+    /// Directories and final symlinks produce no candidates. The higher-level
+    /// detector selects a MIME type and may apply media refinement.
     ///
     /// # Errors
     ///
-    /// Returns [`MimeError::Io`] when file metadata or content cannot be read,
-    /// or when the local path is neither a regular file, symlink, nor
-    /// directory. Non-regular file types return `ErrorKind::Unsupported`.
-    /// Metadata inspection and opening are separate operations, so path
-    /// replacement between them is not prevented. Returns
-    /// [`MimeError::DetectorBackend`] when inference fails or worker inference
-    /// fails.
+    /// Returns [`MimeError::Io`] when file metadata or content cannot be read.
+    /// FIFO, Unix socket, and other unsupported local file types also return
+    /// [`MimeError::Io`] with [`std::io::ErrorKind::Unsupported`]; directories
+    /// and final symlinks instead produce no candidates. Metadata inspection
+    /// and opening are separate operations, so path replacement between them
+    /// is not prevented. Returns [`MimeError::DetectorBackend`] when inference
+    /// fails, including worker inference.
     fn guess_from_file(&self, file: &Path) -> MimeResult<(Vec<String>, Vec<u8>)> {
         Ok((self.guess_from_magika_file(file)?, Vec::new()))
     }

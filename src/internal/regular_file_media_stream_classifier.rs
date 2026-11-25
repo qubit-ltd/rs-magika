@@ -53,7 +53,12 @@ impl Debug for RegularFileMediaStreamClassifier {
 }
 
 impl MediaStreamClassifier for RegularFileMediaStreamClassifier {
-    /// Classifies a path only when it resolves to an ordinary file.
+    /// Classifies a path only when `symlink_metadata` observes it as an
+    /// ordinary file. Directories, final symlinks, and all other non-regular
+    /// types return [`MediaStreamType::None`]. Metadata errors and errors from
+    /// the wrapped classifier are propagated. The metadata check and the
+    /// classifier's subsequent open are separate operations, so this check
+    /// does not prevent the path from being replaced between them.
     ///
     /// # Parameters
     ///
