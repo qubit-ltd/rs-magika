@@ -836,14 +836,12 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         }
         Ok(Some("application/x-fixture".to_owned()))
     });
-    let runtime = Arc::new(
-        crate::managed_runtime::ManagedInferenceRuntime::with_engine(
-            supervisor,
-            MimeConfig::default().max_buffer_size(),
-            engine,
-            Box::new(|| {}),
-        ),
-    );
+    let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
+        supervisor,
+        MimeConfig::default().max_buffer_size(),
+        engine,
+        Box::new(|| {}),
+    ));
     let detector = crate::MagikaMimeDetector::builder()
         .managed_runtime(runtime)
         .build()
@@ -903,8 +901,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
                     heartbeats += 1;
                     if !heartbeat_observed && heartbeats > 1 {
                         heartbeat_observed = true;
-                        let _ = events_tx
-                            .send(WorkerEvent::Heartbeat(wake_count.load(Ordering::SeqCst)));
+                        let _ = events_tx.send(WorkerEvent::Heartbeat(wake_count.load(Ordering::SeqCst)));
                     }
                     Poll::Pending
                 }
@@ -925,11 +922,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         },
     );
     if let Err(stage) = first_poll {
-        let _ = crate::tests::internal::bridge_wait::join_before(
-            worker,
-            &stage,
-            Duration::from_secs(5),
-        );
+        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
     let heartbeat = crate::tests::internal::bridge_wait::wait_for_stage(
@@ -944,29 +937,21 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         },
     );
     if let Err(stage) = heartbeat {
-        let _ = crate::tests::internal::bridge_wait::join_before(
-            worker,
-            &stage,
-            Duration::from_secs(5),
-        );
+        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
     let (released, changed) = &*engine_gate;
     *released.lock().unwrap() = true;
     changed.notify_all();
-    let (detection_result, heartbeats, completion_wakes) =
-        crate::tests::internal::bridge_wait::join_before(
-            worker,
-            "legacy provider bridge completion",
-            Duration::from_secs(5),
-        );
+    let (detection_result, heartbeats, completion_wakes) = crate::tests::internal::bridge_wait::join_before(
+        worker,
+        "legacy provider bridge completion",
+        Duration::from_secs(5),
+    );
     let candidates = detection_result.unwrap().0;
     assert_eq!(vec!["application/x-fixture"], candidates);
     assert!(heartbeats > 1);
-    assert!(
-        completion_wakes > 1,
-        "provider completion must wake the worker"
-    );
+    assert!(completion_wakes > 1, "provider completion must wake the worker");
 }
 
 #[test]
