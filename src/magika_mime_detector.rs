@@ -451,23 +451,23 @@ impl MagikaMimeDetector {
 
     /// Stops managed inference admission and observes accepted worker jobs.
     ///
-    /// The timeout is one deadline for the mode-specific wait and worker exit
-    /// attempt. `Drain` waits for accepted service operations to settle;
-    /// `Cancel` waits for local provider access to finish before shutdown
-    /// closes the worker sender. Inline cancellation notifications and
-    /// destruction of a panic payload are synchronous and can make the whole
-    /// call take longer than the timeout. If the deadline expires before the
-    /// worker exits,
-    /// [`ManagedInferenceShutdownReport::worker_stopped`] is false and the
-    /// runtime retains the worker handle; a later call can continue observing
-    /// and reap it. Shutdown does not forcibly interrupt native inference or
-    /// provider I/O.
+    /// The timeout sets the deadline for observing the mode-specific wait and
+    /// worker progress. `Drain` waits for accepted service operations to
+    /// settle; `Cancel` waits for local provider access to finish before
+    /// shutdown closes the worker sender. Shutdown may make one final join
+    /// observation after the deadline, so `worker_stopped` reports whether the
+    /// join was confirmed when this call returns, not whether it completed by
+    /// the deadline. If join remains unconfirmed, the runtime retains the
+    /// worker handle and a later call can continue observing and reap it.
+    /// Synchronous cancellation notifications and panic-payload destruction
+    /// can make the whole call take longer than the timeout. Shutdown does not
+    /// forcibly interrupt native inference or provider I/O.
     ///
     /// # Parameters
     ///
     /// * `mode` - Drain accepted requests or request cooperative cancellation.
-    /// * `timeout` - Maximum total wait for the mode-specific request wait and
-    ///   worker exit attempt.
+    /// * `timeout` - Deadline for observing the mode-specific wait and worker
+    ///   progress. A final join observation may occur after this duration.
     ///
     /// # Returns
     ///
@@ -848,8 +848,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
 
     /// Detects MIME candidates from a synchronous filesystem path.
     ///
-    /// The complete file length is reported to Magika, while the cumulative
-    /// bytes requested by all reads are bounded by `max_bytes`. A random-read
+    /// The complete file length is reported to Magika, while logical sampling
+    /// reads are cumulatively bounded by `max_bytes`. A `read_all` fallback
+    /// also limits the accepted payload to `max_bytes` and may probe one extra
+    /// byte to detect overflow. A random-read
     /// session is used unless opening returns `UnsupportedOperation` or
     /// `UnsupportedCapability`; other open errors and all session-read errors
     /// propagate without reopening by path. The legacy route uses range reads
@@ -857,20 +859,23 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// unavailable lengths use a complete `read_all`, even if range support is
     /// declared. When range reads cannot be used, known lengths above
     /// `max_bytes` are rejected before that full read with
-    /// [`MimeError::BufferLimitExceeded`]. If the length is unknown, overflow
-    /// discovered during `read_all` remains a filesystem error.
+    /// [`MimeError::BufferLimitExceeded`]. Overflow discovered during
+    /// `read_all` returns a filesystem error, including when metadata reported
+    /// a length below the actual payload size.
     ///
     /// # Parameters
     ///
     /// * `file_system` - Filesystem used to access the path.
     /// * `path` - File path to inspect.
-    /// * `max_bytes` - Maximum cumulative bytes allowed across all reads.
+    /// * `max_bytes` - Maximum cumulative logical sampling bytes; for a
+    ///   `read_all` fallback, the maximum accepted payload size.
     ///
     /// # Errors
     ///
     /// Returns a MIME error when metadata, filesystem reads, or Magika
-    /// inference fails. `max_bytes` is the cumulative logical sampling and
-    /// fallback-read budget; it does not cap provider/network traffic or total
+    /// inference fails. `max_bytes` bounds cumulative logical sampling reads
+    /// and the accepted payload on the `read_all` fallback; it does not cap
+    /// provider/network traffic or total
     /// process memory.
     fn guess_from_provider_path(
         &self,
@@ -943,22 +948,26 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// operation scope and exposes no settlement observer.
     /// Its legacy fallback uses range reads only when resource length is known
     /// and range capability is declared. Unknown or unavailable lengths use
-    /// `read_all` even if range support is advertised. If ranges cannot be
-    /// used, a known length above `max_bytes` is rejected before the full read
-    /// with [`MimeError::BufferLimitExceeded`]; overflow discovered by
-    /// `read_all` remains a filesystem error. Other than unsupported session
-    /// opening, open failures and session-read errors propagate without
-    /// reopening by path. The `max_bytes` value is a logical sampling and
-    /// fallback-read budget, not a bound on provider/network traffic or total
+    /// `read_all` even if range support is advertised. That fallback limits
+    /// the accepted payload to `max_bytes` and may probe one extra byte to
+    /// detect overflow. If ranges cannot be used, a known length above
+    /// `max_bytes` is rejected before the full read with
+    /// [`MimeError::BufferLimitExceeded`]. Overflow discovered during
+    /// `read_all` returns a filesystem error, including when metadata
+    /// underestimated the payload. Other than unsupported session opening,
+    /// open failures and session-read errors propagate without reopening by
+    /// path. `max_bytes` bounds logical sampling reads and the accepted
+    /// `read_all` payload; it does not bound provider/network traffic or total
     /// process memory.
     ///
     /// # Parameters
     ///
     /// * `file_system` - Asynchronous filesystem used to access the path.
     /// * `path` - File path to inspect.
-    /// * `max_bytes` - Maximum cumulative logical sampling and fallback-read
-    ///   bytes. This does not bound provider/network traffic or total process
-    ///   memory.
+    /// * `max_bytes` - Maximum cumulative logical sampling bytes. A
+    ///   `read_all` fallback uses it as the accepted-payload limit and may
+    ///   probe one extra byte. This does not bound provider/network traffic or
+    ///   total process memory.
     ///
     /// # Errors
     ///

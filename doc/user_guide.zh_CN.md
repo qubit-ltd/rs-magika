@@ -178,8 +178,8 @@ builder；通过 registry 构造时，配置 `MagikaMimeDetectorProvider::with_m
 ## Provider Path 示例
 
 当数据位于 `qubit-fs` provider 后面，而不是本地 `std::fs::File` 时，使用
-`detect_path`。文件系统和逻辑路径由应用自己持有；`max_bytes` 表示 Magika 范围读取
-累计允许请求的最大字节数：
+`detect_path`。文件系统和逻辑路径由应用自己持有；`max_bytes` 限制累计逻辑采样读取。
+若路由使用 `read_all`，它也限制可接受载荷，并可能额外探测 1 字节以判断超限：
 
 ```rust
 use qubit_fs::{FileSystem, Path};
@@ -599,8 +599,9 @@ Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 `shutdown_blocking` 使用同一个 deadline 执行所选关闭模式并等待 worker 退出。`Drain` 会等待已接纳的服务操作结算。
 `Cancel` 会等待本地 Provider 访问结束，随后关闭 worker sender 并尝试 join；排队操作仍可能留在资源组快照中，
 直到其 executor 将其退休。期限用于观察请求和 worker 进展；同步取消通知或 panic 载荷析构可能使整次调用超过期限。
-关闭不会强制中断 native 推理或 Provider I/O。超时时，`worker_stopped == false` 表示尚未确认 join，运行时会保留 worker handle；
-`true` 表示 worker 已 join，但不代表每项操作资源都已释放。应使用 operation observer 的有界 settlement wait
+关闭不会强制中断 native 推理或 Provider I/O。超时时，`worker_stopped == false` 表示本次调用返回时仍未确认 join，运行时会保留 worker handle；
+`true` 表示返回前已确认 join，但不代表每项操作资源都已释放。关闭可能在 deadline 后再做一次 join 检查，
+因此该字段描述返回时掌握的事实，不能确定 worker 在 deadline 前何时退出。应使用 operation observer 的有界 settlement wait
 观察具体请求所属 scope；`admission` 只报告服务组聚合计数，不能替代该观察。`worker_panicked` 表示 join 时观察到
 未捕获 panic。
 
@@ -613,8 +614,10 @@ Rust panic，不涵盖 native 崩溃或 `panic = abort`。
    `create_configured(&MimeConfig)`。
 3. 将每次请求创建 `MagikaMimeDetector::new()` 改为启动时创建一次，并通过 `Arc`
    共享。
-4. 如果使用 provider path，把 `max_bytes` 视为所有读取累计预算。已知长度且支持范围读取的
-   provider 可能执行多次有界读取。长度未知或不可用时使用 `read_all`；不能使用范围读取时，已知超大资源会在完整读取前被拒绝。
+4. 如果使用 provider path，把 `max_bytes` 视为逻辑采样的累计预算。已知长度且支持范围读取的
+   provider 可能执行多次有界读取。长度未知或不可用时，即使声明支持范围读取也会使用 `read_all`；
+   它限制可接受载荷，并可能额外探测 1 字节。不能使用范围采样时，已知超大资源会在完整读取前被拒绝；
+   `read_all` 中发现超限则返回文件系统错误。
 5. 如果应用自己管理 ONNX Runtime，关闭 default feature，并在创建 detector 前使用上面
    的自定义配置。
 

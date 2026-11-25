@@ -2034,6 +2034,133 @@ fn test_provider_path_async_range_capability_without_length_uses_read_all() {
 }
 
 #[test]
+fn test_provider_read_all_budget_boundaries_across_entry_points() {
+    let over_budget_kind = qubit_fs::error::FsErrorKind::ResourceLimitExceeded;
+    let budget = PYTHON.len();
+
+    let sync_at_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .unknown_length();
+    let sync_at_limit_observations = sync_at_limit.observations();
+    assert_eq!(
+        detector()
+            .detect_path(
+                &sync_at_limit.file_system(),
+                &path("/script.py"),
+                budget,
+                MimeDetectionPolicy::VerifyContent,
+            )
+            .expect("read_all at its budget should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert_eq!(
+        budget,
+        sync_at_limit_observations.read_bytes.load(Ordering::SeqCst)
+    );
+    assert_single_full_read(&sync_at_limit_observations);
+
+    let sync_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .unknown_length();
+    let sync_over_limit_observations = sync_over_limit.observations();
+    assert!(matches!(
+        detector().detect_path(
+            &sync_over_limit.file_system(),
+            &path("/script.py"),
+            budget - 1,
+            MimeDetectionPolicy::VerifyContent,
+        ),
+        Err(MimeError::FileSystem(ref error)) if error.kind() == over_budget_kind
+    ));
+    assert_eq!(
+        budget,
+        sync_over_limit_observations.read_bytes.load(Ordering::SeqCst)
+    );
+    assert_single_full_read(&sync_over_limit_observations);
+
+    let async_at_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .unknown_length();
+    let async_at_limit_observations = async_at_limit.observations();
+    assert_eq!(
+        run_ready(detector().detect_async_path(
+            &async_at_limit.async_file_system(),
+            &path("/script.py"),
+            budget,
+            MimeDetectionPolicy::VerifyContent,
+        ))
+        .expect("async read_all at its budget should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert_eq!(
+        budget,
+        async_at_limit_observations.read_bytes.load(Ordering::SeqCst)
+    );
+    assert_single_full_read(&async_at_limit_observations);
+
+    let async_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .unknown_length();
+    let async_over_limit_observations = async_over_limit.observations();
+    assert!(matches!(
+        run_ready(detector().detect_async_path(
+            &async_over_limit.async_file_system(),
+            &path("/script.py"),
+            budget - 1,
+            MimeDetectionPolicy::VerifyContent,
+        )),
+        Err(MimeError::FileSystem(ref error)) if error.kind() == over_budget_kind
+    ));
+    assert_eq!(
+        budget,
+        async_over_limit_observations.read_bytes.load(Ordering::SeqCst)
+    );
+    assert_single_full_read(&async_over_limit_observations);
+
+    let managed_at_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .unknown_length();
+    let managed_at_limit_observations = managed_at_limit.observations();
+    assert_eq!(
+        managed_provider_result(detector(), managed_at_limit.async_file_system(), budget)
+            .expect("managed read_all at its budget should succeed"),
+        Some("text/x-python".to_owned())
+    );
+    assert_eq!(
+        budget,
+        managed_at_limit_observations.read_bytes.load(Ordering::SeqCst)
+    );
+    assert_single_full_read(&managed_at_limit_observations);
+
+    let managed_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
+        .with_range()
+        .unknown_length();
+    let managed_over_limit_observations = managed_over_limit.observations();
+    assert!(matches!(
+        managed_provider_result(
+            detector(),
+            managed_over_limit.async_file_system(),
+            budget - 1,
+        ),
+        Err(MimeError::FileSystem(ref error)) if error.kind() == over_budget_kind
+    ));
+    assert_eq!(
+        budget,
+        managed_over_limit_observations
+            .read_bytes
+            .load(Ordering::SeqCst)
+    );
+    assert_single_full_read(&managed_over_limit_observations);
+}
+
+fn assert_single_full_read(observations: &crate::support::ProviderObservations) {
+    let options = observations.options.lock().unwrap();
+    assert_eq!(1, options.len(), "read_all must issue one provider read");
+    assert!(options[0].offset().is_none());
+    assert!(options[0].length().is_none());
+}
+
+#[test]
 fn test_provider_path_sync_uses_one_random_access_session_without_stat() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
     let observations = provider.observations();

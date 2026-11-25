@@ -224,8 +224,10 @@ fallback. The shutdown timeout bounds observation of request and worker progress
 Synchronous cancellation notifications and destruction of a panic payload may
 make the whole call take longer than that timeout. Shutdown does not forcibly
 interrupt native inference or provider I/O. `worker_stopped == false` means
-join was not confirmed before the deadline; `true` means the worker joined,
-independently of resource settlement. `worker_panicked` records an uncaught
+join was not confirmed when the call returned; `true` means join was confirmed
+by return, independently of resource settlement. Shutdown may make one final
+join observation after the deadline, so the report does not establish when the
+worker exited. `worker_panicked` records an uncaught
 panic observed during join.
 A panic caught while running inference is reported as a failed operation and
 a faulted runtime. If join was not confirmed, a later shutdown call can
@@ -265,7 +267,9 @@ owned-payload byte capacity, then copies accepted input for worker sampling and
 inference. Its future waits asynchronously and has no parent operation scope.
 `detect_bytes_managed` applies the same per-request and runtime aggregate
 budgets while tracking its explicit scope. Provider `max_bytes` limits
-cumulative logical sample and fallback-read bytes. These logical budgets,
+cumulative logical sampling reads. A `read_all` fallback limits the accepted
+payload and may probe one extra byte; overflow found during that read is a
+filesystem error. These logical budgets,
 sampled lengths, and copied payload bytes do not guarantee a total process
 memory bound; provider buffers and transient allocations may add memory. After
 shutdown, ruled sync inputs can still return directly without using the closed
