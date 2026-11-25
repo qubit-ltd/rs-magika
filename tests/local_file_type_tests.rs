@@ -10,6 +10,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
@@ -157,15 +158,23 @@ fn test_fifo_content_child() {
     fs::write(&pending_ready, b"ready").expect("pending ready marker should be written");
     fs::rename(&pending_ready, &ready).expect("ready marker should be published atomically");
     let path = PathBuf::from(path);
-    let error = match mode.to_str().expect("mode should be UTF-8") {
-        "backend" => MimeDetectorBackend::guess_from_file(&detector, &path)
-            .expect_err("FIFO content detection should be rejected"),
-        "high_level" => detector
-            .detect_file(&path, MimeDetectionPolicy::VerifyContent)
-            .expect_err("FIFO content detection should be rejected"),
+    match mode.to_str().expect("mode should be UTF-8") {
+        "backend" => assert_unsupported(
+            MimeDetectorBackend::guess_from_file(&detector, &path)
+                .expect_err("FIFO content detection should be rejected"),
+        ),
+        "high_level" => assert_unsupported(
+            detector
+                .detect_file(&path, MimeDetectionPolicy::VerifyContent)
+                .expect_err("FIFO content detection should be rejected"),
+        ),
+        "symlink_backend" => {
+            let candidates = MimeDetectorBackend::guess_from_file(&detector, &path)
+                .expect("symlink metadata should be handled without following target");
+            assert!(candidates.0.is_empty());
+        }
         other => panic!("unknown child mode: {other}"),
-    };
-    assert!(matches!(error, MimeError::Io(ref error) if error.kind() == std::io::ErrorKind::Unsupported));
+    }
 }
 
 struct ChildGuard(Child);
@@ -196,64 +205,60 @@ fn test_fifo_content_rejected_without_writer() {
 
     for mode in ["backend", "high_level"] {
         let ready = directory.path().join(format!("{mode}.ready"));
-        let child = Command::new(std::env::current_exe().expect("test executable path"))
-            .args([
-                "--exact",
-                "local_file_type_tests::test_fifo_content_child",
-                "--nocapture",
-            ])
-            .env(FIFO_PATH, &fifo)
-            .env(READY_PATH, &ready)
-            .env(MODE, mode)
-            .spawn()
-            .expect("child process should start");
-        let mut child = ChildGuard(child);
-        let init_deadline = Instant::now() + Duration::from_secs(60);
-        let mut ready_seen = false;
-        let mut init_exit = None;
-        while Instant::now() < init_deadline {
-            let (ready, exit) = observe_ready_or_exit(
-                &mut || {
-                    if ready.exists() {
-                        assert_eq!(fs::read(&ready).expect("readiness marker should be readable"), b"ready");
-                        true
-                    } else {
-                        false
-                    }
-                },
-                &mut || child.try_wait().expect("child status should be available"),
-            );
-            ready_seen = ready;
-            init_exit = exit;
-            if ready_seen || init_exit.is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            ready_seen,
-            "child did not initialize and write readiness marker; exit: {init_exit:?}"
-        );
+        assert_fifo_child(&fifo, &ready, mode);
+    }
+}
 
-        let content_deadline = Instant::now() + Duration::from_secs(5);
-        let mut timed_out = false;
-        let status = if init_exit.is_some() {
-            init_exit
-        } else {
-            loop {
-                if let Some(status) = child.try_wait().expect("child status should be available") {
-                    break Some(status);
+fn assert_fifo_child(path: &Path, ready: &Path, mode: &str) {
+    let child = Command::new(std::env::current_exe().expect("test executable path"))
+        .args([
+            "--exact",
+            "local_file_type_tests::test_fifo_content_child",
+            "--nocapture",
+        ])
+        .env(FIFO_PATH, path)
+        .env(READY_PATH, ready)
+        .env(MODE, mode)
+        .spawn()
+        .unwrap_or_else(|error| panic!("{mode} child process should start: {error}"));
+    let mut child = ChildGuard(child);
+    let init_deadline = Instant::now() + Duration::from_secs(60);
+    let mut ready_seen = false;
+    let mut init_exit = None;
+    while Instant::now() < init_deadline {
+        let (ready, exit) = observe_ready_or_exit(
+            &mut || {
+                if ready.exists() {
+                    assert_eq!(fs::read(ready).expect("readiness marker should be readable"), b"ready");
+                    true
+                } else {
+                    false
                 }
-                if Instant::now() >= content_deadline {
-                    timed_out = true;
-                    child.kill_and_wait();
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        };
-        assert!(!timed_out, "{mode} FIFO detection hung after readiness");
-        assert!(status.expect("child should exit").success(), "{mode} child should pass");
+            },
+            &mut || child.try_wait().expect("child status should be available"),
+        );
+        ready_seen = ready;
+        init_exit = exit;
+        if ready_seen || init_exit.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !ready_seen {
+        child.kill_and_wait();
+        panic!("{mode} child initialization failed; exit: {init_exit:?}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().expect("child status should be available") {
+            assert!(status.success(), "{mode} child should pass");
+            return;
+        }
+        if Instant::now() >= deadline {
+            child.kill_and_wait();
+            panic!("{mode} FIFO detection hung after readiness");
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -273,9 +278,8 @@ fn test_symlink_to_fifo_is_not_followed() {
     assert!(status.success(), "mkfifo failed with {status}");
     let link = directory.path().join("content-link");
     symlink(&fifo, &link).expect("symlink should be created");
-    let candidates = MimeDetectorBackend::guess_from_file(crate::support::detector(), &link)
-        .expect("symlink metadata should be handled without following target");
-    assert!(candidates.0.is_empty());
+    let ready = directory.path().join("symlink_backend.ready");
+    assert_fifo_child(&link, &ready, "symlink_backend");
 }
 
 fn assert_unsupported(error: MimeError) {
