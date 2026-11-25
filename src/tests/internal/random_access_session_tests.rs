@@ -836,12 +836,14 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         }
         Ok(Some("application/x-fixture".to_owned()))
     });
-    let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
-        supervisor,
-        MimeConfig::default().max_buffer_size(),
-        engine,
-        Box::new(|| {}),
-    ));
+    let runtime = Arc::new(
+        crate::managed_runtime::ManagedInferenceRuntime::with_engine(
+            supervisor,
+            MimeConfig::default().max_buffer_size(),
+            engine,
+            Box::new(|| {}),
+        ),
+    );
     let detector = crate::MagikaMimeDetector::builder()
         .managed_runtime(runtime)
         .build()
@@ -851,11 +853,25 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
     #[derive(Debug, PartialEq)]
     enum WorkerEvent {
         DetectionPending,
-        Heartbeat,
+        Heartbeat(usize),
         ReadyBeforePending,
     }
     let (events_tx, events_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
+        struct CountWake {
+            inner: std::task::Waker,
+            count: Arc<AtomicUsize>,
+        }
+        impl Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                self.inner.wake_by_ref();
+            }
+        }
+        let wake_count = Arc::new(AtomicUsize::new(0));
         let mut heartbeats = 0usize;
         let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
             &detector,
@@ -865,28 +881,36 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         ));
         let mut pending_observed = false;
         let mut heartbeat_observed = false;
-        let result = block_on(std::future::poll_fn(|cx| match detection.as_mut().poll(cx) {
-            Poll::Ready(result) => {
-                if !pending_observed {
-                    let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
+        let result = block_on(std::future::poll_fn(|cx| {
+            let counted_waker = std::task::Waker::from(Arc::new(CountWake {
+                inner: cx.waker().clone(),
+                count: Arc::clone(&wake_count),
+            }));
+            let mut counted_context = Context::from_waker(&counted_waker);
+            match detection.as_mut().poll(&mut counted_context) {
+                Poll::Ready(result) => {
+                    if !pending_observed {
+                        let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
+                    }
+                    Poll::Ready(result)
                 }
-                Poll::Ready(result)
-            }
-            Poll::Pending => {
-                if !pending_observed {
-                    pending_observed = true;
-                    let _ = events_tx.send(WorkerEvent::DetectionPending);
+                Poll::Pending => {
+                    if !pending_observed {
+                        pending_observed = true;
+                        let _ = events_tx.send(WorkerEvent::DetectionPending);
+                        counted_waker.wake_by_ref();
+                    }
+                    heartbeats += 1;
+                    if !heartbeat_observed && heartbeats > 1 {
+                        heartbeat_observed = true;
+                        let _ = events_tx
+                            .send(WorkerEvent::Heartbeat(wake_count.load(Ordering::SeqCst)));
+                    }
+                    Poll::Pending
                 }
-                heartbeats += 1;
-                if !heartbeat_observed && heartbeats > 1 {
-                    heartbeat_observed = true;
-                    let _ = events_tx.send(WorkerEvent::Heartbeat);
-                }
-                cx.waker().wake_by_ref();
-                Poll::Pending
             }
         }));
-        (result, heartbeats)
+        (result, heartbeats, wake_count.load(Ordering::SeqCst))
     });
 
     let first_poll = crate::tests::internal::bridge_wait::wait_for_stage(
@@ -901,12 +925,16 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         },
     );
     if let Err(stage) = first_poll {
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
+        let _ = crate::tests::internal::bridge_wait::join_before(
+            worker,
+            &stage,
+            Duration::from_secs(5),
+        );
         panic!("{stage}");
     }
     let heartbeat = crate::tests::internal::bridge_wait::wait_for_stage(
         &events_rx,
-        &WorkerEvent::Heartbeat,
+        &WorkerEvent::Heartbeat(1),
         "legacy detection worker heartbeat after Pending",
         Duration::from_secs(5),
         || {
@@ -916,20 +944,29 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         },
     );
     if let Err(stage) = heartbeat {
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
+        let _ = crate::tests::internal::bridge_wait::join_before(
+            worker,
+            &stage,
+            Duration::from_secs(5),
+        );
         panic!("{stage}");
     }
     let (released, changed) = &*engine_gate;
     *released.lock().unwrap() = true;
     changed.notify_all();
-    let (detection_result, heartbeats) = crate::tests::internal::bridge_wait::join_before(
-        worker,
-        "legacy provider bridge completion",
-        Duration::from_secs(5),
-    );
+    let (detection_result, heartbeats, completion_wakes) =
+        crate::tests::internal::bridge_wait::join_before(
+            worker,
+            "legacy provider bridge completion",
+            Duration::from_secs(5),
+        );
     let candidates = detection_result.unwrap().0;
     assert_eq!(vec!["application/x-fixture"], candidates);
     assert!(heartbeats > 1);
+    assert!(
+        completion_wakes > 1,
+        "provider completion must wake the worker"
+    );
 }
 
 #[test]
