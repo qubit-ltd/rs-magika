@@ -137,7 +137,7 @@ runtime 取消时，两者都可能提前返回停止错误。受管 API 会单�
 `Ready` 报告也可能指出释放尚未确认。
 本地停止请求不会在 Provider I/O 或 worker 访问尚未确认结束时释放容量。关闭期限用于观察请求和
 worker 进展；同步取消通知或 panic 载荷析构可能使整次调用超过期限。关闭不会强制中断 native
-推理或 Provider I/O。`worker_stopped == false` 表示尚未确认 worker 已 join；`true` 表示已 join，但不代表资源报告中的所有资源都已释放。
+推理或 Provider I/O。`worker_stopped == false` 表示本次调用返回时尚未确认 worker 已 join；`true` 表示返回前已确认 join，但不代表资源报告中的所有资源都已释放。关闭可能在 deadline 后再做一次 join 检查，因此该字段不能确定 worker 在 deadline 前何时退出。
 `worker_panicked` 只记录 join 时观察到的未捕获 panic。详见[受管生命周期说明](doc/user_guide.zh_CN.md#迁移指南)。
 
 启用 inventory 时，`MimeDetectorRegistry::builtin()` 会发现未配置的同步 Provider；默认选择仍是
@@ -181,7 +181,7 @@ cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo
 
 Magika 返回 `Unknown` 或 `Undefined` 时没有 MIME 候选，结果为 `Ok(None)`，由选定的
 `MimeDetectionPolicy` 决定文件名回退。关闭超时不会强制中断 native 推理或 Provider I/O。
-`worker_stopped == false` 表示截止时尚未确认 join，`true` 表示 worker 已 join；两者都与资源结算报告相互独立。
+`worker_stopped == false` 表示本次调用返回时尚未确认 join，`true` 表示返回前已确认 join；两者都与资源结算报告相互独立。关闭可能在 deadline 后再做一次 join 检查，因此该字段不能确定 worker 在 deadline 前何时退出。
 `worker_panicked` 记录 join 时观察到的未捕获 panic。推理期间捕获的 panic 会作为失败操作报告，并将 runtime 标为 faulted。
 未确认 join 时，runtime 会保留句柄，后续关闭调用可继续观察并等待 worker 退出。
 
@@ -207,8 +207,8 @@ detector 一次并共享（例如使用 `Arc`）；共享 runtime 上的推理�
 `guess_from_content_async` hook 在首次轮询时检查 detector 的单请求 owned payload 上限，再预留
 共享 runtime 的请求容量和聚合 owned payload 字节预算，然后复制已受理的输入，由 worker 采样和推理。
 该 future 异步等待结果，且没有 parent operation scope。`detect_bytes_managed` 在追踪显式 scope
-时执行相同的单请求和 runtime 聚合预算。Provider 的 `max_bytes` 限制累计逻辑采样和回退读取字节。
-这些逻辑预算、采样长度和复制的 payload 字节都不保证是总进程内存上限；Provider 缓冲区和临时分配
+时执行相同的单请求和 runtime 聚合预算。Provider 的 `max_bytes` 限制累计逻辑采样读取；`read_all` 回退会限制可接受载荷，并可能额外探测 1 字节，
+该读取中发现超限时返回文件系统错误。这些逻辑预算、采样长度和复制的 payload 字节都不保证是总进程内存上限；Provider 缓冲区和临时分配
 可能增加内存。关闭 runtime 后，规则分类的同步输入仍可直接返回而不使用已关闭 worker；需要模型推理
 的请求则会经由已关闭 runtime 返回错误。
 

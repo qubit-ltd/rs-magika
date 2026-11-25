@@ -241,8 +241,9 @@ refinement route.
 
 Use `detect_path` when the bytes live behind a `qubit-fs` provider rather than a
 local `std::fs::File`. The filesystem and logical path are owned by the
-application; `max_bytes` is the maximum cumulative number of bytes Magika may
-request through range reads:
+application; `max_bytes` bounds cumulative logical sampling reads. If routing
+uses `read_all`, it also limits the accepted payload and may allow one extra
+byte to be probed for overflow:
 
 ```rust
 use qubit_fs::{FileSystem, Path};
@@ -745,9 +746,11 @@ to join; a queued operation may still appear in the resource-group snapshot
 until its executor retires it. The deadline bounds observation of request and
 worker progress; synchronous cancellation notifications or panic-payload
 destruction can make the complete call take longer. Shutdown does not forcibly
-interrupt native inference or provider I/O. On timeout, `worker_stopped == false` means join
-has not been confirmed and the worker handle is retained; `true` means the
-worker was joined, not that every operation resource was released. Use the
+interrupt native inference or provider I/O. `worker_stopped == false` means
+join was unconfirmed when the call returned and the worker handle is retained;
+`true` means join was confirmed by return, not that every operation resource
+was released. Shutdown may make one final join check after the deadline, so the
+report does not establish when the worker exited. Use the
 operation observer's bounded settlement wait to observe a specific request's
 scope; `admission` reports aggregate service-group counters and does not replace
 that observation. `worker_panicked` records an uncaught panic
@@ -767,10 +770,13 @@ When upgrading a pre-0.14 integration, apply these changes in order:
    `create_configured(&MimeConfig)`.
 3. Replace per-request `MagikaMimeDetector::new()` calls with one startup
    detector shared through `Arc`.
-4. If you use provider paths, treat `max_bytes` as a cumulative budget across
-   all reads. Known-length range-capable providers may perform multiple bounded
-   reads. Unknown or unavailable lengths use `read_all`; when ranges cannot be
-   used, known oversized resources are rejected before that full read.
+4. If you use provider paths, treat `max_bytes` as a cumulative logical
+   sampling budget. Known-length range-capable providers may perform multiple
+   bounded reads. Unknown or unavailable lengths use `read_all`, even when
+   range capability is advertised; it limits the accepted payload and may probe
+   one extra byte. When ranges cannot be used, known oversized resources are
+   rejected before that full read; overflow found during `read_all` is a
+   filesystem error.
 5. If the application owns ONNX Runtime, disable the default feature and use
    the custom configuration shown above before creating the detector.
 

@@ -998,8 +998,8 @@ impl ManagedInferenceRuntime {
     /// # Parameters
     ///
     /// * `mode` - Drain queued work or request cooperative cancellation.
-    /// * `timeout` - Maximum total wait for the mode-specific request wait and
-    ///   worker exit attempt.
+    /// * `timeout` - Deadline for observing the mode-specific wait and worker
+    ///   progress. A final join observation may occur after this duration.
     ///
     /// # Returns
     ///
@@ -1007,14 +1007,15 @@ impl ManagedInferenceRuntime {
     /// local provider access to finish. Shutdown then closes the worker sender
     /// and attempts to join it. An operation still queued on the executor may
     /// remain in the returned group snapshot until that executor retires it.
-    /// `worker_stopped`
-    /// reports the join only and can be true while an unconfirmed provider
-    /// request still retains capacity. False means shutdown has not observed a
-    /// completed join; the worker handle remains available for a later call to
-    /// continue observing and reap. One deadline covers the mode-specific
-    /// wait and worker exit attempt. Synchronous cancellation notifications
-    /// or destruction of a panic payload can make the complete call take
-    /// longer than that duration. Shutdown does not forcibly interrupt native
+    /// `worker_stopped` reports whether the join was confirmed when this call
+    /// returns; it can be true while an unconfirmed provider request still
+    /// retains capacity. False means shutdown has not observed a completed
+    /// join; the worker handle remains available for a later call to continue
+    /// observing and reap. The deadline bounds observation of the
+    /// mode-specific wait and worker progress, but shutdown may make one final
+    /// join observation after it. Synchronous cancellation notifications or
+    /// destruction of a panic payload can make the complete call take longer
+    /// than that duration. Shutdown does not forcibly interrupt native
     /// inference or provider I/O. A caught inference panic marks
     /// [`ManagedInferenceSnapshot::faulted`]; only an uncaught panic
     /// observed while joining sets
@@ -1040,8 +1041,9 @@ impl ManagedInferenceRuntime {
     ///
     /// # Returns
     ///
-    /// Admission and worker termination facts, including whether the worker
-    /// stopped before the timeout.
+    /// Admission and worker termination facts. `worker_stopped` is true when
+    /// join was confirmed by return and false when it remains unconfirmed; it
+    /// does not establish when the worker exited relative to the deadline.
     pub(crate) fn shutdown_blocking_with_hook(
         &self,
         mode: ShutdownMode,
