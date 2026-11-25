@@ -133,7 +133,14 @@ impl AsyncProviderInput {
     ///
     /// # Returns
     ///
-    /// A shared marker that is true only while provider I/O is being polled.
+    /// A shared marker for the state of the actual provider read.
+    ///
+    /// The marker is set immediately before polling the provider read. It
+    /// remains set while that poll returns `Pending` and is cleared when the
+    /// read returns `Ready`. Cooperative yields happen only after a read has
+    /// completed, so the marker remains clear during those yields. If this
+    /// input's local future is dropped while a read is pending, the marker
+    /// remains set so the runtime can settle the uncertain resource correctly.
     pub(crate) fn io_in_flight(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.io_in_flight)
     }

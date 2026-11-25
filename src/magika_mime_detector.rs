@@ -107,9 +107,6 @@ impl MagikaMimeDetector {
     /// manager or its service group cannot be created, when the worker cannot
     /// start, or when Magika reports a non-I/O initialization failure.
     /// Magika initialization I/O failures are returned as [`MimeError::Io`].
-    /// A zero `MimeConfig::max_buffer_size()` is rejected when this constructor
-    /// creates a new runtime; a supplied shared runtime may be reused with that
-    /// zero per-request limit.
     pub fn new() -> MimeResult<Self> {
         Self::from_mime_config(MimeConfig::default())
     }
@@ -149,9 +146,10 @@ impl MagikaMimeDetector {
     /// manager or its service group cannot be created, when the worker cannot
     /// start, or when Magika reports a non-I/O initialization failure.
     /// Magika initialization I/O failures are returned as [`MimeError::Io`].
-    /// A zero `MimeConfig::max_buffer_size()` is rejected when building a new
-    /// runtime; a supplied shared runtime may be reused with that zero
-    /// per-request limit.
+    /// A zero `MimeConfig::max_buffer_size()` is rejected with
+    /// [`MimeError::DetectorBackend`] when this constructor creates a new
+    /// runtime. To reuse a shared runtime, configure it through
+    /// [`crate::MagikaMimeDetectorBuilder::managed_runtime`].
     #[inline]
     pub fn from_mime_config(config: MimeConfig) -> MimeResult<Self> {
         Self::builder().mime_config(config).build()
