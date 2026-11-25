@@ -44,7 +44,7 @@ qubit-mime = { version = "^0.22", path = "../rs-mime" }
 qubit-operation = { version = "^0.3.2", path = "../rs-operation" }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.191"
+libc = "^0.2"
 
 [dependencies.ort]
 version = ">=2.0.0-rc.12,<2.1"
