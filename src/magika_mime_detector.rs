@@ -619,8 +619,8 @@ impl MagikaMimeDetector {
     ///
     /// # Parameters
     ///
-    /// * `reader` - Reader to inspect. Its original stream position is
-    ///   restored when the restore seek succeeds.
+    /// * `reader` - Reader to inspect. Its original stream position is restored
+    ///   when the restore seek succeeds.
     ///
     /// # Returns
     ///

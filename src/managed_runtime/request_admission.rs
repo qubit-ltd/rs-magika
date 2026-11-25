@@ -543,7 +543,13 @@ mod tests {
             block_on(operation.wait_outcome(), "idempotent resource registration outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
-        assert!(block_on(operation.wait_settlement(), "idempotent resource registration settlement").all_released());
+        assert!(
+            block_on(
+                operation.wait_settlement(),
+                "idempotent resource registration settlement"
+            )
+            .all_released()
+        );
     }
 
     #[test]
