@@ -382,6 +382,7 @@ mod tests {
     #[test]
     fn test_blocking_wait_settled_waits_for_release_after_result() {
         let state = Arc::new(TaskState::new(104, None));
+        let mut completion_cleanup = CompleteOnDrop(Some(Arc::clone(&state)));
         let poisoned_state = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
             let _guard = poisoned_state.inner.lock().unwrap();
@@ -423,6 +424,7 @@ mod tests {
             "worker completion and release publication",
             Duration::from_secs(2),
         );
+        completion_cleanup.0.take();
 
         assert_eq!(
             Some("text/plain"),

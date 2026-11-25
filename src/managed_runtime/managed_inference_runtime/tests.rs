@@ -2817,6 +2817,7 @@ fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registratio
         Box::new(|| {}),
     ));
     let reservation_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let reservation_gate_cleanup = ReleaseWorkerGate(Arc::clone(&reservation_gate));
     let reservation_wait = Arc::clone(&reservation_gate);
     let (reserved_tx, reserved_rx) = mpsc::channel();
     let (admission_tx, admission_rx) = mpsc::channel();
@@ -2848,9 +2849,7 @@ fn test_shutdown_scan_cannot_miss_a_request_between_service_and_task_registratio
     shutdown_started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let scanned_before_registration = scan_rx.recv_timeout(Duration::from_millis(50)).is_ok();
 
-    let (lock, changed) = &*reservation_gate;
-    *lock.lock().unwrap() = true;
-    changed.notify_one();
+    reservation_gate_cleanup.release();
     let admission = admission_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     if !scanned_before_registration {
         scan_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -2884,7 +2883,6 @@ fn test_committed_provider_admission_checks_stop_before_first_and_later_io() {
         Box::new(|_| Ok(None)),
         Box::new(|| {}),
     ));
-
     let first_runtime = Arc::clone(&runtime);
     let mut first = service
         .as_async()
@@ -4662,6 +4660,7 @@ fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
         }),
         Box::new(|| {}),
     ));
+    let gate_cleanup = ReleaseWorkerGate(Arc::clone(&gate));
     let poisoned_tasks = Arc::clone(&runtime);
     let _ = std::thread::spawn(move || {
         let _guard = poisoned_tasks.tasks.lock().unwrap();
@@ -4680,9 +4679,7 @@ fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
     started_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     assert!(runtime.submit(None, WorkerInput::Bytes(vec![0; 5].into())).is_err());
 
-    let (lock, ready) = &*gate;
-    *lock.lock().unwrap() = true;
-    ready.notify_all();
+    gate_cleanup.release();
     assert!(matches!(
         crate::tests::internal::bridge_wait::poll_before(
             first,
@@ -4693,6 +4690,38 @@ fn test_runtime_submit_rejects_aggregate_byte_budget_overflow() {
     ));
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
+}
+
+#[test]
+fn test_release_worker_gate_drop_unblocks_waiting_worker() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let cleanup = ReleaseWorkerGate(Arc::clone(&gate));
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let (exited_tx, exited_rx) = mpsc::channel();
+    let waiter_gate = Arc::clone(&gate);
+    let waiter = std::thread::spawn(move || {
+        let (lock, changed) = &*waiter_gate;
+        let mut released = lock.lock().unwrap();
+        waiting_tx.send(()).unwrap();
+        while !*released {
+            released = changed.wait(released).unwrap();
+        }
+        exited_tx.send(()).unwrap();
+    });
+    waiting_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker reached the gate before cleanup is dropped");
+
+    drop(cleanup);
+
+    exited_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("dropping cleanup releases the waiting worker");
+    crate::tests::internal::bridge_wait::join_before(
+        waiter,
+        "worker released by gate cleanup Drop",
+        Duration::from_secs(2),
+    );
 }
 
 #[test]
