@@ -107,7 +107,7 @@ their own lock file.
 The published default feature, `bundled-onnxruntime`, is enabled by this root
 manifest. To use the synchronous provider inventory, change the Magika entry
 to `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`.
-Fixed source and `--registry-only` select dependency sources. The README checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both with default and `inventory` features. The repository's locked [`readme_consumer` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/readme_consumer/Cargo.toml) is an isolated dynamic-loading consumer with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loading CI first checks the separate [`dynamic_loader` fixture's](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml) feature graph and the `readme_consumer` graphs with default and `inventory`; it then compiles `readme_consumer` and runs it with both configurations using isolated ONNX Runtime loading.
+Fixed source and `--registry-only` select dependency sources. The README checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both with default and `inventory` features. The repository's locked [`readme_consumer` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/readme_consumer/Cargo.toml) is an isolated dynamic-loading consumer with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loading CI filters feature-graph metadata for the host, checks the separate [`dynamic_loader` fixture's](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml) feature graph, then compiles its ordinary binary to verify that normal application dependencies can build `ort::init_from`. It next checks `readme_consumer` with default and `inventory` features and a negative graph for a dependency limited to another platform, compiles the default consumer, and runs both configurations using isolated ONNX Runtime loading.
 
 The registry versions required by the examples were not all available on
 2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
@@ -433,9 +433,17 @@ committed once.
 The repository's [`dynamic_loader` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml)
 uses the same ONNX Runtime version and feature set. The
 [`dynamic-loader` job in Linux CI](https://github.com/qubit-ltd/rs-magika/blob/main/.github/workflows/ci.yml)
-first checks this fixture's feature graph and the locked `readme_consumer`
-graphs with default and `inventory` features. It then
-compiles and runs `readme_consumer` in both configurations with ONNX Runtime
+filters feature-graph metadata for the host, checks this fixture's graph, and
+compiles its ordinary binary to verify that normal application dependencies
+can build `ort::init_from`. Run this command from the repository root:
+
+```bash
+cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture
+```
+
+CI then checks the locked `readme_consumer` graphs with default and `inventory`
+features plus a negative graph for a dependency limited to another platform,
+compiles the default consumer, and runs both configurations with ONNX Runtime
 1.24.2, initializing the shared library, constructing a detector, and verifying
 that Python content is classified as `text/x-python`. These graph checks ensure
 bundled runtime downloads are disabled. `ORT_LIBRARY_PATH` must name the

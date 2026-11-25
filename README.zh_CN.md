@@ -30,7 +30,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1，`--registry-only` 仍无法解析 `qubit-magika = "^0.18"`。固定源码与 `--registry-only` 用于选择依赖来源。所需版本发布前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并从仓库根运行 `python3 .infra/check-readme-examples.py`。checker 默认只用 default features 编译提取出的中英文程序；增加 `--run-example` 后，才会分别用 default 和 `inventory` 运行这两份程序。锁定的 `readme_consumer` fixture 是隔离动态加载应用，Magika 关闭了默认 features，因此它的依赖图不同于本仓库根清单启用 bundled runtime 的默认图。dynamic-loader CI 会先检查 `dynamic_loader` 的 feature 图，以及 `readme_consumer` 在 default、`inventory` 下的两张 feature 图，再编译 `readme_consumer`，最后用这两种配置执行隔离 ONNX Runtime 加载。
+此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1，`--registry-only` 仍无法解析 `qubit-magika = "^0.18"`。固定源码与 `--registry-only` 用于选择依赖来源。所需版本发布前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并从仓库根运行 `python3 .infra/check-readme-examples.py`。checker 默认只用 default features 编译提取出的中英文程序；增加 `--run-example` 后，才会分别用 default 和 `inventory` 运行这两份程序。锁定的 `readme_consumer` fixture 是隔离动态加载应用，Magika 关闭了默认 features，因此它的依赖图不同于本仓库根清单启用 bundled runtime 的默认图。dynamic-loader CI 按 host 过滤 feature 图 metadata，先检查 `dynamic_loader` 的 feature 图，再编译其普通二进制，以验证常规应用依赖能否编译 `ort::init_from`；随后检查 `readme_consumer` 在 default、`inventory` 下的 feature 图，以及针对其他平台依赖的负例，再编译 default 配置，最后用两种配置运行该 fixture 并隔离加载 ONNX Runtime。
 
 ## 快速开始
 
@@ -155,6 +155,12 @@ cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/dynamic_loader/Cargo.toml
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/readme_consumer/Cargo.toml
 ```
+
+```bash
+cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture
+```
+
+最后一条命令从仓库根目录重现 CI 的普通二进制编译检查，验证常规应用依赖图能够编译 `ort::init_from`；以上 metadata 命令仍用于检查锁定清单。
 
 独立应用的固定源码清单示例见[用户手册中的固定源码应用示例](doc/user_guide.zh_CN.md#概念模型)。
 
