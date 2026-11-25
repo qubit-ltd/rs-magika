@@ -315,15 +315,7 @@ impl ManagedInferenceRuntime {
     ///
     /// Returns an admission, size-limit, Magika, or worker error.
     pub async fn detect_bytes(self: &Arc<Self>, scope: &OperationScope, bytes: Vec<u8>) -> MimeResult<Option<String>> {
-        let length = bytes.len();
-        if length > self.max_in_flight_bytes() {
-            return Err(MimeError::BufferLimitExceeded {
-                requested: length,
-                limit: self.max_in_flight_bytes(),
-            });
-        }
-        self.submit_operation(Some(scope), WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))
-            .await
+        self.submit_owned_bytes(Some(scope), bytes, Vec::into_boxed_slice).await
     }
 
     /// Classifies borrowed content through the worker without a parent scope.
@@ -395,6 +387,16 @@ impl ManagedInferenceRuntime {
     /// Returns a size-limit, capacity, Magika, or worker error.
     #[cfg(test)]
     pub(crate) async fn detect_bytes_unmanaged(self: &Arc<Self>, bytes: Vec<u8>) -> MimeResult<Option<String>> {
+        self.submit_owned_bytes(None, bytes, Vec::into_boxed_slice).await
+    }
+
+    /// Acquires runtime capacity before converting owned bytes for the worker.
+    async fn submit_owned_bytes(
+        self: &Arc<Self>,
+        parent: Option<&OperationScope>,
+        bytes: Vec<u8>,
+        convert: impl FnOnce(Vec<u8>) -> Box<[u8]>,
+    ) -> MimeResult<Option<String>> {
         let length = bytes.len();
         if length > self.max_in_flight_bytes() {
             return Err(MimeError::BufferLimitExceeded {
@@ -402,37 +404,8 @@ impl ManagedInferenceRuntime {
                 limit: self.max_in_flight_bytes(),
             });
         }
-        self.submit_operation(None, WorkerInput::Bytes(worker_bytes(bytes.into_boxed_slice())))
-            .await
-    }
-
-    /// Submits worker input through a public operation body.
-    ///
-    /// # Parameters
-    ///
-    /// * `parent` - Optional parent scope that owns the submitted child.
-    /// * `input` - Input and resources retained by the inference worker.
-    ///
-    /// # Returns
-    ///
-    /// The worker's MIME mapping, or `None` when it has no mapping.
-    ///
-    /// # Errors
-    ///
-    /// Returns admission, worker, or inference errors.
-    async fn submit_operation(
-        self: &Arc<Self>,
-        parent: Option<&OperationScope>,
-        input: WorkerInput,
-    ) -> MimeResult<Option<String>> {
-        let byte_count = match &input {
-            WorkerInput::Bytes(bytes) => bytes.len(),
-            WorkerInput::Bridge(_, limit, _) => *limit,
-            WorkerInput::Features(_, _) => 0,
-        };
-        // The request scope is registered inside the accepted child body,
-        // after submission succeeds and before that body dispatches work.
-        let admission = self.reserve_request(None, byte_count)?;
+        let admission = self.reserve_request(None, length)?;
+        let input = WorkerInput::Bytes(worker_bytes(convert(bytes)));
         self.submit_operation_admitted(parent, admission, input).await
     }
 

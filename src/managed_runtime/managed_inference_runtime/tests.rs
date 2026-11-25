@@ -998,6 +998,142 @@ fn test_borrowed_content_accepted_copies_once() {
 }
 
 #[test]
+fn test_owned_bytes_conversion_closed_does_not_convert() {
+    let runtime = borrowed_test_runtime(8);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+    let conversions = std::sync::atomic::AtomicUsize::new(0);
+    let mut bytes = Vec::with_capacity(32);
+    bytes.push(b'x');
+
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.submit_owned_bytes(None, bytes, |_| {
+            conversions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::from(b"x".as_slice())
+        }),
+        "closed owned bytes rejection",
+        Duration::from_secs(2),
+    );
+
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        MimeError::detector_backend("magika", "runtime admission is closed after cancellation").to_string()
+    );
+    assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_owned_bytes_conversion_full_does_not_convert() {
+    let runtime = borrowed_test_runtime(8);
+    let first = runtime.reserve_for_provider(None, 0).unwrap();
+    let second = runtime.reserve_for_provider(None, 0).unwrap();
+    let conversions = std::sync::atomic::AtomicUsize::new(0);
+    let mut bytes = Vec::with_capacity(32);
+    bytes.push(b'x');
+
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.submit_owned_bytes(None, bytes, |_| {
+            conversions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::from(b"x".as_slice())
+        }),
+        "full owned bytes rejection",
+        Duration::from_secs(2),
+    );
+
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        MimeError::detector_backend("magika", "runtime service capacity is full").to_string()
+    );
+    assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop((first, second));
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+}
+
+#[test]
+fn test_owned_bytes_conversion_budget_rejection_does_not_convert() {
+    let runtime = borrowed_test_runtime(8);
+    let reservation = runtime.reserve_for_provider(None, 8).unwrap();
+    let conversions = std::sync::atomic::AtomicUsize::new(0);
+    let mut bytes = Vec::with_capacity(32);
+    bytes.push(b'x');
+
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.submit_owned_bytes(None, bytes, |_| {
+            conversions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::from(b"x".as_slice())
+        }),
+        "owned bytes budget rejection",
+        Duration::from_secs(2),
+    );
+
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        MimeError::detector_backend("magika", "runtime in-flight byte budget is full").to_string()
+    );
+    assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(reservation);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+}
+
+#[test]
+fn test_owned_bytes_conversion_over_limit_does_not_convert() {
+    let runtime = borrowed_test_runtime(8);
+    let conversions = std::sync::atomic::AtomicUsize::new(0);
+    let mut bytes = Vec::with_capacity(32);
+    bytes.extend_from_slice(b"012345678");
+
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.submit_owned_bytes(None, bytes, |_| {
+            conversions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::from(b"012345678".as_slice())
+        }),
+        "over-limit owned bytes rejection",
+        Duration::from_secs(2),
+    );
+
+    assert!(matches!(
+        result,
+        Err(MimeError::BufferLimitExceeded {
+            requested: 9,
+            limit: 8
+        })
+    ));
+    assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
+}
+
+#[test]
+fn test_owned_bytes_conversion_accepted_after_reservation_and_releases_capacity() {
+    let runtime = borrowed_test_runtime(8);
+    let conversions = std::sync::atomic::AtomicUsize::new(0);
+    let mut bytes = Vec::with_capacity(32);
+    bytes.extend_from_slice(b"payload");
+
+    let result = crate::tests::internal::bridge_wait::poll_before(
+        runtime.submit_owned_bytes(None, bytes, |bytes| {
+            conversions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let remaining = runtime
+                .byte_budget
+                .try_acquire(1)
+                .expect("owned byte admission must reserve the logical length");
+            drop(remaining);
+            assert_eq!(runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(bytes.len(), 7);
+            bytes.into_boxed_slice()
+        }),
+        "accepted owned bytes inference",
+        Duration::from_secs(2),
+    );
+
+    assert_eq!(result.unwrap(), None);
+    assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(runtime.byte_budget.try_acquire(8).is_some());
+    assert_eq!(runtime.active_requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(runtime.reserve_for_provider(None, 8).is_ok());
+    let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
+    assert!(report.worker_stopped);
+}
+
+#[test]
 fn test_admitted_bytes_cancel_returns_before_worker_releases_capacity() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
