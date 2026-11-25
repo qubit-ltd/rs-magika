@@ -635,9 +635,7 @@ impl MagikaMimeDetector {
         } else if metadata.is_dir() {
             FileType::Directory
         } else if metadata.is_file() {
-            return self.guess_from_magika_input(
-                crate::internal::local_content_file::open_regular_file(file)?,
-            );
+            return self.guess_from_magika_input(crate::internal::local_content_file::open_regular_file(file)?);
         } else {
             return Err(MimeError::Io(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
