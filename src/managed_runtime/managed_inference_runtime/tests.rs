@@ -1510,10 +1510,7 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
                     .cancelling = true;
                 if publish_business_error {
                     state.finish_business(
-                        Err(MimeError::BufferLimitExceeded {
-                            requested: 2,
-                            limit: 1,
-                        }),
+                        Err(MimeError::BufferLimitExceeded { requested: 2, limit: 1 }),
                         ChildOutcomeKind::Failed,
                     );
                 }
@@ -1563,13 +1560,7 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
         );
         if publish_business_error {
             assert!(
-                matches!(
-                    &result,
-                    Err(MimeError::BufferLimitExceeded {
-                        requested: 2,
-                        limit: 1,
-                    })
-                ),
+                matches!(&result, Err(MimeError::BufferLimitExceeded { requested: 2, limit: 1 })),
                 "published business error should win over cancellation: {result:?}"
             );
         } else {
