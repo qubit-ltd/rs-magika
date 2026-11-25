@@ -33,7 +33,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-The crates.io releases needed by this example are not all available yet (`qubit-magika` 0.18, `qubit-mime` 0.22, `qubit-fs` 0.4, and `qubit-operation` 0.3.2 or newer). On 2026-11-24, registry search returned 0.16.0, 0.21.1, 0.3.3, and 0.3.1 respectively, and `--registry-only` could not resolve `qubit-magika = "^0.18"`. Fixed source and `--registry-only` select dependency sources. Until those releases are available, use the fixed sibling source checkouts in [the dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv) and run `python3 .infra/check-readme-examples.py` from the repository root. The checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both consumers with default and `inventory` features. The locked `readme_consumer` fixture is an isolated dynamic-loading application with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loader CI first checks the `dynamic_loader` feature graph and the `readme_consumer` graphs with default and `inventory`; it then compiles `readme_consumer` and runs it with both feature configurations using isolated ONNX Runtime loading.
+The crates.io releases needed by this example are not all available yet (`qubit-magika` 0.18, `qubit-mime` 0.22, `qubit-fs` 0.4, and `qubit-operation` 0.3.2 or newer). On 2026-11-24, registry search returned 0.16.0, 0.21.1, 0.3.3, and 0.3.1 respectively, and `--registry-only` could not resolve `qubit-magika = "^0.18"`. Fixed source and `--registry-only` select dependency sources. Until those releases are available, use the fixed sibling source checkouts in [the dependency table](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv) and run `python3 .infra/check-readme-examples.py` from the repository root. The checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both consumers with default and `inventory` features. The locked `readme_consumer` fixture is an isolated dynamic-loading application with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loader CI filters feature-graph metadata for the host, checks the `dynamic_loader` graph, and compiles its ordinary binary to verify that normal application dependencies can build `ort::init_from`. It then checks `readme_consumer` with default and `inventory` features, verifies a negative dependency graph for another platform, compiles the default consumer, and runs both configurations with isolated ONNX Runtime loading.
 
 ## Quick Start
 
@@ -184,7 +184,13 @@ repository root to verify the locked manifests:
 cargo metadata --locked --offline --format-version 1 --manifest-path Cargo.toml
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/dynamic_loader/Cargo.toml
 cargo metadata --locked --offline --format-version 1 --manifest-path tests/fixtures/readme_consumer/Cargo.toml
+cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture
 ```
+
+The final command reproduces the CI ordinary-binary compilation check from the
+repository root. It verifies that the normal application dependency graph can
+compile `ort::init_from`; the metadata commands above remain useful for checking
+the locked manifests.
 
 For a standalone application manifest using these fixed checkouts, see the
 [fixed-source application example in the user guide](doc/user_guide.md#conceptual-model).
