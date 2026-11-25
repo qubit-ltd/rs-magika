@@ -1546,11 +1546,14 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
             "range driver closes bridge when cancellation interrupts provider read",
             Duration::from_secs(2),
         );
-        assert!(matches!(
-            result,
-            Err(MimeError::DetectorBackend { ref backend, ref reason })
-                if backend == "magika" && reason == "provider inference stopped"
-        ), "driver should return the canonical stop error: {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(MimeError::DetectorBackend { ref backend, ref reason })
+                    if backend == "magika" && reason == "provider inference stopped"
+            ),
+            "driver should return the canonical stop error: {result:?}"
+        );
         let worker_error = worker.join().unwrap().unwrap_err();
         assert!(
             crate::internal::async_sample_bridge::is_closed_error(&worker_error),
