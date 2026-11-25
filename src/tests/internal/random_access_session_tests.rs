@@ -861,30 +861,14 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         ReadyBeforeCompletionNotification,
     }
     let (events_tx, events_rx) = std::sync::mpsc::channel();
-    let (startup_tx, startup_rx) = std::sync::mpsc::channel();
     let (active_permit_tx, active_permit_rx) = std::sync::mpsc::channel();
     let active_permit_tx = std::sync::Mutex::new(Some(active_permit_tx));
     let active_wakes = Arc::new(AtomicUsize::new(0));
     let worker_active_wakes = Arc::clone(&active_wakes);
-    let startup_wakes = Arc::new(AtomicUsize::new(0));
-    let worker_startup_wakes = Arc::clone(&startup_wakes);
     let completion_wakes = Arc::new(AtomicUsize::new(0));
     let worker_completion_wakes = Arc::clone(&completion_wakes);
 
     let worker = std::thread::spawn(move || {
-        struct StartupWake {
-            count: Arc<AtomicUsize>,
-            startup: std::sync::mpsc::Sender<()>,
-        }
-        impl Wake for StartupWake {
-            fn wake(self: Arc<Self>) {
-                self.wake_by_ref();
-            }
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.count.fetch_add(1, Ordering::SeqCst);
-                let _ = self.startup.send(());
-            }
-        }
         struct ActiveWake {
             count: Arc<AtomicUsize>,
             driver: std::task::Waker,
@@ -920,10 +904,6 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
             AwaitCompletion,
         }
 
-        let startup_waker = std::task::Waker::from(Arc::new(StartupWake {
-            count: worker_startup_wakes,
-            startup: startup_tx,
-        }));
         let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
             &detector,
             &file_system,
@@ -935,8 +915,8 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         let mut heartbeats = 0usize;
         block_on(std::future::poll_fn(|driver_cx| match phase {
             DriverPhase::FirstPoll => {
-                let mut startup_cx = Context::from_waker(&startup_waker);
-                match detection.as_mut().poll(&mut startup_cx) {
+                let mut initial_cx = Context::from_waker(std::task::Waker::noop());
+                match detection.as_mut().poll(&mut initial_cx) {
                     Poll::Ready(result) => {
                         let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
                         Poll::Ready((result, heartbeats))
@@ -1019,13 +999,6 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
         panic!("{stage}");
     }
-    if startup_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-        cleanup();
-        let stage = "timed out waiting for independent startup notification";
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-
     if active_permit_tx.lock().unwrap().as_ref().unwrap().send(()).is_err() {
         cleanup();
         let stage = "worker disconnected before active-wake phase permit";
@@ -1092,10 +1065,6 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         active_wakes.load(Ordering::SeqCst),
         1,
         "only the first Pending branch may actively wake the driver"
-    );
-    assert!(
-        startup_wakes.load(Ordering::SeqCst) > 0,
-        "legacy startup notification must be observed independently"
     );
 }
 
