@@ -742,13 +742,22 @@ policy addresses Rust panics caught by the worker and does not cover native
 crashes or `panic = abort`.
 
 `shutdown_blocking` uses one deadline for the selected shutdown mode and
-worker exit. `Drain` waits for accepted service operations to settle. `Cancel`
-waits for local provider access to finish, closes the worker sender, and tries
-to join; a queued operation may still appear in the resource-group snapshot
-until its executor retires it. The deadline bounds observation of request and
-worker progress; synchronous cancellation notifications or panic-payload
-destruction can make the complete call take longer. Shutdown does not forcibly
-interrupt native inference or provider I/O. `worker_stopped == false` means
+worker exit. `Drain` waits for accepted service operations to settle and local
+provider access to finish. `Cancel` requests cooperative cancellation and
+waits for local provider access to finish. If the first-stage wait reaches its
+deadline, shutdown makes one final observation of whether the worker has
+already exited, then returns before closing service-group admission or taking
+the worker sender. A later call on the retained detector or runtime can
+advance shutdown if that wait is unfinished. The report does not identify
+which phase timed out: `worker_stopped` and `worker_panicked` only report facts
+observed by return. Once the mode-specific wait completes, shutdown closes
+service-group admission and the worker sender, then tries to join; a queued
+operation may still appear in the resource-group snapshot until its executor
+retires it. The deadline bounds
+observation of request and worker progress; synchronous cancellation
+notifications or panic-payload destruction can make the complete call take
+longer. Shutdown does not forcibly interrupt native inference or provider
+I/O. `worker_stopped == false` means
 join was unconfirmed when the call returned and the worker handle is retained;
 `true` means join was confirmed by return, not that every operation resource
 was released. Shutdown may make one final join check after the deadline, so the

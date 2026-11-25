@@ -990,10 +990,12 @@ impl ManagedInferenceRuntime {
     ///
     /// # Returns
     ///
-    /// Drain waits for accepted service operations to settle. Cancel waits for
-    /// local provider access to finish. Shutdown then closes the worker sender
-    /// and attempts to join it. An operation still queued on the executor may
-    /// remain in the returned group snapshot until that executor retires it.
+    /// Drain waits for accepted service operations to settle and local
+    /// provider access to finish. Cancel requests cooperative cancellation and
+    /// waits for local provider access to finish. Shutdown then closes
+    /// service-group admission and the worker sender, and attempts to join it.
+    /// An operation still queued on the executor may remain in the returned
+    /// group snapshot until that executor retires it.
     /// `worker_stopped` reports whether the join was confirmed when this call
     /// returns; it can be true while an unconfirmed provider request still
     /// retains capacity. False means shutdown has not observed a completed
@@ -1007,6 +1009,14 @@ impl ManagedInferenceRuntime {
     /// [`ManagedInferenceSnapshot::faulted`]; only an uncaught panic
     /// observed while joining sets
     /// [`ManagedInferenceShutdownReport::worker_panicked`].
+    ///
+    /// If the first-stage wait reaches its deadline, this call makes one final
+    /// observation of whether the worker has already exited, then returns
+    /// before closing service-group admission or taking the worker sender. A
+    /// later call on the retained runtime can continue that wait and advance
+    /// shutdown. The report does not identify which phase timed out:
+    /// `worker_stopped` and `worker_panicked` only report facts observed by
+    /// the time this call returns.
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,

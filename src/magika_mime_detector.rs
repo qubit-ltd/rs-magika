@@ -460,12 +460,19 @@ impl MagikaMimeDetector {
     ///
     /// The timeout sets the deadline for observing the mode-specific wait and
     /// worker progress. `Drain` waits for accepted service operations to
-    /// settle; `Cancel` waits for local provider access to finish before
-    /// shutdown closes the worker sender. Shutdown may make one final join
-    /// observation after the deadline, so `worker_stopped` reports whether the
-    /// join was confirmed when this call returns, not whether it completed by
-    /// the deadline. If join remains unconfirmed, the runtime retains the
-    /// worker handle and a later call can continue observing and reap it.
+    /// settle and local provider access to finish; `Cancel` requests
+    /// cooperative cancellation and waits for local provider access to finish.
+    /// If this first-stage wait reaches its deadline, the call makes one final
+    /// observation of whether the worker has already exited, then returns
+    /// before closing service-group admission or taking the worker sender. A
+    /// later call can continue the wait and advance shutdown. The report does
+    /// not identify which phase timed out: `worker_stopped` and
+    /// `worker_panicked` only report facts observed by return. Shutdown may
+    /// make one final join observation after the deadline, so
+    /// `worker_stopped` reports whether the join was confirmed when this call
+    /// returns, not whether it completed by the deadline. If join remains
+    /// unconfirmed, the runtime retains the worker handle and a later call can
+    /// continue observing and reap it.
     /// Synchronous cancellation notifications and panic-payload destruction
     /// can make the whole call take longer than the timeout. Shutdown does not
     /// forcibly interrupt native inference or provider I/O.
@@ -478,9 +485,11 @@ impl MagikaMimeDetector {
     ///
     /// # Returns
     ///
-    /// After its mode-specific wait, shutdown closes the worker sender and
-    /// attempts to join it. `Drain` waits for accepted service operations to
-    /// settle. `Cancel` waits for local provider access to finish first. Queued
+    /// After its mode-specific wait, shutdown closes service-group admission
+    /// and the worker sender, then attempts to join it. `Drain` waits for
+    /// accepted service operations to settle and local provider access to
+    /// finish. `Cancel` requests cooperative cancellation and waits for local
+    /// provider access to finish. Queued
     /// operations can remain in the service-group snapshot until their
     /// executor retires them. `worker_stopped` confirms the worker join only;
     /// it can be true while an unconfirmed provider request still retains

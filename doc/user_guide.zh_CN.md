@@ -595,9 +595,12 @@ session；Magika 与 ONNX Runtime 均未说明 unwind 后可安全恢复 session
 模型请求；应用需要新建 runtime 并重新注册 Provider 才能恢复推理。此策略处理 worker 捕获到的
 Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 
-`shutdown_blocking` 使用同一个 deadline 执行所选关闭模式并等待 worker 退出。`Drain` 会等待已接纳的服务操作结算。
-`Cancel` 会等待本地 Provider 访问结束，随后关闭 worker sender 并尝试 join；排队操作仍可能留在资源组快照中，
-直到其 executor 将其退休。期限用于观察请求和 worker 进展；同步取消通知或 panic 载荷析构可能使整次调用超过期限。
+`shutdown_blocking` 使用同一个 deadline 执行所选关闭模式并等待 worker 退出。`Drain` 会等待已接纳的服务操作结算和本地 Provider 访问结束；
+`Cancel` 会请求协作停止并等待本地 Provider 访问结束。如果第一阶段等待达到 deadline，关闭会先做一次最终观察，检查 worker 是否已经退出，
+然后在关闭服务组准入和取走 worker sender 之前返回。调用方保留 detector 或 runtime 后，如果第一阶段尚未完成，可以再次调用以推进关闭。
+返回报告无法指出超时发生在哪个阶段：`worker_stopped` 和 `worker_panicked` 只记录返回前观察到的事实。
+模式等待完成后，关闭服务组准入、取走 worker sender 并尝试 join；排队操作仍可能留在资源组快照中，直到其 executor 将其退休。
+期限用于观察请求和 worker 进展；同步取消通知或 panic 载荷析构可能使整次调用超过期限。
 关闭不会强制中断 native 推理或 Provider I/O。超时时，`worker_stopped == false` 表示本次调用返回时仍未确认 join，运行时会保留 worker handle；
 `true` 表示返回前已确认 join，但不代表每项操作资源都已释放。关闭可能在 deadline 后再做一次 join 检查，
 因此该字段描述返回时掌握的事实，不能确定 worker 在 deadline 前何时退出。应使用 operation observer 的有界 settlement wait
