@@ -34,7 +34,26 @@ cat > "$bin/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$GIT_CALL_LOG"
-if [[ "${GIT_FAIL_STATUS:-}" == true && " $* " == *" status "* ]]; then
+args=("$@")
+index=0
+subcommand=''
+while (( index < ${#args[@]} )); do
+    case "${args[index]}" in
+        --no-optional-locks) ((index += 1)) ;;
+        -C|-c|--git-dir|--work-tree|--namespace|--exec-path)
+            (( index + 1 < ${#args[@]} )) || { echo "cannot parse Git global option ${args[index]} without its value" >&2; exit 93; }
+            ((index += 2)) ;;
+        --config-env)
+            (( index + 2 < ${#args[@]} )) || { echo 'cannot parse Git --config-env without its key and environment variable' >&2; exit 93; }
+            ((index += 3)) ;;
+        -*) echo "cannot parse unexpected Git global option ${args[index]}" >&2; exit 93 ;;
+        *) subcommand=${args[index]}; break ;;
+    esac
+done
+[[ -n "$subcommand" ]] || { echo 'cannot parse Git call without a subcommand' >&2; exit 93; }
+printf '%s\n' "$subcommand" >> "$GIT_SUBCOMMAND_LOG"
+if [[ "${GIT_PARSE_ONLY:-}" == true ]]; then exit 0; fi
+if [[ "${GIT_FAIL_STATUS:-}" == true && "$subcommand" == status ]]; then
     echo 'simulated git status failure' >&2
     exit 47
 fi
@@ -43,6 +62,7 @@ EOF
 chmod +x "$bin/git"
 export REAL_GIT="$real_git"
 export GIT_CALL_LOG="$temporary_root/git-calls.log"
+export GIT_SUBCOMMAND_LOG="$temporary_root/git-subcommands.log"
 export RS_INFRA_PROJECT_ROOT="$project"
 export RS_INFRA_CACHE_DIR="$cache"
 
@@ -65,11 +85,36 @@ PATH="$bin:$PATH" "$repo_root/.infra/lib/check-locked-local-path-dependencies.sh
 test "$warm_before" = "$(snapshot)"
 test "$index_before" = "$(sha256sum "$dependency/.git/index")"
 test "$worktree_before" = "$(git -C "$dependency" status --porcelain)"
-if grep -E -n '(^| )((fetch|checkout|clone|init|reset|clean|update-index|add|commit|gc|maintenance|worktree) )( |$)' "$GIT_CALL_LOG"; then
+if grep -E -n '^(fetch|checkout|clone|init|reset|clean|update-index|add|commit|gc|maintenance|worktree)$' "$GIT_SUBCOMMAND_LOG"; then
     echo 'strict check invoked a mutating Git command' >&2
     exit 1
 fi
 grep -F -- '--no-optional-locks' "$GIT_CALL_LOG" >/dev/null
+
+# Parse synthetic invocations without executing Git; paths containing command
+# names must not be mistaken for the subcommand.
+for invocation in 'fetch origin' 'checkout abc' 'update-index --refresh' 'gc' \
+    '--no-optional-locks -C /tmp/status-fetch-checkout status --porcelain=v1' \
+    '-c safe.directory=* -C /tmp/gc-update-index-checkout status --porcelain=v1'; do
+    # shellcheck disable=SC2206
+    synthetic_args=( $invocation )
+    GIT_PARSE_ONLY=true "$bin/git" "${synthetic_args[@]}"
+done
+tail -n 6 "$GIT_SUBCOMMAND_LOG" > "$temporary_root/synthetic-subcommands.log"
+cat > "$temporary_root/expected-synthetic-subcommands.log" <<'EOF'
+fetch
+checkout
+update-index
+gc
+status
+status
+EOF
+cmp "$temporary_root/expected-synthetic-subcommands.log" "$temporary_root/synthetic-subcommands.log"
+if GIT_PARSE_ONLY=true "$bin/git" --unrecognized-global-option status > "$temporary_root/unparseable.log" 2>&1; then
+    echo 'expected fixture to reject an unparseable Git invocation' >&2
+    exit 1
+fi
+grep -F 'cannot parse unexpected Git global option' "$temporary_root/unparseable.log" >/dev/null
 
 # A dirty worktree, mismatched HEAD, missing checkout, or Git status failure fails closed.
 printf 'dirty\n' > "$dependency/untracked"
