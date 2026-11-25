@@ -595,20 +595,14 @@ impl ManagedInferenceRuntime {
             // this operation's resources have actually been released.
             #[cfg(test)]
             {
-                let mut settlement = std::pin::pin!(operation.wait_settlement());
-                if let Some(observer) = self
+                let observer = self
                     .settlement_wait_observer
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .take()
-                {
-                    let waker = std::task::Waker::noop();
-                    let mut context = Context::from_waker(waker);
-                    if settlement.as_mut().poll(&mut context).is_pending() {
-                        let _ = observer.send(());
-                    }
-                }
-                let _settlement = settlement.await;
+                    .take();
+                let mut settlement = std::pin::pin!(operation.wait_settlement());
+                let mut observer = observer;
+                let _settlement = observe_settlement_pending(settlement.as_mut(), &mut observer).await;
             }
             #[cfg(not(test))]
             let _settlement = operation.wait_settlement().await;
@@ -1150,6 +1144,23 @@ impl ManagedInferenceRuntime {
             },
         }
     }
+}
+
+/// Observes the first pending poll of a settlement future in tests.
+#[cfg(test)]
+fn observe_settlement_pending<'a, F: Future>(
+    mut settlement: std::pin::Pin<&'a mut F>,
+    observer: &'a mut Option<SyncSender<()>>,
+) -> impl Future<Output = F::Output> + 'a {
+    poll_fn(move |context| match settlement.as_mut().poll(context) {
+        Poll::Ready(report) => Poll::Ready(report),
+        Poll::Pending => {
+            if let Some(observer) = observer.take() {
+                let _ = observer.try_send(());
+            }
+            Poll::Pending
+        }
+    })
 }
 
 /// Wakes accepted provider operations whose input has not reached the worker.
