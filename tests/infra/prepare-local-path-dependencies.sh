@@ -65,11 +65,11 @@ PATH="$bin:$PATH" "$repo_root/.infra/lib/check-locked-local-path-dependencies.sh
 test "$warm_before" = "$(snapshot)"
 test "$index_before" = "$(sha256sum "$dependency/.git/index")"
 test "$worktree_before" = "$(git -C "$dependency" status --porcelain)"
-if rg -n '(^| )((fetch|checkout|clone|init|reset|clean|update-index|add|commit|gc|maintenance|worktree) )( |$)' "$GIT_CALL_LOG"; then
+if grep -E -n '(^| )((fetch|checkout|clone|init|reset|clean|update-index|add|commit|gc|maintenance|worktree) )( |$)' "$GIT_CALL_LOG"; then
     echo 'strict check invoked a mutating Git command' >&2
     exit 1
 fi
-rg -F -- '--no-optional-locks' "$GIT_CALL_LOG" >/dev/null
+grep -F -- '--no-optional-locks' "$GIT_CALL_LOG" >/dev/null
 
 # A dirty worktree, mismatched HEAD, missing checkout, or Git status failure fails closed.
 printf 'dirty\n' > "$dependency/untracked"
@@ -78,7 +78,7 @@ if PATH="$bin:$PATH" "$repo_root/.infra/lib/check-locked-local-path-dependencies
     echo 'expected strict check to reject a dirty checkout' >&2
     exit 1
 fi
-rg -F 'dirty at ' "$temporary_root/dirty.log" >/dev/null
+grep -F 'dirty at ' "$temporary_root/dirty.log" >/dev/null
 rm "$dependency/untracked"
 
 printf '../dependency\tfixture://dependency\t%s\n' \
@@ -88,7 +88,7 @@ if PATH="$bin:$PATH" "$repo_root/.infra/lib/check-locked-local-path-dependencies
     echo 'expected strict check to reject a mismatched HEAD' >&2
     exit 1
 fi
-rg -F 'HEAD mismatch' "$temporary_root/mismatch.log" >/dev/null
+grep -F 'HEAD mismatch' "$temporary_root/mismatch.log" >/dev/null
 
 printf '../missing\tfixture://missing\t%s\n' "$revision" > "$project/.infra/ci/local-path-dependencies.tsv"
 if PATH="$bin:$PATH" "$repo_root/.infra/lib/check-locked-local-path-dependencies.sh" \
@@ -96,7 +96,7 @@ if PATH="$bin:$PATH" "$repo_root/.infra/lib/check-locked-local-path-dependencies
     echo 'expected strict check to reject a missing checkout' >&2
     exit 1
 fi
-rg -F 'is missing' "$temporary_root/missing.log" >/dev/null
+grep -F 'is missing' "$temporary_root/missing.log" >/dev/null
 
 printf '../dependency\tfixture://dependency\t%s\n' "$revision" \
     > "$project/.infra/ci/local-path-dependencies.tsv"
@@ -106,8 +106,8 @@ if GIT_FAIL_STATUS=true PATH="$bin:$PATH" \
     echo 'expected strict check to reject a failed Git status query' >&2
     exit 1
 fi
-rg -F 'simulated git status failure' "$temporary_root/git-failure.log" >/dev/null
-rg -F 'exit 47' "$temporary_root/git-failure.log" >/dev/null
+grep -F 'simulated git status failure' "$temporary_root/git-failure.log" >/dev/null
+grep -F 'exit 47' "$temporary_root/git-failure.log" >/dev/null
 
 test -f "$project/target/debug/sentinel"
 test -f "$project/target/release/sentinel"
@@ -115,7 +115,7 @@ test -f "$project/coverage/sentinel"
 test -f "$cache/sentinel"
 test "$index_before" = "$(sha256sum "$dependency/.git/index")"
 test -z "$(git -C "$dependency" status --porcelain)"
-rg -n '^\s+run: \.infra/lib/check-locked-local-path-dependencies\.sh$' \
+grep -E -n '^[[:space:]]+run: \.infra/lib/check-locked-local-path-dependencies\.sh$' \
     "$repo_root/.github/workflows/ci.yml" >/dev/null
 
 # Exercise ordinary preparation against the shared implementation with a fake Git
@@ -178,7 +178,7 @@ RS_INFRA_PROJECT_ROOT="$normal_project" RS_INFRA_SHARED_ROOT="$shared_root" \
     RS_INFRA_NETWORK_MAX_ATTEMPTS=2 RS_INFRA_NETWORK_RETRY_DELAY_SECONDS=0 \
     PATH="$prep_bin:$PATH" "$shared_root/.infra/lib/prepare-local-path-dependencies.sh" \
     > "$temporary_root/prepare.log" 2>&1
-rg -F 'simulated fetch failure' "$temporary_root/prepare.log" >/dev/null
+grep -F 'simulated fetch failure' "$temporary_root/prepare.log" >/dev/null
 export CHECK_PREPARED_ABSENT=false
 test -d "$PREPARED_TARGET/.git"
 test "$(cat "$PREPARED_TARGET/.mock-head")" = "$prep_revision"
@@ -196,7 +196,7 @@ if RS_INFRA_PROJECT_ROOT="$normal_project" RS_INFRA_SHARED_ROOT="$shared_root" \
     echo 'expected ordinary preparation to preserve and reject an occupied path' >&2
     exit 1
 fi
-rg -F "refusing to replace existing dependency path '../occupied'" \
+grep -F "refusing to replace existing dependency path '../occupied'" \
     "$temporary_root/occupied.log" >/dev/null
 test "$(cat "$temporary_root/occupied/marker")" = 'preserve me'
 
@@ -209,7 +209,7 @@ if RS_INFRA_PROJECT_ROOT="$normal_project" RS_INFRA_SHARED_ROOT="$shared_root" \
     echo 'expected ordinary preparation to reject an active publisher lock' >&2
     exit 1
 fi
-rg -F "another dependency preparation is publishing '../concurrent'" \
+grep -F "another dependency preparation is publishing '../concurrent'" \
     "$temporary_root/concurrent.log" >/dev/null
 test -d "$temporary_root/.concurrent.prepare-publish.lock"
 test -z "$(find "$temporary_root" -maxdepth 1 -name '.concurrent.prepare.*' -print -quit)"
