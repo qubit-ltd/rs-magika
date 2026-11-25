@@ -79,10 +79,10 @@ impl InferenceFuture {
     /// Waits for the business result and then for the worker to release the
     /// admitted input. Synchronous detector paths preserve their legacy
     /// guarantee that returning the result also releases caller-owned capacity.
-    pub(super) fn wait_blocking_settled(mut self) -> MimeResult<Option<String>> {
+    pub(super) fn wait_blocking_settled(self) -> MimeResult<Option<String>> {
         let state = Arc::clone(&self.state);
         #[cfg(test)]
-        let mut release_wait_started = self.release_wait_started.take();
+        let mut release_wait_started = self.release_wait_started.clone();
         let result = self.wait_blocking();
         let mut inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
         while !inner.released {
@@ -153,6 +153,128 @@ mod tests {
     use super::InferenceFuture;
     use crate::managed_runtime::task_state::TaskState;
 
+    struct CompleteOnDrop(Option<Arc<TaskState>>);
+
+    impl CompleteOnDrop {
+        fn spawn_cleanup(&mut self) -> std::thread::JoinHandle<()> {
+            let state = self.0.take().expect("cleanup state is consumed once");
+            std::thread::spawn(move || {
+                // Ensure every exit path wakes a blocked waiter. Result
+                // publication is write-once, so this only fills an otherwise
+                // missing result during cleanup.
+                state.finish_business(
+                    Err(qubit_mime::MimeError::detector_backend("test", "waiter cleanup")),
+                    ChildOutcomeKind::Failed,
+                );
+                state.mark_worker_done();
+                state.mark_released();
+            })
+        }
+
+        fn finish(mut self) {
+            let cleanup = self.spawn_cleanup();
+            crate::tests::internal::bridge_wait::join_before(
+                cleanup,
+                "complete blocking waiter cleanup",
+                Duration::from_secs(2),
+            );
+        }
+    }
+
+    impl Drop for CompleteOnDrop {
+        fn drop(&mut self) {
+            if self.0.is_none() {
+                return;
+            }
+            let cleanup = self.spawn_cleanup();
+            let deadline = std::time::Instant::now() + Duration::from_millis(100);
+            while !cleanup.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            if cleanup.is_finished() {
+                let _ = cleanup.join();
+            }
+        }
+    }
+
+    struct ReleaseGate(Option<mpsc::SyncSender<()>>);
+
+    impl ReleaseGate {
+        fn release(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    #[test]
+    fn test_cleanup_drop_returns_while_state_lock_is_held() {
+        let state = Arc::new(TaskState::new(105, None));
+        let completion = CompleteOnDrop(Some(Arc::clone(&state)));
+        let (locked_tx, locked_rx) = mpsc::sync_channel(1);
+        let (unlock_tx, unlock_rx) = mpsc::sync_channel(1);
+        let mut unlock = ReleaseGate(Some(unlock_tx));
+        let lock_state = Arc::clone(&state);
+        let lock_holder = std::thread::spawn(move || {
+            let _guard = lock_state.inner.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            let _ = unlock_rx.recv_timeout(Duration::from_secs(5));
+        });
+        locked_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("state lock holder must acquire the mutex");
+
+        let (drop_started_tx, drop_started_rx) = mpsc::sync_channel(1);
+        let (drop_done_tx, drop_done_rx) = mpsc::sync_channel(1);
+        let dropper = std::thread::spawn(move || {
+            drop_started_tx.send(()).unwrap();
+            drop(completion);
+            drop_done_tx.send(()).unwrap();
+        });
+        drop_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cleanup dropper must start");
+        let returned_while_locked = drop_done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        unlock.release();
+        assert!(
+            returned_while_locked,
+            "cleanup Drop must return while state lock is held"
+        );
+        crate::tests::internal::bridge_wait::join_before(
+            lock_holder,
+            "state lock holder exit",
+            Duration::from_secs(2),
+        );
+        crate::tests::internal::bridge_wait::join_before(
+            dropper,
+            "cleanup Drop exit",
+            Duration::from_secs(2),
+        );
+        let state = Arc::clone(&state);
+        crate::tests::internal::bridge_wait::join_before(
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    let inner = state.inner.lock().unwrap_or_else(|error| error.into_inner());
+                    if inner.result.is_some() && inner.worker_done && inner.released {
+                        return;
+                    }
+                    drop(inner);
+                    assert!(std::time::Instant::now() < deadline, "cleanup state was not published");
+                    std::thread::yield_now();
+                }
+            }),
+            "cleanup state publication after lock release",
+            Duration::from_secs(3),
+        );
+    }
+
     #[test]
     fn test_future_registers_until_result_is_published() {
         struct WakeCounter(std::sync::atomic::AtomicUsize);
@@ -198,23 +320,8 @@ mod tests {
                 ChildOutcomeKind::Failed,
             ),
         ] {
-            struct CompleteOnDrop(Arc<TaskState>);
-            impl Drop for CompleteOnDrop {
-                fn drop(&mut self) {
-                    // Ensure every exit path wakes a blocked waiter. Result
-                    // publication is write-once, so this only fills an
-                    // otherwise missing result during cleanup.
-                    self.0.finish_business(
-                        Err(qubit_mime::MimeError::detector_backend("test", "waiter cleanup")),
-                        ChildOutcomeKind::Failed,
-                    );
-                    self.0.mark_worker_done();
-                    self.0.mark_released();
-                }
-            }
-
             let state = Arc::new(TaskState::new(operation_id, None));
-            let completion = CompleteOnDrop(Arc::clone(&state));
+            let completion = CompleteOnDrop(Some(Arc::clone(&state)));
             let (started_tx, started_rx) = mpsc::channel();
             let (result_tx, result_rx) = mpsc::channel();
             let mut future = InferenceFuture::new(Arc::clone(&state));
@@ -244,7 +351,7 @@ mod tests {
             );
             assert!(!worker_done);
             assert!(!released);
-            drop(completion);
+            completion.finish();
             crate::tests::internal::bridge_wait::join_before(
                 waiter,
                 "blocking waiter cleanup",
