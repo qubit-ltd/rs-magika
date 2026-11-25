@@ -1007,7 +1007,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         &WorkerEvent::DetectionPending,
         "legacy detection first Pending",
         Duration::from_secs(5),
-        || cleanup(),
+        cleanup,
     );
     if let Err(stage) = first_poll {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
@@ -1037,7 +1037,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         &WorkerEvent::Heartbeat(1),
         "driver poll after one active wake",
         Duration::from_secs(5),
-        || cleanup(),
+        cleanup,
     );
     if let Err(stage) = heartbeat {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
@@ -1048,7 +1048,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         &WorkerEvent::CompletionPending,
         "completion-stage poll pending behind closed inference gate",
         Duration::from_secs(5),
-        || cleanup(),
+        cleanup,
     );
     if let Err(stage) = completion_pending {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
@@ -1062,7 +1062,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         &WorkerEvent::CompletionNotified,
         "completion-stage waker notification",
         Duration::from_secs(5),
-        || cleanup(),
+        cleanup,
     );
     if let Err(stage) = completion_notification {
         let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
