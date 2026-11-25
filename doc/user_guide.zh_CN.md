@@ -294,10 +294,9 @@ fn register_provider() -> Result<(MimeDetectorRegistry, Arc<ManagedInferenceRunt
 
 ## Media refinement 支持范围
 
-已配置的媒体流分类器只用于符合条件的高层输入。启用 precise detection 后，检测到的 MIME
-type 或文件名须匹配已配置的 ambiguous MIME mapping。有文件扩展名时，该扩展名必须已启用，
-且初始 MIME type 必须属于该扩展名对应的配对。没有扩展名时，按初始 MIME type 匹配配置的歧义
-映射；若命中的映射对应不同的音视频配对，则保留初始 MIME 选择。多个映射重复使用同一配对不算
+已配置的媒体流分类器只用于符合条件的高层输入。必须启用 precise detection。有文件扩展名时，
+该扩展名必须已启用，且初始 MIME type 必须属于该扩展名对应的配对。没有扩展名时，按初始 MIME type
+匹配配置的歧义映射；若命中的映射对应不同的音视频配对，则保留初始 MIME 选择。多个映射重复使用同一配对不算
 冲突。扩展名与初始 MIME type 不构成已配置配对时，不进行细化。
 
 | 检测入口 | 分类器行为 |
