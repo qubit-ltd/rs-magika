@@ -391,6 +391,20 @@ impl ManagedInferenceRuntime {
     }
 
     /// Acquires runtime capacity before converting owned bytes for the worker.
+    ///
+    /// # Parameters
+    ///
+    /// * `parent` - Optional parent scope for the operation.
+    /// * `bytes` - Owned payload retained until the worker releases the job.
+    /// * `convert` - Converts the payload after runtime capacity is reserved.
+    ///
+    /// # Returns
+    ///
+    /// A MIME mapping, or `None` when Magika has no mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns a size-limit, capacity, Magika, or worker error.
     async fn submit_owned_bytes(
         self: &Arc<Self>,
         parent: Option<&OperationScope>,

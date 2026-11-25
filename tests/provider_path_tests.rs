@@ -2138,7 +2138,11 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
 
 fn assert_single_full_read_open(observations: &crate::support::ProviderObservations) {
     let options = observations.options.lock().unwrap();
-    assert_eq!(1, options.len(), "read_all must issue one open without range parameters");
+    assert_eq!(
+        1,
+        options.len(),
+        "read_all must issue one open without range parameters"
+    );
     assert!(options[0].offset().is_none());
     assert!(options[0].length().is_none());
 }

@@ -1092,10 +1092,7 @@ fn test_owned_bytes_conversion_over_limit_does_not_convert() {
 
     assert!(matches!(
         result,
-        Err(MimeError::BufferLimitExceeded {
-            requested: 9,
-            limit: 8
-        })
+        Err(MimeError::BufferLimitExceeded { requested: 9, limit: 8 })
     ));
     assert_eq!(conversions.load(std::sync::atomic::Ordering::SeqCst), 0);
     let _ = runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::from_secs(2));
