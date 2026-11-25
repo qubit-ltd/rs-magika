@@ -1012,8 +1012,10 @@ impl ManagedInferenceRuntime {
     /// request still retains capacity. False means shutdown has not observed a
     /// completed join; the worker handle remains available for a later call to
     /// continue observing and reap. One deadline covers the mode-specific
-    /// wait and worker exit attempt. Shutdown does not forcibly interrupt
-    /// native inference or provider I/O. A caught inference panic marks
+    /// wait and worker exit attempt. Synchronous cancellation notifications
+    /// or destruction of a panic payload can make the complete call take
+    /// longer than that duration. Shutdown does not forcibly interrupt native
+    /// inference or provider I/O. A caught inference panic marks
     /// [`ManagedInferenceSnapshot::faulted`]; only an uncaught panic
     /// observed while joining sets
     /// [`ManagedInferenceShutdownReport::worker_panicked`].
