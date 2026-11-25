@@ -302,7 +302,7 @@ fn register_provider() -> Result<(MimeDetectorRegistry, Arc<ManagedInferenceRunt
 | 检测入口 | 分类器行为 |
 | --- | --- |
 | 完整内容（`detect_by_content` / `detect`） | 可以分类完整内容 |
-| 可 seek 的 reader | 可以分类完整 reader，并恢复原游标 |
+| 可 seek 的 reader | 可以分类完整 reader，并尝试恢复原游标 |
 | 本地文件 | 可以分类文件 |
 | Provider path（`detect_path` / `detect_async_path`） | 不调用分类器，包括 session、旧范围读取和 `read_all` 回退 |
 | 直接调用 `MimeContentBackend` | 返回 MIME 候选；高层选择和细化彼此独立 |
@@ -377,8 +377,10 @@ provider 支持以下选择名称：`magika`、`magika-mime-detector` 和
 `magikamimedetector`。推荐使用规范名称 `magika`。
 
 `MagikaMimeDetector` 还实现了 `qubit-mime` 针对 seekable reader、本地文件以及同步或
-异步 provider path 的后端操作。reader 检测结束后会恢复原来的位置；content backend
-从当前 cursor 对应的剩余资源开始检测，而通用 detector API 仍保持整份资源语义。
+异步 provider path 的后端操作。`MimeDetectorBackend::guess_from_reader` 检测整份资源；
+`MimeContentBackend::detect_reader` 从当前 cursor 检测到 EOF。取得原位置后，即使检测返回错误，
+reader 检测也会尝试恢复游标。恢复成功时保留检测结果或原检测错误；恢复 seek 失败时，返回该
+`MimeError::Io`，其优先级高于检测结果或原错误，且不保证 reader 的游标位置。
 Provider path 检测优先使用随机读取 session：只打开一次，并从同一个对象的多个位置采样。
 打开时报告的长度只限定可读取偏移，不是内容快照。只有打开 session 返回
 `UnsupportedOperation` 或 `UnsupportedCapability` 才回退到旧的按路径读取；其他打开错误和

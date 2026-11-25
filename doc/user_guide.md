@@ -222,7 +222,7 @@ do not form a configured pair are not refined.
 | Detection entry point | Classifier behavior |
 | --- | --- |
 | Complete content (`detect_by_content` / `detect`) | May classify the complete bytes |
-| Seekable reader | May classify the full reader and restore its position |
+| Seekable reader | May classify the full reader and attempts to restore its position |
 | Local file | May classify the file |
 | Provider path (`detect_path` / `detect_async_path`) | Not called, including session, legacy range, and `read_all` fallback routes |
 | Direct `MimeContentBackend` call | Returns MIME candidates; high-level selection and refinement are separate |
@@ -449,9 +449,13 @@ The provider accepts these selection names: `magika`,
 
 `MagikaMimeDetector` also implements the `qubit-mime` backend operations for
 seekable readers, local files, and synchronous or asynchronous provider paths.
-Reader detection restores the original reader position. Content-backend reader
-detection classifies the remaining resource from the current cursor, while the
-generic detector API keeps whole-resource semantics. Provider-path detection
+`MimeDetectorBackend::guess_from_reader` detects the whole resource, while
+`MimeContentBackend::detect_reader` detects from the current cursor to EOF.
+Once the original position is known, reader detection attempts to restore it
+even if detection returns an error. A successful restore preserves the
+detection result or its original error. If the restore seek fails, its
+`MimeError::Io` takes precedence and the reader position is unspecified.
+Provider-path detection
 enforces `max_bytes` cumulatively across all sampling reads. The legacy route
 opens by path for each segment and applies the same conditional ETag to every
 segment when available; without that condition, it cannot guarantee a
