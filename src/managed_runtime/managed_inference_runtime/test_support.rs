@@ -128,6 +128,7 @@ impl ManagedInferenceRuntime {
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks,
             admission_gate,
+            settlement_wait_observer: Mutex::new(None),
         }
     }
 
@@ -178,6 +179,7 @@ impl ManagedInferenceRuntime {
             byte_budget: Arc::new(ByteBudget::new(max_in_flight_bytes)),
             tasks,
             admission_gate,
+            settlement_wait_observer: Mutex::new(None),
         }
     }
 }
