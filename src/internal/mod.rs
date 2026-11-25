@@ -13,6 +13,7 @@ pub(crate) mod async_sample_bridge;
 mod async_session_read_options;
 mod cooperative_read;
 mod managed_read_observer;
+pub(crate) mod local_content_file;
 mod operation_outcome_context;
 pub(crate) mod provider_input;
 mod provider_path_route;

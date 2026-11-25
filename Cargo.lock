@@ -578,6 +578,7 @@ dependencies = [
 name = "qubit-magika"
 version = "0.18.0"
 dependencies = [
+ "libc",
  "magika",
  "ort",
  "qubit-config",

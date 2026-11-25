@@ -611,10 +611,17 @@ impl MagikaMimeDetector {
     /// Zero or one MIME type candidates.
     ///
     /// Only regular files are opened for content detection. Symlinks and
-    /// directories retain Magika's file-type handling; other local file types
-    /// return [`MimeError::Io`] with [`std::io::ErrorKind::Unsupported`].
-    /// Metadata inspection and opening are separate operations, so this check
-    /// does not prevent a path from being replaced between them.
+    /// directories retain their empty-candidate behavior; other local file
+    /// types return [`MimeError::Io`] with
+    /// [`std::io::ErrorKind::Unsupported`]. After the path-based type check,
+    /// content detection validates the metadata of the opened handle and reads
+    /// from that same handle. On Unix, opening does not follow the final
+    /// symlink and does not wait for a FIFO writer. Other platforms retain
+    /// their standard open behavior and validate the resulting handle type.
+    /// The path can change after the initial metadata check, in which case
+    /// opening or reading it may return an I/O error. This does not constrain
+    /// ancestor resolution or changes to a regular file's contents while it is
+    /// being read.
     ///
     /// # Errors
     ///
@@ -628,7 +635,9 @@ impl MagikaMimeDetector {
         } else if metadata.is_dir() {
             FileType::Directory
         } else if metadata.is_file() {
-            return self.guess_from_magika_input(std::fs::File::open(file)?);
+            return self.guess_from_magika_input(
+                crate::internal::local_content_file::open_regular_file(file)?,
+            );
         } else {
             return Err(MimeError::Io(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
