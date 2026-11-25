@@ -60,8 +60,8 @@ use crate::managed_runtime::request_admission_handoff::RequestAdmissionHandoff;
 /// supplied through the builder or provider, it is reused as-is and no second
 /// session is initialized. Applications should create the detector once and
 /// share it, for example through [`std::sync::Arc`]. One worker owns the Magika
-/// session and serializes model inference. Synchronous MIME methods wait for worker
-/// results; async provider methods service bounded worker range requests
+/// session and serializes model inference. Synchronous MIME methods wait for
+/// worker results; async provider methods service bounded worker range requests
 /// without blocking their executor. The operation-aware provider method
 /// additionally registers sampling and inference in an explicit scope.
 ///
@@ -472,9 +472,10 @@ impl MagikaMimeDetector {
     /// aggregate service-group counters and is not a per-request release
     /// guarantee. To observe a request's resources, retain its operation
     /// observer and use its bounded settlement wait for that request's scope.
-    /// `Pending(snapshot)` means that wait reached its deadline. `Ready(report)`
-    /// is terminal but may still contain negative release evidence; resources
-    /// owned by other operations in the scope can also appear in its report.
+    /// `Pending(snapshot)` means that wait reached its deadline.
+    /// `Ready(report)` is terminal but may still contain negative release
+    /// evidence; resources owned by other operations in the scope can also
+    /// appear in its report.
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,

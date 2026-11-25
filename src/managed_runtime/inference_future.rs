@@ -245,12 +245,8 @@ mod tests {
             assert!(!worker_done);
             assert!(!released);
             drop(completion);
-            crate::tests::internal::bridge_wait::join_before(
-                waiter,
-                "blocking waiter cleanup",
-                Duration::from_secs(2),
-            )
-            .expect("blocking waiter result send must succeed");
+            crate::tests::internal::bridge_wait::join_before(waiter, "blocking waiter cleanup", Duration::from_secs(2))
+                .expect("blocking waiter result send must succeed");
             match operation_id {
                 102 => assert_eq!(observed.unwrap().as_deref(), Some("text/plain")),
                 _ => assert_eq!(
@@ -330,10 +326,6 @@ mod tests {
                 .unwrap()
                 .as_deref()
         );
-        crate::tests::internal::bridge_wait::join_before(
-            waiter,
-            "settled waiter thread exit",
-            Duration::from_secs(2),
-        );
+        crate::tests::internal::bridge_wait::join_before(waiter, "settled waiter thread exit", Duration::from_secs(2));
     }
 }

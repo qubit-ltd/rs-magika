@@ -311,20 +311,15 @@ fn test_snapshot_concurrent_with_shutdown_finishes_within_deadline() {
     });
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let shutdown_runtime = Arc::clone(&runtime);
-    let shutdown = std::thread::spawn(move || {
-        shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2))
-    });
+    let shutdown =
+        std::thread::spawn(move || shutdown_runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2)));
     let report = crate::tests::internal::bridge_wait::join_before(
         shutdown,
         "shutdown concurrent with snapshot observer",
         Duration::from_secs(3),
     );
     assert!(report.worker_stopped);
-    crate::tests::internal::bridge_wait::join_before(
-        observer,
-        "concurrent snapshot observer",
-        Duration::from_secs(3),
-    );
+    crate::tests::internal::bridge_wait::join_before(observer, "concurrent snapshot observer", Duration::from_secs(3));
 }
 
 struct ReleaseGate(Option<mpsc::SyncSender<()>>);
