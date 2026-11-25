@@ -14,12 +14,14 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from _local_package_identities import (
     run_self_tests as run_local_package_identity_self_tests,
     validate_local_package_identities,
 )
+from _consumer_locks import finish_lock, lock_path, prepare_lock
 from _dynamic_loader_feature_policy import (
     dynamic_ort_feature_violations,
     ort_link_graph_violations,
@@ -411,6 +413,30 @@ def validate_current_settlement_names(guide_name: str, markdown: str) -> None:
 
 
 def run_self_tests() -> None:
+    with tempfile.TemporaryDirectory(prefix="managed-guide-lock-self-test-") as temporary:
+        root = Path(temporary)
+        manifest = root / "consumer" / "Cargo.toml"
+        manifest.parent.mkdir()
+        manifest.write_text("[package]\nname='fixture'\n", encoding="utf-8")
+        records = root / "records"
+        default_path = lock_path(records, "managed-guide", "en", "default")
+        inventory_path = lock_path(records, "managed-guide", "en", "inventory")
+        manifest_lock = manifest.parent / "Cargo.lock"
+        manifest_lock.write_text("version = 3\n", encoding="utf-8")
+        finish_lock(manifest, default_path)
+        manifest_lock.write_text("version = 4\n", encoding="utf-8")
+        finish_lock(manifest, inventory_path)
+        assert default_path.read_text(encoding="utf-8") == "version = 3\n"
+        assert inventory_path.read_text(encoding="utf-8") == "version = 4\n"
+        flags, destination = prepare_lock(manifest, records, None, "managed-guide", "en", "default")
+        assert flags == ["--locked"] and destination is None
+        assert manifest_lock.read_text(encoding="utf-8") == "version = 3\n"
+        try:
+            prepare_lock(manifest, records, None, "managed-guide", "zh", "dynamic")
+        except ValueError as error:
+            assert "missing replay lock" in str(error)
+        else:
+            raise AssertionError("accepted missing replay lock")
     run_local_package_identity_self_tests()
     run_ort_graph_self_tests()
 
@@ -936,6 +962,7 @@ edition = "2024"
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true", help="run checker validation checks")
+    parser.add_argument("--replay-locks", type=Path, metavar="DIR", help="replay fixed-source locks recorded in DIR")
     args = parser.parse_args()
     if args.self_test:
         run_self_tests()
@@ -950,12 +977,17 @@ def main() -> int:
         operation_path = (project_root / operation_dependency["path"]).resolve()
     target = project_root / "target"
     target.mkdir(exist_ok=True)
+    record_dir = None
+    if args.replay_locks is None:
+        record_dir = target / "managed-guide-lock-records" / str(uuid.uuid4())
+        print(f"Recording Cargo locks under {record_dir}", flush=True)
     temp_dir = Path(tempfile.mkdtemp(prefix="managed-guide-check-", dir=target))
     try:
         cargo_env = os.environ.copy()
         cargo_env["CARGO_TARGET_DIR"] = str(target)
         for guide in GUIDES:
             guide_path = project_root / guide
+            language = "zh" if guide.endswith("zh_CN.md") else "en"
             markdown = guide_path.read_text(encoding="utf-8")
             validate_current_settlement_names(guide, markdown)
             examples = [
@@ -975,8 +1007,12 @@ def main() -> int:
             (consumer / "Cargo.toml").write_text(
                 consumer_manifest(dependencies, project_root, operation_path), encoding="utf-8"
             )
+            managed_lock_flags, managed_saved_lock = prepare_lock(
+                consumer / "Cargo.toml", args.replay_locks, record_dir,
+                "managed-guide", language, "managed",
+            )
             metadata_result = subprocess.run(
-                ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(consumer / "Cargo.toml")],
+                ["cargo", "metadata", *managed_lock_flags, "--format-version", "1", "--manifest-path", str(consumer / "Cargo.toml")],
                 cwd=project_root, env=cargo_env, capture_output=True, text=True, check=False,
             )
             if metadata_result.returncode:
@@ -987,9 +1023,10 @@ def main() -> int:
                     json.loads(metadata_result.stdout),
                     {name: project_root if name == "qubit-magika" else project_root.parent / f"rs-{name.removeprefix('qubit-')}" for name in ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-operation")},
                 )
+            finish_lock(consumer / "Cargo.toml", managed_saved_lock)
             print(f"Compiling managed examples from {guide}", flush=True)
             result = subprocess.run(
-                ["cargo", "check", "--manifest-path", str(consumer / "Cargo.toml")],
+                ["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")],
                 cwd=project_root,
                 env=cargo_env,
                 check=False,
@@ -1033,8 +1070,12 @@ def main() -> int:
                 if tomllib.loads(serialized_manifest) != expected_manifest:
                     raise ValueError(f"{guide}: generated {variant} Cargo shell changed manifest semantics")
                 graph_manifest.write_text(serialized_manifest, encoding="utf-8")
+                graph_lock_flags, graph_saved_lock = prepare_lock(
+                    graph_manifest, args.replay_locks, record_dir,
+                    "managed-guide", language, variant,
+                )
                 metadata_result = subprocess.run(
-                    ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(graph_manifest)],
+                    ["cargo", "metadata", *graph_lock_flags, "--format-version", "1", "--manifest-path", str(graph_manifest)],
                     cwd=project_root, env=cargo_env, capture_output=True, text=True, check=False,
                 )
                 if metadata_result.returncode:
@@ -1048,11 +1089,12 @@ def main() -> int:
                 }
                 validate_local_package_identities(metadata, expected_paths)
                 validate_feature_graph(metadata, variant, guide)
+                finish_lock(graph_manifest, graph_saved_lock)
                 print(f"Validated {variant} Cargo graph from {guide}", flush=True)
                 if variant == "dynamic":
                     print(f"Compiling dynamic Rust example from {guide}", flush=True)
                     result = subprocess.run(
-                        ["cargo", "check", "--manifest-path", str(graph_manifest)],
+                        ["cargo", "check", "--locked", "--manifest-path", str(graph_manifest)],
                         cwd=project_root, env=cargo_env, check=False,
                     )
                     if result.returncode:

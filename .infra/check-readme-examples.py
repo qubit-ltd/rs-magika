@@ -11,12 +11,14 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import uuid
 from pathlib import Path, PureWindowsPath
 
 from _local_package_identities import (
     run_self_tests as run_local_package_identity_self_tests,
     validate_local_package_identities,
 )
+from _consumer_locks import finish_lock, lock_path, prepare_lock
 
 
 
@@ -208,6 +210,30 @@ def validate_registry_metadata(
 LOCAL_PACKAGES = ("qubit-magika", "qubit-mime", "qubit-fs", "qubit-operation")
 
 def run_self_tests() -> None:
+    with tempfile.TemporaryDirectory(prefix="readme-lock-self-test-") as temporary:
+        root = Path(temporary)
+        manifest = root / "consumer" / "Cargo.toml"
+        manifest.parent.mkdir()
+        manifest.write_text("[package]\nname='fixture'\n", encoding="utf-8")
+        records = root / "records"
+        default_path = lock_path(records, "readme", "en", "default")
+        inventory_path = lock_path(records, "readme", "en", "inventory")
+        manifest_lock = manifest.parent / "Cargo.lock"
+        manifest_lock.write_text("version = 3\n", encoding="utf-8")
+        finish_lock(manifest, default_path)
+        manifest_lock.write_text("version = 4\n", encoding="utf-8")
+        finish_lock(manifest, inventory_path)
+        assert default_path.read_text(encoding="utf-8") == "version = 3\n"
+        assert inventory_path.read_text(encoding="utf-8") == "version = 4\n"
+        flags, destination = prepare_lock(manifest, records, None, "readme", "en", "default")
+        assert flags == ["--locked"] and destination is None
+        assert manifest_lock.read_text(encoding="utf-8") == "version = 3\n"
+        try:
+            prepare_lock(manifest, records, None, "readme", "zh", "default")
+        except ValueError as error:
+            assert "missing replay lock" in str(error)
+        else:
+            raise AssertionError("accepted missing replay lock")
     run_local_package_identity_self_tests()
     expected = {"qubit-magika": "0.18", "qubit-mime": "0.22", "qubit-spi": "0.14", "qubit-operation": "0.3.2"}
     fixtures = {
@@ -363,6 +389,7 @@ def run_self_tests() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true", help="run extraction and version checks")
+    parser.add_argument("--replay-locks", type=Path, metavar="DIR", help="replay fixed-source locks recorded in DIR")
     parser.add_argument(
         "--registry-only",
         action="store_true",
@@ -374,6 +401,8 @@ def main() -> int:
         help="run both extracted README consumers with default and inventory features",
     )
     args = parser.parse_args()
+    if args.registry_only and args.replay_locks is not None:
+        parser.error("--registry-only and --replay-locks cannot be used together")
     if args.self_test:
         run_self_tests()
         print("README extraction and dependency self-tests passed.")
@@ -382,6 +411,10 @@ def main() -> int:
     project_root = Path(__file__).resolve().parent.parent
     target_dir = project_root / "target" / "readme-example-check"
     target_dir.mkdir(parents=True, exist_ok=True)
+    record_dir = None
+    if not args.registry_only and args.replay_locks is None:
+        record_dir = target_dir / "lock-records" / str(uuid.uuid4())
+        print(f"Recording Cargo locks under {record_dir}", flush=True)
     cargo_env = os.environ.copy()
     cargo_env["CARGO_TARGET_DIR"] = str(target_dir)
     try:
@@ -411,6 +444,10 @@ def main() -> int:
                 (consumer_root / "src/main.rs").write_text(example + "\n", encoding="utf-8")
                 manifest_path = consumer_root / "Cargo.toml"
                 mode = "registry-only" if args.registry_only else "fixed-source"
+                language = "zh" if filename.endswith("zh_CN.md") else "en"
+                metadata_lock_flags, saved_lock = prepare_lock(
+                    manifest_path, args.replay_locks, record_dir, "readme", language, "default"
+                )
                 print(f"Checking {filename} ({mode}) with the README dependency requirements...", flush=True)
                 if args.registry_only:
                     metadata_result = subprocess.run(
@@ -432,7 +469,7 @@ def main() -> int:
                         print(f"Resolved {package['name']} {package['version']} source={source}", flush=True)
                 else:
                     metadata_result = subprocess.run(
-                        ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest_path)],
+                        ["cargo", "metadata", *metadata_lock_flags, "--format-version", "1", "--manifest-path", str(manifest_path)],
                         cwd=consumer_root, env=cargo_env, capture_output=True, text=True, check=False,
                     )
                     if metadata_result.returncode:
@@ -442,12 +479,8 @@ def main() -> int:
                         json.loads(metadata_result.stdout),
                         {name: project_root if name == "qubit-magika" else project_root.parent / f"rs-{name.removeprefix('qubit-')}" for name in LOCAL_PACKAGES},
                     )
-                if args.registry_only:
-                    command = [
-                        "cargo", "check", "--locked", "--manifest-path", str(manifest_path)
-                    ]
-                else:
-                    command = ["cargo", "check", "--manifest-path", str(manifest_path)]
+                    finish_lock(manifest_path, saved_lock)
+                command = ["cargo", "check", "--locked", "--manifest-path", str(manifest_path)]
                 result = subprocess.run(command, cwd=consumer_root, env=cargo_env, check=False)
                 if result.returncode:
                     print(f"{filename}: cargo check exited with {result.returncode}", file=sys.stderr)
@@ -479,6 +512,10 @@ def main() -> int:
                             if args.registry_only:
                                 validate_registry_manifest(inventory_manifest)
                             run_manifest.write_text(inventory_manifest, encoding="utf-8")
+                            inventory_lock_flags, inventory_saved_lock = prepare_lock(
+                                run_manifest, args.replay_locks, record_dir,
+                                "readme", language, "inventory",
+                            )
                             if args.registry_only:
                                 metadata_result = subprocess.run(
                                     ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(run_manifest)],
@@ -498,7 +535,7 @@ def main() -> int:
                                 validate_registry_metadata(json.loads(metadata_result.stdout), run_root)
                             else:
                                 metadata_result = subprocess.run(
-                                    ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(run_manifest)],
+                                    ["cargo", "metadata", *inventory_lock_flags, "--format-version", "1", "--manifest-path", str(run_manifest)],
                                     cwd=run_root, env=cargo_env, capture_output=True, text=True, check=False,
                                 )
                                 if metadata_result.returncode:
@@ -508,9 +545,8 @@ def main() -> int:
                                     json.loads(metadata_result.stdout),
                                     {name: project_root if name == "qubit-magika" else project_root.parent / f"rs-{name.removeprefix('qubit-')}" for name in LOCAL_PACKAGES},
                                 )
-                        command = ["cargo", "run"]
-                        if args.registry_only:
-                            command.append("--locked")
+                                finish_lock(run_manifest, inventory_saved_lock)
+                        command = ["cargo", "run", "--locked"]
                         command.extend(["--manifest-path", str(run_manifest)])
                         print(
                             f"Running extracted {filename} consumer ({feature_set})...",
