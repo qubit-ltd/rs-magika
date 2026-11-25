@@ -139,10 +139,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let fifo = directory.path().join("content.fifo");
         let completion = directory.path().join("fifo-test.completed");
-        let status = Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo should run");
+        let status = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo should run");
         assert!(status.success(), "mkfifo failed with {status}");
 
         let child = Command::new(env::current_exe().expect("test executable path"))
@@ -158,10 +155,7 @@ mod tests {
         let mut child = ChildGuard(child);
         let status = wait_for_success(&mut child);
         assert!(status.success(), "FIFO test child failed with {status}");
-        assert!(
-            completion.is_file(),
-            "FIFO child did not write its completion marker"
-        );
+        assert!(completion.is_file(), "FIFO child did not write its completion marker");
     }
 
     #[cfg(unix)]
@@ -170,8 +164,7 @@ mod tests {
         let Some(path) = env::var_os(FIFO_PATH) else {
             return;
         };
-        let completion =
-            env::var_os(COMPLETION_PATH).expect("FIFO completion path should be configured");
+        let completion = env::var_os(COMPLETION_PATH).expect("FIFO completion path should be configured");
         let path = std::path::PathBuf::from(path);
         let error = super::open_regular_file(&path).expect_err("FIFO handle should be rejected");
         assert_eq!(error.kind(), ErrorKind::Unsupported);
