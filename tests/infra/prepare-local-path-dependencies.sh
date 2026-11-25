@@ -34,7 +34,23 @@ cat > "$bin/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$GIT_CALL_LOG"
-if [[ "${GIT_FAIL_STATUS:-}" == true && " $* " == *" status "* ]]; then
+args=("$@")
+index=0
+subcommand=''
+while (( index < ${#args[@]} )); do
+    case "${args[index]}" in
+        --no-optional-locks) ((index += 1)) ;;
+        -C|-c|--git-dir|--work-tree|--namespace|--exec-path)
+            (( index + 1 < ${#args[@]} )) || { echo "cannot parse Git global option ${args[index]} without its value" >&2; exit 93; }
+            ((index += 2)) ;;
+        -*) echo "cannot parse unexpected Git global option ${args[index]}" >&2; exit 93 ;;
+        *) subcommand=${args[index]}; break ;;
+    esac
+done
+[[ -n "$subcommand" ]] || { echo 'cannot parse Git call without a subcommand' >&2; exit 93; }
+printf '%s\n' "$subcommand" >> "$GIT_SUBCOMMAND_LOG"
+if [[ "${GIT_PARSE_ONLY:-}" == true ]]; then printf '%s\n' "$subcommand"; exit 0; fi
+if [[ "${GIT_FAIL_STATUS:-}" == true && "$subcommand" == status ]]; then
     echo 'simulated git status failure' >&2
     exit 47
 fi
@@ -43,11 +59,16 @@ EOF
 chmod +x "$bin/git"
 export REAL_GIT="$real_git"
 export GIT_CALL_LOG="$temporary_root/git-calls.log"
+export GIT_SUBCOMMAND_LOG="$temporary_root/git-subcommands.log"
 export RS_INFRA_PROJECT_ROOT="$project"
 export RS_INFRA_CACHE_DIR="$cache"
 
 snapshot() {
     find "$project" "$cache" -type f -print0 | sort -z | xargs -0 sha256sum
+}
+is_mutating_git_subcommand() {
+    grep -E -x 'fetch|checkout|clone|init|reset|clean|update-index|add|commit|gc|maintenance|worktree' \
+        <<< "$1" >/dev/null
 }
 before=$(snapshot)
 index_before=$(sha256sum "$dependency/.git/index")
@@ -65,11 +86,47 @@ PATH="$bin:$PATH" "$repo_root/.infra/lib/check-locked-local-path-dependencies.sh
 test "$warm_before" = "$(snapshot)"
 test "$index_before" = "$(sha256sum "$dependency/.git/index")"
 test "$worktree_before" = "$(git -C "$dependency" status --porcelain)"
-if grep -E -n '(^| )((fetch|checkout|clone|init|reset|clean|update-index|add|commit|gc|maintenance|worktree) )( |$)' "$GIT_CALL_LOG"; then
-    echo 'strict check invoked a mutating Git command' >&2
+while IFS= read -r subcommand; do
+    if is_mutating_git_subcommand "$subcommand"; then
+        echo "strict check invoked mutating Git command '$subcommand'" >&2
+        exit 1
+    fi
+done < "$GIT_SUBCOMMAND_LOG"
+grep -F -- '--no-optional-locks' "$GIT_CALL_LOG" >/dev/null
+
+assert_synthetic_mutating() {
+    local actual_subcommand
+    actual_subcommand=$(GIT_PARSE_ONLY=true "$bin/git" "$@")
+    if ! is_mutating_git_subcommand "$actual_subcommand"; then
+        echo "expected mutating Git subcommand, got '$actual_subcommand'" >&2
+        exit 1
+    fi
+}
+assert_synthetic_read_only() {
+    local actual_subcommand
+    actual_subcommand=$(GIT_PARSE_ONLY=true "$bin/git" "$@")
+    if is_mutating_git_subcommand "$actual_subcommand"; then
+        echo "expected read-only Git subcommand, got '$actual_subcommand'" >&2
+        exit 1
+    fi
+    test "$actual_subcommand" = status
+}
+
+# The same grep decision rejects each synthetic write command and accepts
+# status even when a single -C path argument contains spaces and command names.
+assert_synthetic_mutating fetch origin
+assert_synthetic_mutating checkout abc
+assert_synthetic_mutating update-index --refresh
+assert_synthetic_mutating gc
+assert_synthetic_read_only --no-optional-locks -C '/tmp/status fetch gc update-index checkout' \
+    status --porcelain=v1
+assert_synthetic_read_only -c safe.directory=fixture -C '/tmp/gc update-index checkout fetch' \
+    status --porcelain=v1
+if GIT_PARSE_ONLY=true "$bin/git" --unrecognized-global-option status > "$temporary_root/unparseable.log" 2>&1; then
+    echo 'expected fixture to reject an unparseable Git invocation' >&2
     exit 1
 fi
-grep -F -- '--no-optional-locks' "$GIT_CALL_LOG" >/dev/null
+grep -F 'cannot parse unexpected Git global option' "$temporary_root/unparseable.log" >/dev/null
 
 # A dirty worktree, mismatched HEAD, missing checkout, or Git status failure fails closed.
 printf 'dirty\n' > "$dependency/untracked"
