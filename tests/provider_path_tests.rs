@@ -1979,9 +1979,7 @@ fn test_provider_path_sync_range_capability_without_length_uses_read_all() {
         ProviderFileSystemSpi::new(PYTHON.to_vec())
             .with_range()
             .unknown_length(),
-        ProviderFileSystemSpi::new(PYTHON.to_vec())
-            .with_range()
-            .without_stat(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().without_stat(),
     ] {
         let observations = provider.observations();
         let result = detector().detect_path(
@@ -1996,9 +1994,11 @@ fn test_provider_path_sync_range_capability_without_length_uses_read_all() {
         );
         let options = observations.options.lock().unwrap();
         assert!(!options.is_empty(), "the fallback must read provider data");
-        assert!(options
-            .iter()
-            .all(|options| options.offset().is_none() && options.length().is_none()));
+        assert!(
+            options
+                .iter()
+                .all(|options| options.offset().is_none() && options.length().is_none())
+        );
         assert!(observations.read_bytes.load(Ordering::SeqCst) > 0);
     }
 }
@@ -2009,9 +2009,7 @@ fn test_provider_path_async_range_capability_without_length_uses_read_all() {
         ProviderFileSystemSpi::new(PYTHON.to_vec())
             .with_range()
             .unknown_length(),
-        ProviderFileSystemSpi::new(PYTHON.to_vec())
-            .with_range()
-            .without_stat(),
+        ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range().without_stat(),
     ] {
         let observations = provider.observations();
         let result = run_ready(detector().detect_async_path(
@@ -2026,9 +2024,11 @@ fn test_provider_path_async_range_capability_without_length_uses_read_all() {
         );
         let options = observations.options.lock().unwrap();
         assert!(!options.is_empty(), "the fallback must read provider data");
-        assert!(options
-            .iter()
-            .all(|options| options.offset().is_none() && options.length().is_none()));
+        assert!(
+            options
+                .iter()
+                .all(|options| options.offset().is_none() && options.length().is_none())
+        );
         assert!(observations.read_bytes.load(Ordering::SeqCst) > 0);
     }
 }

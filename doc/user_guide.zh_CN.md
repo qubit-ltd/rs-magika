@@ -602,7 +602,7 @@ Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 关闭不会强制中断 native 推理或 Provider I/O。超时时，`worker_stopped == false` 表示尚未确认 join，运行时会保留 worker handle；
 `true` 表示 worker 已 join，但不代表每项操作资源都已释放。应使用 operation observer 的有界 settlement wait
 观察具体请求所属 scope；`admission` 只报告服务组聚合计数，不能替代该观察。`worker_panicked` 表示 join 时观察到
-未捕获 panic。shutdown 不会强行中断 native 推理或 Provider I/O。
+未捕获 panic。
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
