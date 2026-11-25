@@ -865,27 +865,25 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         ));
         let mut pending_observed = false;
         let mut heartbeat_observed = false;
-        let result = block_on(std::future::poll_fn(|cx| {
-            match detection.as_mut().poll(cx) {
-                Poll::Ready(result) => {
-                    if !pending_observed {
-                        let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
-                    }
-                    Poll::Ready(result)
+        let result = block_on(std::future::poll_fn(|cx| match detection.as_mut().poll(cx) {
+            Poll::Ready(result) => {
+                if !pending_observed {
+                    let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
                 }
-                Poll::Pending => {
-                    if !pending_observed {
-                        pending_observed = true;
-                        let _ = events_tx.send(WorkerEvent::DetectionPending);
-                    }
-                    heartbeats += 1;
-                    if !heartbeat_observed && heartbeats > 1 {
-                        heartbeat_observed = true;
-                        let _ = events_tx.send(WorkerEvent::Heartbeat);
-                    }
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
+                Poll::Ready(result)
+            }
+            Poll::Pending => {
+                if !pending_observed {
+                    pending_observed = true;
+                    let _ = events_tx.send(WorkerEvent::DetectionPending);
                 }
+                heartbeats += 1;
+                if !heartbeat_observed && heartbeats > 1 {
+                    heartbeat_observed = true;
+                    let _ = events_tx.send(WorkerEvent::Heartbeat);
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
         }));
         (result, heartbeats)
@@ -903,11 +901,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         },
     );
     if let Err(stage) = first_poll {
-        let _ = crate::tests::internal::bridge_wait::join_before(
-            worker,
-            &stage,
-            Duration::from_secs(5),
-        );
+        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
     let heartbeat = crate::tests::internal::bridge_wait::wait_for_stage(
@@ -922,11 +916,7 @@ fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() 
         },
     );
     if let Err(stage) = heartbeat {
-        let _ = crate::tests::internal::bridge_wait::join_before(
-            worker,
-            &stage,
-            Duration::from_secs(5),
-        );
+        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
     let (released, changed) = &*engine_gate;
@@ -995,11 +985,7 @@ fn test_blocked_single_poll_is_supervised_and_released_by_parent_thread() {
         },
     );
     if let Err(stage) = entered {
-        let _ = crate::tests::internal::bridge_wait::join_before(
-            worker,
-            &stage,
-            Duration::from_secs(5),
-        );
+        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
         panic!("{stage}");
     }
 
@@ -1025,19 +1011,13 @@ fn test_blocked_single_poll_is_supervised_and_released_by_parent_thread() {
             panic!("synthetic poll completed before the watchdog deadline");
         }
     };
-    let ready_after_release = crate::tests::internal::bridge_wait::join_before(
-        worker,
-        &timeout_failure,
-        Duration::from_secs(5),
-    );
+    let ready_after_release =
+        crate::tests::internal::bridge_wait::join_before(worker, &timeout_failure, Duration::from_secs(5));
     assert!(
         timeout_failure.contains("timed out"),
         "watchdog failure should remain recorded: {timeout_failure}"
     );
-    assert!(
-        ready_after_release,
-        "poll should return Ready after its gate is opened"
-    );
+    assert!(ready_after_release, "poll should return Ready after its gate is opened");
 }
 
 #[test]

@@ -27,9 +27,7 @@ pub(crate) fn wait_for_stage<T: Debug + PartialEq>(
 ) -> Result<(), String> {
     let failure = match events.recv_timeout(timeout) {
         Ok(actual) if &actual == expected => return Ok(()),
-        Ok(actual) => format!(
-            "unexpected signal at stage={stage}: expected {expected:?}, got {actual:?}"
-        ),
+        Ok(actual) => format!("unexpected signal at stage={stage}: expected {expected:?}, got {actual:?}"),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             format!("timed out waiting for stage={stage}: expected {expected:?}")
         }
