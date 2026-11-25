@@ -205,8 +205,8 @@ fn detect_uploaded_path(
 以及 session 读取错误都会直接传播，不会重新按路径打开。旧范围路由按路径逐段读取，并在支持时
 对每一段使用相同的条件 ETag；没有条件读取时，无法保证多段读取期间内容一致。该路由只用于
 长度已知的资源。若不支持范围读取，或长度未知、因 `stat` 不受支持而无法取得长度，即使声明支持
-范围读取也会使用 `qubit-fs::read_all`。`max_bytes` 是所有采样读取共享的累计预算。`read_all`
-限制可接受载荷，并可能额外探测 1 字节以判断超限。只有不能使用范围读取时，才会在完整读取前因已知长度
+范围读取也会使用 `qubit-fs::read_all`。`max_bytes` 限制所有逻辑采样读取的累计量，也限制 `read_all` 可接受的载荷。完整读取可能额外探测
+1 字节以判断超限；即使声明支持范围读取，长度未知时也可能进入完整读取。只有不能使用范围读取时，才会在完整读取前因已知长度
 超过预算而返回 `MimeError::BufferLimitExceeded`；使用范围采样的已知长度资源不会仅因长度超预算而提前拒绝。
 在 `read_all` 中发现超限时仍返回 `MimeError::FileSystem`。异步版本是在
 `AsyncFileSystem` 上调用 `detect_async_path`。
@@ -412,10 +412,10 @@ session 读取错误直接传播，不会重新按路径打开。旧路由逐段
 `guess_from_content_async` hook 在首次轮询时检查 detector 的单请求 owned payload 上限，先预留
 runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由 worker 采样和推理；future
 异步等待结果，且没有 parent scope。`detect_bytes_managed` 在追踪显式 scope 时执行相同的单请求
-和共享 runtime 预算。Provider `max_bytes` 是累计逻辑采样和回退读取预算。这些逻辑预算和复制的
-payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。旧范围采样要求长度已知且
-声明支持范围读取；长度未知或不可用时使用 `read_all`。只有不能使用范围采样时，才会在完整读取前拒绝
-已知超大资源。runtime 关闭后，规则
+和共享 runtime 预算。Provider `max_bytes` 限制累计逻辑采样读取，也限制 `read_all` 可接受的载荷。
+完整读取可能额外探测 1 字节；即使声明支持范围读取，长度未知或不可用时也会进入完整读取。在
+`read_all` 中发现超限时返回 `MimeError::FileSystem`。旧范围采样要求长度已知且声明支持范围读取；只有不能使用范围采样时，才会在完整读取前拒绝已知超大资源。这些逻辑预算和复制的
+payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
 分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
 
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
@@ -560,7 +560,9 @@ scope 中其他 operation 的资源。`ManagedInferenceShutdownReport` 的 `admi
 `worker_stopped` 只表示 worker 已 join。
 
 真实应用应让 service group、detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
-关闭函数。`max_bytes` 既是单次采样的累计读取预算，也会占用 runtime 共享的在途字节预算。
+关闭函数。`max_bytes` 限制累计逻辑采样读取，也限制 `read_all` 可接受的载荷。完整读取可能额外探测
+1 字节；即使声明支持范围读取，长度未知或不可用时也会进入完整读取，在其中发现超限时返回
+`MimeError::FileSystem`。该请求值也会占用 runtime 共享的在途字节预算。
 它只约束逻辑采样和由请求持有的 payload 记账，不代表进程总内存或 Provider/网络流量上限。
 runtime 会先预留容量和字节预算，再提交可选的 scope 子操作，然后才调用 Provider 的
 `open`、`stat`、`read_all`、`length` 或范围读取。runtime 已关闭、容量已满或 scope

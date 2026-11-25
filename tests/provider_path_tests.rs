@@ -2054,7 +2054,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         Some("text/x-python".to_owned())
     );
     assert_eq!(budget, sync_at_limit_observations.read_bytes.load(Ordering::SeqCst));
-    assert_single_full_read(&sync_at_limit_observations);
+    assert_single_full_read_open(&sync_at_limit_observations);
 
     let sync_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_range()
@@ -2070,7 +2070,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         Err(MimeError::FileSystem(ref error)) if error.kind() == over_budget_kind
     ));
     assert_eq!(budget, sync_over_limit_observations.read_bytes.load(Ordering::SeqCst));
-    assert_single_full_read(&sync_over_limit_observations);
+    assert_single_full_read_open(&sync_over_limit_observations);
 
     let async_at_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_range()
@@ -2087,7 +2087,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         Some("text/x-python".to_owned())
     );
     assert_eq!(budget, async_at_limit_observations.read_bytes.load(Ordering::SeqCst));
-    assert_single_full_read(&async_at_limit_observations);
+    assert_single_full_read_open(&async_at_limit_observations);
 
     let async_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_range()
@@ -2103,7 +2103,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         Err(MimeError::FileSystem(ref error)) if error.kind() == over_budget_kind
     ));
     assert_eq!(budget, async_over_limit_observations.read_bytes.load(Ordering::SeqCst));
-    assert_single_full_read(&async_over_limit_observations);
+    assert_single_full_read_open(&async_over_limit_observations);
 
     let managed_at_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_range()
@@ -2115,7 +2115,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         Some("text/x-python".to_owned())
     );
     assert_eq!(budget, managed_at_limit_observations.read_bytes.load(Ordering::SeqCst));
-    assert_single_full_read(&managed_at_limit_observations);
+    assert_single_full_read_open(&managed_at_limit_observations);
 
     let managed_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_range()
@@ -2133,12 +2133,12 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         budget,
         managed_over_limit_observations.read_bytes.load(Ordering::SeqCst)
     );
-    assert_single_full_read(&managed_over_limit_observations);
+    assert_single_full_read_open(&managed_over_limit_observations);
 }
 
-fn assert_single_full_read(observations: &crate::support::ProviderObservations) {
+fn assert_single_full_read_open(observations: &crate::support::ProviderObservations) {
     let options = observations.options.lock().unwrap();
-    assert_eq!(1, options.len(), "read_all must issue one provider read");
+    assert_eq!(1, options.len(), "read_all must issue one open without range parameters");
     assert!(options[0].offset().is_none());
     assert!(options[0].length().is_none());
 }

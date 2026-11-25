@@ -247,8 +247,12 @@ impl MagikaMimeDetector {
     /// * `scope` - Parent operation scope for cancellation and settlement.
     /// * `file_system` - Async provider serving bounded range reads.
     /// * `path` - Provider path used to open or read the resource.
-    /// * `max_bytes` - Cumulative logical sampling and fallback-read budget. It
-    ///   is checked against this detector's request limit and the shared
+    /// * `max_bytes` - Maximum cumulative logical sampling bytes and, for a
+    ///   `read_all` fallback, the maximum accepted payload size. The fallback
+    ///   may probe one extra byte to detect overflow, including when range
+    ///   capability is advertised but length is unknown or unavailable.
+    ///   Overflow found during `read_all` is a filesystem error. This value is
+    ///   checked against this detector's per-request limit and the shared
     ///   runtime aggregate budget; it does not cap total process memory or
     ///   provider-owned buffering.
     ///
@@ -351,7 +355,10 @@ impl MagikaMimeDetector {
     ///   cancellation.
     /// * `file_system` - Async provider serving the requested path.
     /// * `path` - Provider path used for sampling or fallback reading.
-    /// * `max_bytes` - Cumulative sampling and fallback-read budget.
+    /// * `max_bytes` - Maximum cumulative logical sampling bytes and, for a
+    ///   `read_all` fallback, the maximum accepted payload size. That fallback
+    ///   may probe one extra byte; overflow discovered during the read is a
+    ///   filesystem error.
     ///
     /// # Returns
     ///
