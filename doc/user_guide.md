@@ -473,12 +473,11 @@ Once the original position is known, reader detection attempts to restore it
 even if detection returns an error. A successful restore preserves the
 detection result or its original error. If the restore seek fails, its
 `MimeError::Io` takes precedence and the reader position is unspecified.
-Provider-path detection
-enforces `max_bytes` cumulatively across all sampling reads. The legacy route
-opens by path for each segment and applies the same conditional ETag to every
-segment when available; without that condition, it cannot guarantee a
-consistent cross-segment snapshot. Providers without range support may probe one extra byte to
-detect overflow and reject oversized resources. Unknown and undefined Magika
+For Provider-path routing, `max_bytes`, range reads, and `read_all` fallback
+behavior, see the [Provider-Path Example](#provider-path-example). The legacy
+range route opens by path for each segment and applies the same conditional
+ETag to every segment when available; without conditional reads, it cannot
+guarantee a consistent cross-segment snapshot. Unknown and undefined Magika
 types become `Ok(None)` so filename fallback follows the selected
 `MimeDetectionPolicy`.
 
