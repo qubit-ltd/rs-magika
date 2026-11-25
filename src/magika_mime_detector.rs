@@ -55,10 +55,12 @@ use crate::managed_runtime::request_admission_handoff::RequestAdmissionHandoff;
 
 /// MIME detector backed by Google's Magika model.
 ///
-/// Construction initializes Magika's embedded model and ONNX Runtime session,
-/// so applications should create the detector once and share it, for example
-/// through [`std::sync::Arc`]. One worker owns the Magika session and
-/// serializes model inference. Synchronous MIME methods wait for worker
+/// Creating a new runtime initializes Magika's embedded model and ONNX Runtime
+/// session synchronously before construction returns. When a runtime is
+/// supplied through the builder or provider, it is reused as-is and no second
+/// session is initialized. Applications should create the detector once and
+/// share it, for example through [`std::sync::Arc`]. One worker owns the Magika
+/// session and serializes model inference. Synchronous MIME methods wait for worker
 /// results; async provider methods service bounded worker range requests
 /// without blocking their executor. The operation-aware provider method
 /// additionally registers sampling and inference in an explicit scope.
@@ -463,11 +465,16 @@ impl MagikaMimeDetector {
     /// attempts to join it. `Drain` waits for accepted service operations to
     /// settle. `Cancel` waits for local provider access to finish first. Queued
     /// operations can remain in the service-group snapshot until their
-    /// executor retires them. `worker_stopped` confirms
-    /// join only, and can be true while an unconfirmed provider request still
-    /// retains capacity. `false` means join is unconfirmed; a later call can
-    /// continue observing the retained worker handle. Inspect the admission
-    /// report separately for request resource settlement.
+    /// executor retires them. `worker_stopped` confirms the worker join only;
+    /// it can be true while an unconfirmed provider request still retains
+    /// capacity. A false value means join is unconfirmed; a later call can
+    /// continue observing the retained worker handle. `admission` contains
+    /// aggregate service-group counters and is not a per-request release
+    /// guarantee. To observe a request's resources, retain its operation
+    /// observer and use its bounded settlement wait for that request's scope.
+    /// `Pending(snapshot)` means that wait reached its deadline. `Ready(report)`
+    /// is terminal but may still contain negative release evidence; resources
+    /// owned by other operations in the scope can also appear in its report.
     pub fn shutdown_blocking(
         &self,
         mode: ShutdownMode,

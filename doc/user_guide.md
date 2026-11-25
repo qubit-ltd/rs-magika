@@ -27,10 +27,14 @@ registry. In both inventory registries, `repository` remains the default
 selection. Avoid registering the inventory-submitted provider a second time.
 
 The detector uses repository filename rules for filename-only detection and
-Magika inference for content, reader, and local-file detection. Creating a
-detector initializes Magika's embedded model and the ONNX Runtime session.
-Inference calls made through one detector are serialized internally, so one
-initialized detector can be shared with `Arc`.
+Magika inference for content, reader, and local-file detection. Creating a new
+runtime initializes Magika's embedded model and the ONNX Runtime session
+synchronously before construction returns. The direct constructors
+`MagikaMimeDetector::new()` and `from_mime_config(...)` create a new runtime;
+injecting an existing runtime through `MagikaMimeDetectorBuilder::managed_runtime`
+or `MagikaMimeDetectorProvider::managed_runtime` reuses it without initializing
+another session. Inference calls made through one detector are serialized
+internally, so one initialized detector can be shared with `Arc`.
 
 For link-time discovery, enable `qubit-magika = { version = "0.18", features =
 ["inventory"] }`. This submits `MagikaMimeDetectorProvider::new()` to the MIME
@@ -677,9 +681,14 @@ different instants, and counts include every detector sharing that runtime.
 `faulted` records a caught inference-session panic; `worker_panicked` only records
 an uncaught panic observed while joining the worker. A nonzero
 `unconfirmed_provider_io` means a pending Provider operation was dropped before
-completion could be confirmed. A snapshot does not prove settlement; retain the
+completion could be confirmed. A snapshot does not prove settlement. Retain the
 operation observer and use `wait_settlement_until(deadline)` with a deadline from
-the same clock domain for bounded release observation.
+the same clock domain to observe settlement for that operation's scope.
+`Pending(snapshot)` means the bounded wait reached its deadline; `Ready(report)`
+is terminal but may contain negative release evidence, including resources
+owned by other operations in that scope. `admission` in
+`ManagedInferenceShutdownReport` is for aggregate service-group counters, while
+`worker_stopped` reports only that the worker was joined.
 
 In a real application, keep the service group, supervisor, and detector for the
 application lifetime so request scopes come from the same supervisor, and call
@@ -725,8 +734,10 @@ waits for local provider access to finish, closes the worker sender, and tries
 to join; a queued operation may still appear in the resource-group snapshot
 until its executor retires it. On timeout, `worker_stopped == false` means join
 has not been confirmed and the worker handle is retained; `true` means the
-worker was joined, not that every operation resource was released. Read the
-resource report independently. `worker_panicked` records an uncaught panic
+worker was joined, not that every operation resource was released. Use the
+operation observer's bounded settlement wait to observe a specific request's
+scope; `admission` reports aggregate service-group counters and does not replace
+that observation. `worker_panicked` records an uncaught panic
 observed while joining. Shutdown does not forcibly interrupt native inference
 or provider I/O.
 
@@ -766,8 +777,12 @@ startup and handle per-input errors at the boundary where the input is read.
 
 ## Troubleshooting
 
-- If construction fails before the first detection, check the ONNX Runtime
-  feature choice and the runtime/model error carried by `MimeError`.
+- If `MagikaMimeDetector::new()` or `from_mime_config(...)` fails, check the
+  ONNX Runtime feature choice and the runtime/model error carried by
+  `MimeError`; these constructors create and initialize a new runtime. If
+  `builder().managed_runtime(...)` or a configured provider fails, check that
+  the injected runtime's byte budget meets the detector's configured buffer
+  limit and that the runtime itself initialized successfully.
 - If filename detection and content detection disagree, remember that filename
   detection uses `qubit-mime` repository rules while content detection uses
   Magika inference. Choose the `qubit-mime` policy appropriate for the input.
@@ -780,8 +795,10 @@ startup and handle per-input errors at the boundary where the input is read.
 
 - Provider discovery requires the opt-in `inventory` feature; the default build
   uses explicit registration. Inventory submits only the unconfigured provider.
-- Detector construction initializes the model and runtime; create one detector
-  and share it instead of constructing one per input.
+- Creating a runtime initializes the model and ONNX Runtime session
+  synchronously. Direct constructors create a runtime; builder or provider
+  runtime injection reuses the supplied runtime. Create and share a detector
+  instead of constructing one per input.
 - Inference on one detector is serialized internally.
 - Legacy `MimeDetector` provider hooks do not provide parent-scope lifecycle
   observation. Use the managed entry point to attach admission, child outcome,
