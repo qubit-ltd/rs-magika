@@ -549,10 +549,7 @@ mod tests {
     use crate::managed_runtime::worker_input::WorkerBytes;
     use crate::managed_runtime::worker_input::WorkerInput;
 
-    fn admission_handoff_fixture() -> (
-        Arc<RequestAdmissionHandoff>,
-        super::RequestAdmissionHandoffGuard,
-    ) {
+    fn admission_handoff_fixture() -> (Arc<RequestAdmissionHandoff>, super::RequestAdmissionHandoffGuard) {
         let active_requests = Arc::new(AtomicUsize::new(0));
         let byte_budget = Arc::new(ByteBudget::new(8));
         let admission = RequestAdmission::new(
