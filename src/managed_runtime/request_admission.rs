@@ -523,7 +523,7 @@ mod tests {
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
         let mut options = OperationOptions::default();
         options.limits.resources = 1;
-        let mut operation = manager
+        let operation = manager
             .try_submit(options, |scope| {
                 let budget = Arc::new(ByteBudget::new(1));
                 let admission = RequestAdmission::new(
@@ -537,12 +537,13 @@ mod tests {
                 Ok::<_, ()>(())
             })
             .unwrap();
+        let mut operation = operation.into_async();
 
         assert!(matches!(
-            operation.wait_outcome().unwrap(),
+            block_on(operation.wait_outcome(), "idempotent resource registration outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
-        assert!(operation.wait_settlement().unwrap().all_released());
+        assert!(block_on(operation.wait_settlement(), "idempotent resource registration settlement").all_released());
     }
 
     #[test]
@@ -561,7 +562,7 @@ mod tests {
             },
             ..OperationOptions::default()
         };
-        let mut operation = manager
+        let operation = manager
             .try_submit(options, |scope| {
                 let budget = Arc::new(ByteBudget::new(1));
                 let first = RequestAdmission::new(
@@ -603,12 +604,13 @@ mod tests {
                 Ok::<_, ()>(())
             })
             .unwrap();
+        let mut operation = operation.into_async();
 
         assert!(matches!(
-            operation.wait_outcome().unwrap(),
+            block_on(operation.wait_outcome(), "reused scope capacity outcome").unwrap(),
             OperationOutcome::Succeeded(())
         ));
-        assert!(operation.wait_settlement().unwrap().all_released());
+        assert!(block_on(operation.wait_settlement(), "reused scope capacity settlement").all_released());
     }
 
     #[test]
@@ -877,7 +879,7 @@ mod tests {
     #[test]
     fn test_public_operation_scope_can_retain_admission_resources() {
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
-        let mut operation = manager
+        let operation = manager
             .try_submit(qubit_operation::OperationOptions::default(), |scope| {
                 let budget = Arc::new(ByteBudget::new(8));
                 let permit = budget.try_acquire(8).unwrap();
@@ -888,8 +890,9 @@ mod tests {
                 Ok::<_, ()>(())
             })
             .unwrap();
+        let mut operation = operation.into_async();
         assert!(matches!(
-            operation.wait_outcome().unwrap(),
+            block_on(operation.wait_outcome(), "public operation scope resource outcome").unwrap(),
             qubit_operation::OperationOutcome::Succeeded(())
         ));
     }

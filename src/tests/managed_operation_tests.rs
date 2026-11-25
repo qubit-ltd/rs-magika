@@ -159,11 +159,12 @@ fn test_runtime_group_shutdown_does_not_close_the_application_manager() {
 
     let report = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(2));
     assert!(report.worker_stopped);
-    let mut handle = independent_group
+    let handle = independent_group
         .try_submit(OperationOptions::default(), |_| Ok::<_, MimeError>(()))
         .unwrap();
+    let mut handle = handle.into_async();
     assert!(matches!(
-        handle.wait_outcome().unwrap(),
+        block_on(handle.wait_outcome(), "independent manager operation after runtime shutdown").unwrap(),
         OperationOutcome::Succeeded(())
     ));
 }
