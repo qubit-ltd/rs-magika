@@ -277,9 +277,10 @@ provide a cross-segment content snapshot. This range route is used only when
 the resource length is known. If range reads are unsupported, or the length is
 unknown or unavailable because `stat` is unsupported, detection uses
 `qubit-fs::read_all` even if the provider advertises range capability. The
-cumulative `max_bytes` budget applies across all Magika sampling reads.
-`read_all` limits the accepted payload and may probe one extra byte to detect
-overflow. When range reads cannot be used, a known length above the budget is
+cumulative `max_bytes` budget applies across all Magika logical sampling
+reads and limits the payload accepted by `read_all`. That full read may probe
+one extra byte to detect overflow, including when range capability is
+advertised but length is unknown. When range reads cannot be used, a known length above the budget is
 rejected before the full read with `MimeError::BufferLimitExceeded`; a known
 oversized resource that uses range sampling is not rejected on length alone.
 Overflow discovered during `read_all` returns `MimeError::FileSystem`. The
@@ -508,11 +509,13 @@ limit when first polled, reserves runtime request capacity and aggregate
 owned-payload byte capacity before copying the input, and runs sampling and
 inference on the worker. It waits asynchronously and has no parent scope.
 `detect_bytes_managed` applies the same per-request and shared runtime budgets
-while tracking its explicit scope. Provider `max_bytes` is a cumulative logical
-sampling and fallback-read budget. Legacy range sampling requires known length
-and declared range support; unknown or unavailable lengths use `read_all`.
-Known oversized resources are rejected before a full read only when range
-sampling cannot be used. These logical budgets and copied payload
+while tracking its explicit scope. Provider `max_bytes` bounds cumulative
+logical sampling reads and the payload accepted by a `read_all` fallback. That
+full read may probe one extra byte, including when range capability is declared
+but length is unknown or unavailable. Legacy range sampling requires known
+length and declared range support. A known length above the budget is rejected
+before a full read only when range sampling cannot be used; overflow discovered
+during `read_all` returns `MimeError::FileSystem`. These logical budgets and copied payload
 lengths do not cap total process memory, including provider buffers and
 transient allocations. After shutdown, ruled sync inputs can still return
 directly; requests needing model inference use the closed runtime and fail.
