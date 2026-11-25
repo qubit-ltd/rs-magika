@@ -484,15 +484,27 @@ guarantee a consistent cross-segment snapshot. Unknown and undefined Magika
 types become `Ok(None)` so filename fallback follows the selected
 `MimeDetectionPolicy`.
 
-Local-file media refinement is applied only to ordinary files. Directories
-and symlinks skip refinement; with `Freedesktop`, an available filename
-candidate can be selected, while `VerifyContent` returns `None` without
-content. Other local types such as FIFOs and Unix sockets return `MimeError::Io`
-with `ErrorKind::Unsupported` during the metadata check for content detection.
-A high-level `detect_file` call using `PreferFilename` can return a unique
-filename match without inspecting the path or its type. The metadata check and
-subsequent classifier open are separate operations, so replacing a path between
-them is outside this check's protection.
+Local-file content detection first checks the path's final component. A
+directory or final symlink keeps the existing empty-candidate result; other
+special types such as FIFOs and Unix sockets return `MimeError::Io` with
+`ErrorKind::Unsupported`. For an ordinary file, detection opens the file,
+checks the type on that opened handle, and samples through the same handle. On
+Unix, the open requests no-follow and nonblocking behavior, so a final symlink
+is not followed and opening a FIFO does not wait for a writer. If the opened
+handle is not a regular file, detection rejects it with `ErrorKind::Unsupported`.
+Other platforms check the opened handle too, but do not get that Unix open-stage
+guarantee. If the path changes between the initial check and open, detection can
+return an I/O error; this does not protect path ancestors or guarantee a content
+snapshot while reading.
+
+Media refinement is a separate step and applies only to ordinary local files.
+Directories and symlinks skip refinement; with `Freedesktop`, an available
+filename candidate can be selected, while `VerifyContent` returns `None`
+without content. The configured `MediaStreamClassifier::classify_file` receives
+the path and may open it independently, so content detection's validated
+handle does not cover media refinement. A high-level `detect_file` call using
+`PreferFilename` can return a unique filename match without inspecting the path
+or its type.
 
 One worker owns the Magika session and serializes worker sampling and inference.
 For asynchronous provider paths, the worker can wait for provider reads while

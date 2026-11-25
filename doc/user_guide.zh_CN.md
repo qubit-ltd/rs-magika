@@ -399,10 +399,14 @@ Provider path 优先使用随机读取 session；各路由、`max_bytes` 和 `re
 附带相同的条件 ETag；没有条件读取就无法保证多段期间内容一致。Magika 的 `Unknown` 和
 `Undefined` 会转换为 `Ok(None)`，再由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
 
-本地文件媒体细化仅适用于普通文件。目录和符号链接会跳过细化；使用 `Freedesktop` 时，若存在文件名候选则可以选中，使用
-`VerifyContent` 时则在没有内容的情况下返回 `None`。FIFO、Unix socket 等其他本地类型在内容检测的元数据检查阶段返回
-`MimeError::Io`，其 `ErrorKind` 为 `Unsupported`。高层 `detect_file` 使用 `PreferFilename` 且文件名只有一个候选时，可能直接返回文件名结果，不检查路径或类型。
-元数据检查与后续分类器打开是两个独立操作，因此无法防止路径在两者之间被替换。
+本地文件内容检测会先检查路径末段。目录和最终符号链接沿用空候选结果；FIFO、Unix socket 等其他特殊类型返回
+`MimeError::Io`，其 `ErrorKind` 为 `Unsupported`。对普通文件，检测会先打开文件，再从已打开的句柄检查类型，并通过同一个句柄采样。
+Unix 打开时会请求不跟随最终符号链接和非阻塞行为，因此不会跟随最终链接，也不会因 FIFO 等待写入者；其他平台也会检查打开后的句柄，但没有这项
+Unix 打开阶段的保证。若打开后的句柄不是普通文件，检测会以 `ErrorKind::Unsupported` 拒绝。路径若在初次检查和打开之间发生变化，检测可能提前返回 I/O 错误；这项检查不覆盖路径祖先，也不保证读取期间内容保持不变。
+
+媒体细化是独立步骤，只适用于普通本地文件。目录和符号链接会跳过细化；使用 `Freedesktop` 时，若存在文件名候选则可以选中，使用
+`VerifyContent` 时则在没有内容的情况下返回 `None`。配置的 `MediaStreamClassifier::classify_file` 接收路径，并可能自行打开文件，因此内容检测所用的已校验句柄不覆盖媒体细化。
+高层 `detect_file` 使用 `PreferFilename` 且文件名只有一个候选时，可能直接返回文件名结果，不检查路径或类型。
 一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。异步 Provider path 采样时，worker
 可能等待 Provider 读取；这会延迟共享同一 runtime 的其他请求，形成共同的等待和故障域。若应用需要隔离
 延迟，可以为调用方使用独立 runtime，但每个 runtime 都会额外占用一个 Magika Session。同步借用内容、reader 和本地
