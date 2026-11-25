@@ -964,10 +964,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// * `file_system` - Asynchronous filesystem used to access the path.
     /// * `path` - File path to inspect.
-    /// * `max_bytes` - Maximum cumulative logical sampling bytes. A
-    ///   `read_all` fallback uses it as the accepted-payload limit and may
-    ///   probe one extra byte. This does not bound provider/network traffic or
-    ///   total process memory.
+    /// * `max_bytes` - Maximum cumulative logical sampling bytes. A `read_all`
+    ///   fallback uses it as the accepted-payload limit and may probe one extra
+    ///   byte. This does not bound provider/network traffic or total process
+    ///   memory.
     ///
     /// # Errors
     ///

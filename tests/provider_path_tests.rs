@@ -2053,10 +2053,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
             .expect("read_all at its budget should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(
-        budget,
-        sync_at_limit_observations.read_bytes.load(Ordering::SeqCst)
-    );
+    assert_eq!(budget, sync_at_limit_observations.read_bytes.load(Ordering::SeqCst));
     assert_single_full_read(&sync_at_limit_observations);
 
     let sync_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -2072,10 +2069,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         ),
         Err(MimeError::FileSystem(ref error)) if error.kind() == over_budget_kind
     ));
-    assert_eq!(
-        budget,
-        sync_over_limit_observations.read_bytes.load(Ordering::SeqCst)
-    );
+    assert_eq!(budget, sync_over_limit_observations.read_bytes.load(Ordering::SeqCst));
     assert_single_full_read(&sync_over_limit_observations);
 
     let async_at_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -2092,10 +2086,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         .expect("async read_all at its budget should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(
-        budget,
-        async_at_limit_observations.read_bytes.load(Ordering::SeqCst)
-    );
+    assert_eq!(budget, async_at_limit_observations.read_bytes.load(Ordering::SeqCst));
     assert_single_full_read(&async_at_limit_observations);
 
     let async_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -2111,10 +2102,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
         )),
         Err(MimeError::FileSystem(ref error)) if error.kind() == over_budget_kind
     ));
-    assert_eq!(
-        budget,
-        async_over_limit_observations.read_bytes.load(Ordering::SeqCst)
-    );
+    assert_eq!(budget, async_over_limit_observations.read_bytes.load(Ordering::SeqCst));
     assert_single_full_read(&async_over_limit_observations);
 
     let managed_at_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -2126,10 +2114,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
             .expect("managed read_all at its budget should succeed"),
         Some("text/x-python".to_owned())
     );
-    assert_eq!(
-        budget,
-        managed_at_limit_observations.read_bytes.load(Ordering::SeqCst)
-    );
+    assert_eq!(budget, managed_at_limit_observations.read_bytes.load(Ordering::SeqCst));
     assert_single_full_read(&managed_at_limit_observations);
 
     let managed_over_limit = ProviderFileSystemSpi::new(PYTHON.to_vec())
@@ -2146,9 +2131,7 @@ fn test_provider_read_all_budget_boundaries_across_entry_points() {
     ));
     assert_eq!(
         budget,
-        managed_over_limit_observations
-            .read_bytes
-            .load(Ordering::SeqCst)
+        managed_over_limit_observations.read_bytes.load(Ordering::SeqCst)
     );
     assert_single_full_read(&managed_over_limit_observations);
 }
