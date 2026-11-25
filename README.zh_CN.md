@@ -93,10 +93,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-`ManagedInferenceRuntime::new` 会在返回前同步初始化模型和 ONNX Runtime
-Session。通过 `MagikaMimeDetectorBuilder::managed_runtime` 或
-`MagikaMimeDetectorProvider::managed_runtime` 注入该 runtime 的 detector 会直接复用它，
-不会再初始化一个 Session。
+会创建 runtime 的构造入口会在返回前同步初始化模型和 ONNX Runtime Session。通过
+`MagikaMimeDetectorBuilder::managed_runtime` 或
+`MagikaMimeDetectorProvider::managed_runtime` 注入已有 runtime 时会直接复用，不会再初始化
+Session；builder 会校验其字节预算不小于 detector 配置的 buffer limit。
 
 ## Provider 名称
 
@@ -194,8 +194,9 @@ Inventory 只提交未配置的 Provider。若要共享应用管理的 runtime�
 `MagikaMimeDetectorProvider::new().managed_runtime(...)`，并在 detector 使用期间保留
 runtime；[Provider runtime 示例](doc/user_guide.zh_CN.md#共享应用管理的推理-runtime)说明了
 注册方式及共享预算和关闭行为。
-构造 detector 时会同步等待 worker 初始化内嵌 Magika 模型和 ONNX Runtime Session。
-应用应在启动阶段构造一次并共享（例如使用 `Arc`）；共享 runtime 上的推理调用会在内部串行执行。
+构造过程新建 runtime 时，会同步等待 worker 初始化内嵌 Magika 模型和 ONNX Runtime
+Session；注入已有 runtime 时则直接复用，并校验配置的字节预算。应用应在启动阶段构造
+detector 一次并共享（例如使用 `Arc`）；共享 runtime 上的推理调用会在内部串行执行。
 
 同步借用内容、reader 和本地文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待。
 匹配的仓库规则可以直接返回。借用同步内容不会仅因逻辑长度超过
