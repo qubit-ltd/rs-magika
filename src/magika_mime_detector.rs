@@ -610,10 +610,17 @@ impl MagikaMimeDetector {
 
     /// Gets content candidates from a seekable reader.
     ///
+    /// `WholeResource` inspects the complete resource, while `Remaining`
+    /// inspects the window from the reader's original position to EOF. Once
+    /// the original position is known, the reader is restored after detection
+    /// succeeds or fails. A successful restore preserves the detection result
+    /// or its original error. If the restore seek fails, its I/O error takes
+    /// precedence and the reader position is unspecified.
+    ///
     /// # Parameters
     ///
-    /// * `reader` - Reader to inspect. The original stream position is
-    ///   restored.
+    /// * `reader` - Reader to inspect. Its original stream position is
+    ///   restored when the restore seek succeeds.
     ///
     /// # Returns
     ///
@@ -621,9 +628,12 @@ impl MagikaMimeDetector {
     ///
     /// # Errors
     ///
-    /// Returns [`MimeError::Io`] when seeking or reading fails, or
-    /// [`MimeError::DetectorBackend`] when Magika inference fails or the
-    /// worker inference fails.
+    /// Returns [`MimeError::Io`] when reading or seeking fails, including when
+    /// the restore seek fails after detection. A restore-seek error takes
+    /// precedence over a detection error, and the reader position is
+    /// unspecified if restoration fails. Returns [`MimeError::DetectorBackend`]
+    /// when Magika inference or worker inference fails and restoration
+    /// succeeds.
     fn guess_from_reader_with_scope(&self, reader: &mut dyn ReadSeek, scope: ReaderScope) -> MimeResult<Vec<String>> {
         let original_position = reader.stream_position()?;
         let result = (|| {
@@ -760,11 +770,17 @@ impl MimeDetectorBackend for MagikaMimeDetector {
         })
     }
 
-    /// Detects MIME candidates from a seekable reader without consuming it.
+    /// Detects MIME candidates from the complete resource in a seekable reader.
+    ///
+    /// Once the original position is known, detection attempts to restore it
+    /// even if detection returns an error. A successful restore preserves the
+    /// detection result or its original error. If the restore seek fails, its
+    /// I/O error is returned and the reader position is unspecified.
     ///
     /// # Parameters
     ///
-    /// * `reader` - Seekable content source whose position is restored.
+    /// * `reader` - Seekable content source. Its position is restored when the
+    ///   restore seek succeeds.
     ///
     /// # Returns
     ///
@@ -774,9 +790,12 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     ///
     /// # Errors
     ///
-    /// Returns [`MimeError::Io`] when reading, seeking, or restoring the reader
-    /// fails, or [`MimeError::DetectorBackend`] when Magika inference fails or
-    /// worker inference fails.
+    /// Returns [`MimeError::Io`] when reading or seeking fails, including when
+    /// the restore seek fails after detection. A restore-seek error takes
+    /// precedence over a detection error, and the reader position is
+    /// unspecified if restoration fails. Returns [`MimeError::DetectorBackend`]
+    /// when Magika inference or worker inference fails and restoration
+    /// succeeds.
     fn guess_from_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<(Vec<String>, Vec<u8>)> {
         Ok((
             self.guess_from_reader_with_scope(reader, ReaderScope::WholeResource)?,
@@ -1068,6 +1087,11 @@ impl MimeContentBackend for MagikaMimeDetector {
     /// Detects the logical content window from the current reader position to
     /// EOF.
     ///
+    /// Once the original position is known, detection attempts to restore it
+    /// even if detection returns an error. A successful restore preserves the
+    /// detection result or its original error. If the restore seek fails, its
+    /// I/O error is returned and the reader position is unspecified.
+    ///
     /// # Parameters
     ///
     /// * `reader` - Seekable reader whose remaining content is classified.
@@ -1075,6 +1099,15 @@ impl MimeContentBackend for MagikaMimeDetector {
     /// # Returns
     ///
     /// MIME candidates inferred from the remaining content.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MimeError::Io`] when reading or seeking fails, including when
+    /// the restore seek fails after detection. A restore-seek error takes
+    /// precedence over a detection error, and the reader position is
+    /// unspecified if restoration fails. Returns [`MimeError::DetectorBackend`]
+    /// when Magika inference or worker inference fails and restoration
+    /// succeeds.
     fn detect_reader(&self, reader: &mut dyn ReadSeek) -> MimeResult<Vec<String>> {
         self.guess_from_reader_with_scope(reader, ReaderScope::Remaining)
     }
