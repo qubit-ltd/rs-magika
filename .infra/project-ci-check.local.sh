@@ -9,6 +9,7 @@ cargo +1.94.0 package --list --locked --allow-dirty --manifest-path "$project_ro
 python3 "$project_root/.infra/check-cargo-matrix-legacy.py" --self-test
 python3 "$project_root/.infra/check-cargo-matrix-legacy.py"
 python3 "$project_root/.infra/check-doc-links.py" --self-test
+python3 "$project_root/.infra/record-consumer-ci-evidence.py" --self-test
 python3 "$project_root/.infra/check-readme-examples.py" --self-test
 python3 "$project_root/.infra/check-managed-guide-examples.py" --self-test
 python3 "$project_root/.infra/check-doc-versions.py" --self-test
