@@ -46,17 +46,51 @@ else
     shared_root="$cache_root/sources/rs-infra-tools/$manager_revision"
     manager_bin="$cache_root/tools/rs-infra-tools/$manager_revision/$(rustc -vV | awk '/^host:/ { print $2 }')/$(rustc --version | tr ' /' '__')/bin/rs-infra-tools"
     lock="$cache_root/locks/manager-$manager_revision.lock"
-    while ! mkdir "$lock" 2>/dev/null; do
-        owner=$(cat "$lock/pid" 2>/dev/null || true)
-        if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-            rm -rf -- "$lock"
-            continue
+    lock_timeout_seconds=${RS_INFRA_BOOTSTRAP_LOCK_TIMEOUT_SECONDS-600}
+    [[ "$lock_timeout_seconds" =~ ^[0-9]+$ ]] || {
+        echo "error: invalid bootstrap lock timeout '$lock_timeout_seconds' (expected 1-86400 seconds); lock: $lock" >&2
+        exit 2
+    }
+    while [[ ${#lock_timeout_seconds} -gt 1 && ${lock_timeout_seconds:0:1} == 0 ]]; do
+        lock_timeout_seconds=${lock_timeout_seconds:1}
+    done
+    (( ${#lock_timeout_seconds} <= 5 )) || {
+        echo "error: invalid bootstrap lock timeout '$lock_timeout_seconds' (expected 1-86400 seconds); lock: $lock" >&2
+        exit 2
+    }
+    lock_timeout_seconds=$((10#$lock_timeout_seconds))
+    (( lock_timeout_seconds >= 1 && lock_timeout_seconds <= 86400 )) || {
+        echo "error: invalid bootstrap lock timeout '$lock_timeout_seconds' (expected 1-86400 seconds); lock: $lock" >&2
+        exit 2
+    }
+    lock_started_at=$SECONDS
+    while true; do
+        if lock_error=$(mkdir "$lock" 2>&1); then
+            cleanup_lock() { rm -rf -- "$lock"; }
+            trap cleanup_lock EXIT
+            if ! printf '%s\n' "$$" > "$lock/pid"; then
+                echo "error: unable to write bootstrap lock owner; lock: $lock" >&2
+                exit 1
+            fi
+            break
+        fi
+        if [[ -e "$lock" || -L "$lock" ]] && [[ ! -d "$lock" ]]; then
+            echo "error: bootstrap lock path exists and is not a directory; lock: $lock" >&2
+            exit 1
+        fi
+        if (( SECONDS - lock_started_at >= lock_timeout_seconds )); then
+            if [[ -f "$lock/pid" && ! -L "$lock/pid" ]]; then
+                lock_owner=$(cat "$lock/pid" 2>/dev/null || true)
+                lock_owner=${lock_owner:-<empty>}
+            else
+                lock_owner='<unavailable: pid is not a regular file>'
+            fi
+            echo "error: timed out waiting for bootstrap lock; lock: $lock; owner: $lock_owner. After confirming no holder is running, remove this lock directory and retry." >&2
+            [[ -z "$lock_error" ]] || echo "last mkdir error: $lock_error" >&2
+            exit 1
         fi
         sleep 1
     done
-    printf '%s\n' "$$" > "$lock/pid"
-    cleanup_lock() { rm -rf -- "$lock"; }
-    trap cleanup_lock EXIT
 
     if [[ ! -d "$shared_root/.git" ]]; then
         mkdir -p "$(dirname "$shared_root")"
@@ -72,12 +106,12 @@ else
     }
     if [[ ! -x "$manager_bin" ]]; then
         mkdir -p "$(dirname "$manager_bin")"
-        export CARGO_TARGET_DIR="$cache_root/build/manager/$manager_revision/$(rustc -vV | awk '/^host:/ { print $2 }')/$(rustc --version | tr ' /' '__')"
-        infra_retry "fetch rs-infra-tools dependencies" cargo fetch --locked --manifest-path "$shared_root/Cargo.toml"
-        cargo build --release --locked --offline --manifest-path "$shared_root/Cargo.toml" \
+        manager_target_dir="$cache_root/build/manager/$manager_revision/$(rustc -vV | awk '/^host:/ { print $2 }')/$(rustc --version | tr ' /' '__')"
+        infra_retry "fetch rs-infra-tools dependencies" env CARGO_TARGET_DIR="$manager_target_dir" cargo fetch --locked --manifest-path "$shared_root/Cargo.toml"
+        CARGO_TARGET_DIR="$manager_target_dir" cargo build --release --locked --offline --manifest-path "$shared_root/Cargo.toml" \
             --package qubit-infra-tools --bin rs-infra-tools
         mkdir -p "$(dirname "$manager_bin")"
-        cp "$CARGO_TARGET_DIR/release/rs-infra-tools" "$manager_bin.tmp"
+        cp "$manager_target_dir/release/rs-infra-tools" "$manager_bin.tmp"
         mv "$manager_bin.tmp" "$manager_bin"
     fi
     cleanup_lock
