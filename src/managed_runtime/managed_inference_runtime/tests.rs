@@ -2232,10 +2232,7 @@ fn test_settlement_observer_preserves_immediate_ready() {
 
     {
         let mut settlement = std::pin::pin!(async { "settled" });
-        let mut observed = std::pin::pin!(super::observe_settlement_pending(
-            settlement.as_mut(),
-            &mut observer,
-        ));
+        let mut observed = std::pin::pin!(super::observe_settlement_pending(settlement.as_mut(), &mut observer,));
         assert!(matches!(observed.as_mut().poll(&mut context), Poll::Ready("settled")));
     }
     assert!(matches!(observer_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
@@ -2245,23 +2242,19 @@ fn test_settlement_observer_preserves_immediate_ready() {
 fn test_settlement_observer_notifies_once_on_pending() {
     let (observer_tx, observer_rx) = mpsc::sync_channel(1);
     let mut observer = Some(observer_tx);
-    let waker_checks = Arc::new(Mutex::new(Vec::new()));
-    let caller_waker = Waker::from(Arc::new(CountWake(AtomicUsize::new(0))));
-    let expected_waker = caller_waker.clone();
-    let observed_waker_checks = Arc::clone(&waker_checks);
+    let caller_wake_count = Arc::new(CountWake(AtomicUsize::new(0)));
+    let caller_waker = Waker::from(Arc::clone(&caller_wake_count));
     let mut polls = 0;
     let mut settlement = std::pin::pin!(std::future::poll_fn(move |context| {
-        observed_waker_checks
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(context.waker().will_wake(&expected_waker));
+        context.waker().wake_by_ref();
         polls += 1;
-        if polls < 3 { Poll::Pending } else { Poll::Ready("settled") }
+        if polls < 3 {
+            Poll::Pending
+        } else {
+            Poll::Ready("settled")
+        }
     }));
-    let mut observed = std::pin::pin!(super::observe_settlement_pending(
-        settlement.as_mut(),
-        &mut observer,
-    ));
+    let mut observed = std::pin::pin!(super::observe_settlement_pending(settlement.as_mut(), &mut observer,));
     let mut context = Context::from_waker(&caller_waker);
 
     {
@@ -2273,7 +2266,7 @@ fn test_settlement_observer_notifies_once_on_pending() {
         assert!(observer_rx.try_recv().is_err());
     }
 
-    assert_eq!(*waker_checks.lock().unwrap_or_else(|error| error.into_inner()), [true, true, true]);
+    assert_eq!(caller_wake_count.0.load(Ordering::SeqCst), 3);
 }
 
 #[test]
