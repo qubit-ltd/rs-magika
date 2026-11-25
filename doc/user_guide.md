@@ -113,14 +113,16 @@ manifest. To use the synchronous provider inventory, change the Magika entry
 to `qubit-magika = { version = "0.18", path = "../rs-magika", features = ["inventory"] }`.
 Fixed source and `--registry-only` select dependency sources. The README checker compiles the extracted English and Chinese consumers with default features; `--run-example` additionally runs both with default and `inventory` features. The repository's locked [`readme_consumer` fixture](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/readme_consumer/Cargo.toml) is an isolated dynamic-loading consumer with Magika default features disabled, so its graph differs from this root manifest's bundled default. Dynamic-loading CI filters feature-graph metadata for the host, checks the separate [`dynamic_loader` fixture's](https://github.com/qubit-ltd/rs-magika/blob/main/tests/fixtures/dynamic_loader/Cargo.toml) feature graph, then compiles its ordinary binary to verify that normal application dependencies can build `ort::init_from`. It next checks `readme_consumer` with default and `inventory` features and a negative graph for a dependency limited to another platform, compiles the default consumer, and runs both configurations using isolated ONNX Runtime loading.
 
-The registry versions required by the examples were not all available on
-2026-11-24: registry search returned `qubit-magika` 0.16.0, `qubit-mime`
-0.21.1, `qubit-fs` 0.3.3, and `qubit-operation` 0.3.1, while these examples
-require 0.18, 0.22, 0.4, and 0.3.2 respectively. The README registry-only
-check also failed to resolve `qubit-magika = "^0.18"`. Until those releases
-are available, use the fixed source-checkout procedure above and compile the
-guide examples with `python3 .infra/check-managed-guide-examples.py` from the
-source checkout.
+The application manifest above keeps the direct dependencies used by the
+example. `qubit-local-files ^0.6` is a production dependency brought in by
+`qubit-mime`; applications do not need to list it directly. As of 2026-11-25,
+the latest non-yanked crates.io versions are `qubit-magika` 0.16.0,
+`qubit-mime` 0.21.1, `qubit-fs` 0.3.3, `qubit-operation` 0.3.1, and
+`qubit-local-files` 0.5.4. The required Magika 0.18, MIME 0.22, FS 0.4, and
+Operation 0.3.2 releases are not yet available, so the registry-only check
+cannot resolve `qubit-magika = "^0.18"`. Until they are published, use the
+fixed source-checkout procedure above and compile the guide examples with
+`python3 .infra/check-managed-guide-examples.py` from the source checkout.
 
 ## Scenario
 
@@ -134,13 +136,14 @@ filename.
 
 Add the crate versions used by this release:
 
-As of 2026-11-24, crates.io search returned `qubit-magika` 0.16.0,
-`qubit-mime` 0.21.1, `qubit-fs` 0.3.3, and `qubit-operation` 0.3.1; this
-guide needs 0.18, 0.22, 0.4, and 0.3.2. The README registry-only check still
-fails to resolve `qubit-magika = "^0.18"`. Until the required releases are
-available, follow the fixed source-checkout procedure in
-[Conceptual Model](#conceptual-model) and run
-`python3 .infra/check-managed-guide-examples.py` from the source checkout.
+As of 2026-11-25, the latest non-yanked crates.io versions are
+`qubit-magika` 0.16.0, `qubit-mime` 0.21.1, `qubit-fs` 0.3.3,
+`qubit-operation` 0.3.1, and `qubit-local-files` 0.5.4. This guide needs
+Magika 0.18, MIME 0.22, FS 0.4, and Operation 0.3.2. `qubit-local-files
+^0.6` is a production dependency of `qubit-mime`, so the application need not
+declare it directly. Until the required releases are available, follow the
+fixed source-checkout procedure in [Conceptual Model](#conceptual-model) and
+run `python3 .infra/check-managed-guide-examples.py` from the source checkout.
 
 ```toml
 [dependencies]

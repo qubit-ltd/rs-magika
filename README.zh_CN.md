@@ -30,7 +30,7 @@ qubit-spi = "0.14"
 qubit-operation = "0.3.2"
 ```
 
-此示例所需的 crates.io 版本尚未全部发布（`qubit-magika` 0.18、`qubit-mime` 0.22、`qubit-fs` 0.4，以及 `qubit-operation` 0.3.2 或更高版本）。2026-11-24 的 registry 搜索分别返回 0.16.0、0.21.1、0.3.3 和 0.3.1，`--registry-only` 仍无法解析 `qubit-magika = "^0.18"`。固定源码与 `--registry-only` 用于选择依赖来源。所需版本发布前，请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并从仓库根运行 `python3 .infra/check-readme-examples.py`。checker 默认只用 default features 编译提取出的中英文程序；增加 `--run-example` 后，才会分别用 default 和 `inventory` 运行这两份程序。锁定的 `readme_consumer` fixture 是隔离动态加载应用，Magika 关闭了默认 features，因此它的依赖图不同于本仓库根清单启用 bundled runtime 的默认图。dynamic-loader CI 按 host 过滤 feature 图 metadata，先检查 `dynamic_loader` 的 feature 图，再编译其普通二进制，以验证常规应用依赖能否编译 `ort::init_from`；随后检查 `readme_consumer` 在 default、`inventory` 下的 feature 图，以及针对其他平台依赖的负例，再编译 default 配置，最后用两种配置运行该 fixture 并隔离加载 ONNX Runtime。
+上面的应用清单保留示例所需的直接依赖。`qubit-local-files ^0.6` 是 `qubit-mime` 引入的生产依赖，应用无需直接声明它。截至 2026-11-25，crates.io 最新非 yanked 版本为 `qubit-magika` 0.16.0、`qubit-mime` 0.21.1、`qubit-fs` 0.3.3、`qubit-operation` 0.3.1 和 `qubit-local-files` 0.5.4。所需的 Magika 0.18、MIME 0.22、FS 0.4 和 Operation 0.3.2 尚未发布，因此 `--registry-only` 无法解析此应用。请使用[依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)中的固定同级源码 checkout，并从仓库根运行 `python3 .infra/check-readme-examples.py`。checker 默认只用 default features 编译提取出的中英文程序；增加 `--run-example` 后，才会分别用 default 和 `inventory` 运行这两份程序。锁定的 `readme_consumer` fixture 是隔离动态加载应用，Magika 关闭了默认 features，因此它的依赖图不同于本仓库根清单启用 bundled runtime 的默认图。dynamic-loader CI 按 host 过滤 feature 图 metadata，先检查 `dynamic_loader` 的 feature 图，再编译其普通二进制，以验证常规应用依赖能否编译 `ort::init_from`；随后检查 `readme_consumer` 在 default、`inventory` 下的 feature 图，以及针对其他平台依赖的负例，再编译 default 配置，最后用两种配置运行该 fixture 并隔离加载 ONNX Runtime。
 
 ## 快速开始
 
@@ -256,6 +256,9 @@ Pending。对于 session 和旧范围读取路由，worker 会在采样期间请
 - [固定的本地依赖提交](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)
 
 ## 测试
+
+构建和测试本源码 checkout 还需要固定的同级 `../rs-fs-local` checkout，提供
+`qubit-fs-local ^0.12`；路径见[固定依赖表](https://github.com/qubit-ltd/rs-magika/blob/main/.infra/ci/local-path-dependencies.tsv)。
 
 ```bash
 # 使用默认 feature 集运行测试
