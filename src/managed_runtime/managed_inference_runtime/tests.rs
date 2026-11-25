@@ -1488,7 +1488,9 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
 fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() {
     struct StopDuringReadInput {
         admission_gate: Arc<Mutex<super::super::task_state::AdmissionGate>>,
+        state: Arc<super::super::task_state::TaskState>,
         session_stop: bool,
+        publish_business_error: bool,
     }
 
     impl magika::AsyncInput for StopDuringReadInput {
@@ -1498,12 +1500,23 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
 
         fn read_at(&mut self, _buffer: &mut [u8], _offset: u64) -> impl Future<Output = Result<(), MagikaError>> {
             let admission_gate = Arc::clone(&self.admission_gate);
+            let state = Arc::clone(&self.state);
             let session_stop = self.session_stop;
+            let publish_business_error = self.publish_business_error;
             std::future::poll_fn(move |_| {
                 admission_gate
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .cancelling = true;
+                if publish_business_error {
+                    state.finish_business(
+                        Err(MimeError::BufferLimitExceeded {
+                            requested: 2,
+                            limit: 1,
+                        }),
+                        ChildOutcomeKind::Failed,
+                    );
+                }
                 let error = if session_stop {
                     crate::internal::session_read_stopped_io_error()
                 } else {
@@ -1514,7 +1527,7 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
         }
     }
 
-    for session_stop in [false, true] {
+    for (session_stop, publish_business_error) in [(false, false), (true, false), (false, true)] {
         let admission_gate = Arc::new(Mutex::new(super::super::task_state::AdmissionGate::new()));
         let state = Arc::new(super::super::task_state::TaskState::new_registered(
             9105,
@@ -1534,7 +1547,9 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
                 ProviderDriverGuard::new(
                     StopDuringReadInput {
                         admission_gate: Arc::clone(&admission_gate),
+                        state: Arc::clone(&state),
                         session_stop,
+                        publish_business_error,
                     },
                     bridge.driver(),
                     Arc::clone(&state),
@@ -1546,19 +1561,35 @@ fn test_range_driver_closes_bridge_when_cancellation_interrupts_provider_read() 
             "range driver closes bridge when cancellation interrupts provider read",
             Duration::from_secs(2),
         );
-        assert!(
-            matches!(
-                result,
-                Err(MimeError::DetectorBackend { ref backend, ref reason })
-                    if backend == "magika" && reason == "provider inference stopped"
-            ),
-            "driver should return the canonical stop error: {result:?}"
-        );
+        if publish_business_error {
+            assert!(
+                matches!(
+                    &result,
+                    Err(MimeError::BufferLimitExceeded {
+                        requested: 2,
+                        limit: 1,
+                    })
+                ),
+                "published business error should win over cancellation: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(MimeError::DetectorBackend { ref backend, ref reason })
+                        if backend == "magika" && reason == "provider inference stopped"
+                ),
+                "driver should return the canonical stop error: {result:?}"
+            );
+        }
         let worker_error = worker.join().unwrap().unwrap_err();
-        assert!(
-            crate::internal::async_sample_bridge::is_closed_error(&worker_error),
-            "typed provider stop must not be sent through the bridge: {worker_error:?}"
-        );
+        assert_eq!(std::io::ErrorKind::Interrupted, worker_error.kind());
+        if !publish_business_error {
+            assert!(
+                crate::internal::async_sample_bridge::is_closed_error(&worker_error),
+                "typed provider stop must not be sent through the bridge: {worker_error:?}"
+            );
+        }
     }
 }
 

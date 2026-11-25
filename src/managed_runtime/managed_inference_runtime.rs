@@ -1372,13 +1372,17 @@ where
                                     if crate::internal::is_session_stop_error(error)
                                         || crate::internal::provider_input::is_observed_read_stopped_error(error)
                             );
-                            if provider_stopped
-                                && (guard.state.cancellation_requested()
+                            if provider_stopped {
+                                if let Poll::Ready(result) = inference.as_mut().poll(cx) {
+                                    return Poll::Ready(ProviderReadEvent::Result(result));
+                                }
+                                if guard.state.cancellation_requested()
                                     || (!guard.state.worker_faulted()
                                         && (scope_stop.as_mut().poll(cx).is_ready()
-                                            || request_stop.as_mut().poll(cx).is_ready())))
-                            {
-                                return Poll::Ready(ProviderReadEvent::Stopped);
+                                            || request_stop.as_mut().poll(cx).is_ready()))
+                                {
+                                    return Poll::Ready(ProviderReadEvent::Stopped);
+                                }
                             }
                             Poll::Ready(ProviderReadEvent::Read(result))
                         }
