@@ -87,6 +87,8 @@ mod tests {
 
     #[cfg(unix)]
     const FIFO_PATH: &str = "QUBIT_MAGIKA_PRIVATE_FIFO_PATH";
+    #[cfg(unix)]
+    const COMPLETION_PATH: &str = "QUBIT_MAGIKA_PRIVATE_FIFO_COMPLETION_PATH";
 
     #[cfg(unix)]
     #[test]
@@ -136,19 +138,30 @@ mod tests {
     fn test_fifo_open_returns_unsupported_before_deadline() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let fifo = directory.path().join("content.fifo");
-        let status = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo should run");
+        let completion = directory.path().join("fifo-test.completed");
+        let status = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo should run");
         assert!(status.success(), "mkfifo failed with {status}");
 
-        let mut child = Command::new(env::current_exe().expect("test executable path"))
+        let child = Command::new(env::current_exe().expect("test executable path"))
             .args([
                 "--exact",
                 "internal::local_content_file::tests::test_fifo_open_child",
                 "--nocapture",
             ])
             .env(FIFO_PATH, &fifo)
+            .env(COMPLETION_PATH, &completion)
             .spawn()
             .expect("FIFO test child should start");
-        wait_for_success(&mut child);
+        let mut child = ChildGuard(child);
+        let status = wait_for_success(&mut child);
+        assert!(status.success(), "FIFO test child failed with {status}");
+        assert!(
+            completion.is_file(),
+            "FIFO child did not write its completion marker"
+        );
     }
 
     #[cfg(unix)]
@@ -157,25 +170,43 @@ mod tests {
         let Some(path) = env::var_os(FIFO_PATH) else {
             return;
         };
+        let completion =
+            env::var_os(COMPLETION_PATH).expect("FIFO completion path should be configured");
         let path = std::path::PathBuf::from(path);
         let error = super::open_regular_file(&path).expect_err("FIFO handle should be rejected");
         assert_eq!(error.kind(), ErrorKind::Unsupported);
+        std::fs::write(completion, b"completed").expect("FIFO completion marker should be written");
     }
 
     #[cfg(unix)]
-    fn wait_for_success(child: &mut Child) {
+    fn wait_for_success(child: &mut ChildGuard) -> std::process::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = child.try_wait().expect("child status should be available") {
-                assert!(status.success(), "FIFO test child failed with {status}");
-                return;
+                return status;
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
                 panic!("private FIFO open did not finish before its deadline");
             }
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    struct ChildGuard(Child);
+
+    #[cfg(unix)]
+    impl ChildGuard {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.0.try_wait()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 }
