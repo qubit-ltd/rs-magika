@@ -95,7 +95,7 @@ else
             else
                 lock_owner='<unavailable: pid is not a regular file>'
             fi
-            echo "error: timed out waiting for bootstrap lock; lock: $lock; owner: $lock_owner. After confirming no holder is running, remove this lock directory and retry." >&2
+            echo "error: timed out waiting for bootstrap lock; lock: $lock; owner: $lock_owner. Before removing this lock and retrying, confirm that the original bootstrap and its cache-writing child processes have stopped." >&2
             [[ -z "$lock_error" ]] || echo "last mkdir error: $lock_error" >&2
             exit 1
         fi
