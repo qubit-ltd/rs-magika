@@ -69,6 +69,22 @@ use crate::internal::AsyncSessionReadOptions;
 
 const ID: &str = "magika-session-adapter-test";
 
+struct ReleaseProviderWorkerGate(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl ReleaseProviderWorkerGate {
+    fn release(&self) {
+        let (lock, changed) = &*self.0;
+        *lock.lock().unwrap_or_else(|error| error.into_inner()) = true;
+        changed.notify_all();
+    }
+}
+
+impl Drop for ReleaseProviderWorkerGate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Fixture {
     opens: Arc<AtomicUsize>,
@@ -1054,6 +1070,7 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
             .build()
             .unwrap(),
     );
+    let release_gate_cleanup = ReleaseProviderWorkerGate(Arc::clone(&release_gate));
     let body_detector = Arc::clone(&detector);
     let body_gate = Arc::clone(&provider_gate);
     let mut handle = service
@@ -1087,9 +1104,7 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
 
     worker_held_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     let _terminal = block_on(handle.wait_outcome()).unwrap();
-    let (lock, ready) = &*release_gate;
-    *lock.lock().unwrap() = true;
-    ready.notify_all();
+    release_gate_cleanup.release();
     let report = detector.shutdown_blocking(qubit_operation::ShutdownMode::Cancel, Duration::from_millis(50));
     assert!(report.worker_stopped);
     assert!(report.admission.snapshot.service_resources != 0);
