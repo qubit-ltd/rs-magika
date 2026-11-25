@@ -93,6 +93,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
+`ManagedInferenceRuntime::new` 会在返回前同步初始化模型和 ONNX Runtime
+Session。通过 `MagikaMimeDetectorBuilder::managed_runtime` 或
+`MagikaMimeDetectorProvider::managed_runtime` 注入该 runtime 的 detector 会直接复用它，
+不会再初始化一个 Session。
+
 ## Provider 名称
 
 - `magika`

@@ -96,6 +96,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
+`ManagedInferenceRuntime::new` initializes the model and ONNX Runtime session
+synchronously before returning. Detectors created with that runtime through
+`MagikaMimeDetectorBuilder::managed_runtime` or
+`MagikaMimeDetectorProvider::managed_runtime` reuse it directly and do not
+initialize another session.
+
 ## Provider Names
 
 - `magika`

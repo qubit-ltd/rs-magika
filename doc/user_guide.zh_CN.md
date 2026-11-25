@@ -24,8 +24,11 @@
 如果 inventory 已经注册了 Magika provider，不要再向同一个 registry 重复注册。
 
 仅按文件名检测时使用仓库中的文件名规则；按内容、reader 或本地文件检测时使用
-Magika 推理。创建 detector 会初始化内嵌的 Magika 模型和 ONNX Runtime session。
-同一个 detector 内部会串行化推理调用，因此可以用 `Arc` 在应用中共享它。
+Magika 推理。创建新的 runtime 会在构造返回前同步初始化内嵌的 Magika 模型和 ONNX Runtime
+session。`MagikaMimeDetector::new()` 和 `from_mime_config(...)` 会创建新的 runtime；通过
+`MagikaMimeDetectorBuilder::managed_runtime` 或 `MagikaMimeDetectorProvider::managed_runtime`
+注入已有 runtime 时会直接复用，不会再初始化另一个 session。同一个 detector 内部会串行化推理调用，
+因此可以用 `Arc` 在应用中共享它。
 
 需要链接时自动发现时，可启用 `qubit-magika = { version = "0.18", features =
 ["inventory"] }`。这会将 `MagikaMimeDetectorProvider::new()` 提交给 MIME detector
@@ -546,7 +549,11 @@ runtime 关闭后，可调用 `detector.runtime_snapshot()` 查看共享运行�
 包含共享该 runtime 的所有 detector。`faulted` 表示推理 session 曾捕获 panic；
 关闭报告的 `worker_panicked` 只表示 join 时观察到未捕获 panic。非零
 `unconfirmed_provider_io` 表示某个 Pending Provider 操作被丢弃，完成状态无法确认。
-快照不能证明资源已结算；需使用 operation observer 的有界 settlement 等待继续观察。
+快照不能证明资源已结算。保留 operation observer，并使用其 `wait_settlement_until(deadline)`
+观察该 operation 所属 scope 的结算；deadline 必须来自相同的 clock domain。`Pending(snapshot)` 表示
+有界等待到达截止时间；`Ready(report)` 是终态，但仍可能含有资源未释放等负面证据，也可能包含该
+scope 中其他 operation 的资源。`ManagedInferenceShutdownReport` 的 `admission` 用于服务组聚合计数，
+`worker_stopped` 只表示 worker 已 join。
 
 真实应用应让 service group、detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
 关闭函数。`max_bytes` 既是单次采样的累计读取预算，也会占用 runtime 共享的在途字节预算。
@@ -588,8 +595,9 @@ Rust panic，不涵盖 native 崩溃或 `panic = abort`。
 `shutdown_blocking` 使用同一个 deadline 执行所选关闭模式并等待 worker 退出。`Drain` 会等待已接纳的服务操作结算。
 `Cancel` 会等待本地 Provider 访问结束，随后关闭 worker sender 并尝试 join；排队操作仍可能留在资源组快照中，
 直到其 executor 将其退休。超时时，`worker_stopped == false` 表示尚未确认 join，运行时会保留 worker handle；
-`true` 表示 worker 已 join，但不代表每项操作资源都已释放，因此仍要单独读取资源报告。
-`worker_panicked` 表示 join 时观察到未捕获 panic。shutdown 不会强行中断 native 推理或 Provider I/O。
+`true` 表示 worker 已 join，但不代表每项操作资源都已释放。应使用 operation observer 的有界 settlement wait
+观察具体请求所属 scope；`admission` 只报告服务组聚合计数，不能替代该观察。`worker_panicked` 表示 join 时观察到
+未捕获 panic。shutdown 不会强行中断 native 推理或 Provider I/O。
 
 从 0.14 以前的集成版本升级时，按以下顺序处理：
 
@@ -620,8 +628,10 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 
 ## 排障
 
-- 如果第一次检测前创建 detector 就失败，检查 ONNX Runtime feature 选择以及
-  `MimeError` 携带的 runtime/model 错误。
+- 如果 `MagikaMimeDetector::new()` 或 `from_mime_config(...)` 失败，检查 ONNX Runtime feature
+  选择以及 `MimeError` 携带的 runtime/model 错误；这两个入口会创建并初始化新的 runtime。如果通过
+  `builder().managed_runtime(...)` 或配置后的 Provider 创建失败，检查注入 runtime 的字节预算是否不小于
+  detector 的 buffer limit，并确认该 runtime 已成功初始化。
 - 如果文件名检测和内容检测结果不同，请注意前者使用 `qubit-mime` 仓库规则，后者
   使用 Magika 推理；应根据输入选择合适的 `qubit-mime` 策略。
 - 如果 provider 注册或选择失败，应先注册 provider，再解析 `ProviderSelection`，并
@@ -632,8 +642,8 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 
 - Provider 自动发现需要启用 `inventory` feature；默认构建仍使用显式注册。
   Inventory 仅提交未配置分类器的 Provider。
-- 创建 detector 会初始化模型和 runtime；应创建一个 detector 并共享，不要为每个
-  输入重复创建。
+- 创建 runtime 会同步初始化模型和 ONNX Runtime session。直接构造器会新建 runtime；builder 或
+  Provider 注入已有 runtime 时会直接复用。应创建并共享 detector，不要为每个输入重复创建。
 - 同一个 detector 上的推理会在内部串行执行。
 - 旧 `MimeDetector` provider hooks 不提供 parent-scope 生命周期观察；managed provider API
   可以把接纳、子操作结果和资源释放状态关联到请求 scope，但仍受上文 Provider 完成观察限制。
