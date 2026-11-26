@@ -69,17 +69,46 @@ fn path(value: &str) -> Path {
     Path::parse(value).expect("test path should be valid")
 }
 
+fn one_worker_manager() -> OperationManager {
+    let mut options = ManagerOptions::default();
+    options.async_executor.worker_count = 1;
+    OperationManager::new(options).unwrap()
+}
+
+fn probe_operation_executor(service: &qubit_operation::OperationGroup) -> std::thread::ThreadId {
+    let mut probe = service
+        .as_async()
+        .try_submit(OperationOptions::default(), |_| async {
+            Ok::<_, MimeError>(std::thread::current().id())
+        })
+        .unwrap();
+    let executor = match run_ready(probe.wait_outcome()).unwrap() {
+        qubit_operation::OperationOutcome::Succeeded(executor) => executor,
+        other => panic!("executor probe did not succeed: {other:?}"),
+    };
+    assert!(run_ready(probe.wait_settlement()).all_released());
+    executor
+}
+
 #[test]
 fn test_provider_executor_polls_managed_and_legacy_routes() {
     for managed in [true, false] {
         for read_all in [false, true] {
             let outer_thread = std::thread::current().id();
-            let mut options = ManagerOptions::default();
-            options.async_executor.worker_count = 1;
-            let supervisor = OperationManager::new(options).unwrap();
-            let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+            let scope_manager = one_worker_manager();
+            let runtime_manager = one_worker_manager();
+            let scope_service = scope_manager.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+            // Operation groups from one manager share its configured async
+            // executor; this probe identifies the runtime manager's executor
+            // without exposing the runtime's private service group.
+            let runtime_probe_service = runtime_manager.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+            let scope_executor = probe_operation_executor(&scope_service);
+            let runtime_service_executor = probe_operation_executor(&runtime_probe_service);
+            assert_ne!(scope_executor, runtime_service_executor);
+            assert_ne!(scope_executor, outer_thread);
+            assert_ne!(runtime_service_executor, outer_thread);
             let config = qubit_mime::MimeConfig::default();
-            let runtime = Arc::new(ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap());
+            let runtime = Arc::new(ManagedInferenceRuntime::new(runtime_manager.clone(), config.max_buffer_size()).unwrap());
             let detector = Arc::new(
                 qubit_magika::MagikaMimeDetector::builder()
                     .mime_config(config)
@@ -107,44 +136,55 @@ fn test_provider_executor_polls_managed_and_legacy_routes() {
             let observations = provider.observations();
             let file_system = provider.async_file_system();
             let body_detector = Arc::clone(&detector);
-            let (executor_tx, executor_rx) = std::sync::mpsc::channel();
-            let mut operation = service
-                .as_async()
-                .try_submit(OperationOptions::default(), move |scope| async move {
-                    executor_tx
-                        .send(std::thread::current().id())
-                        .expect("test receiver remains alive");
-                    if managed {
+            let operation_executor = if managed {
+                let (executor_tx, executor_rx) = std::sync::mpsc::channel();
+                let mut operation = scope_service
+                    .as_async()
+                    .try_submit(OperationOptions::default(), move |scope| async move {
+                        executor_tx
+                            .send(std::thread::current().id())
+                            .expect("test receiver remains alive");
                         body_detector
                             .detect_async_provider_path_managed(&scope, &file_system, &path("/executor.py"), 4096)
                             .await
-                    } else {
-                        MimeDetector::detect_async_path(
-                            &*body_detector,
-                            &file_system,
-                            &path("/executor.py"),
-                            4096,
-                            MimeDetectionPolicy::VerifyContent,
-                        )
-                        .await
-                    }
-                })
-                .unwrap();
-            assert!(matches!(
-                run_ready(operation.wait_outcome()).unwrap(),
-                qubit_operation::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
-            ));
-            assert!(run_ready(operation.wait_settlement()).all_released());
-            let operation_executor = executor_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("operation body should report its executor");
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    run_ready(operation.wait_outcome()).unwrap(),
+                    qubit_operation::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
+                ));
+                assert!(run_ready(operation.wait_settlement()).all_released());
+                executor_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("managed operation body should report its executor")
+            } else {
+                assert_eq!(
+                    Some("text/x-python".to_owned()),
+                    run_ready(MimeDetector::detect_async_path(
+                        &*body_detector,
+                        &file_system,
+                        &path("/executor.py"),
+                        4096,
+                        MimeDetectionPolicy::VerifyContent,
+                    ))
+                    .unwrap()
+                );
+                runtime_service_executor
+            };
             let poll_threads = observations.poll_threads.lock().unwrap();
             assert!(!poll_threads.is_empty(), "Provider futures should be polled");
+            let expected_executor = if managed {
+                assert_eq!(scope_executor, operation_executor);
+                assert_ne!(operation_executor, runtime_service_executor);
+                scope_executor
+            } else {
+                runtime_service_executor
+            };
             assert!(
-                poll_threads.iter().all(|thread| *thread == operation_executor),
-                "Provider polls must run on the operation-body executor: managed={managed}, read_all={read_all}, body={operation_executor:?}, polls={poll_threads:?}"
+                poll_threads.iter().all(|thread| *thread == expected_executor),
+                "Provider polls must run on the route's executor: managed={managed}, read_all={read_all}, expected={expected_executor:?}, scope={scope_executor:?}, runtime_service={runtime_service_executor:?}, polls={poll_threads:?}"
             );
-            assert_ne!(operation_executor, outer_thread, "the executor must differ from the caller waiting for outcome");
+            assert_ne!(expected_executor, outer_thread, "the executor must differ from the outer test caller");
             assert!(
                 poll_threads.iter().all(|thread| *thread != outer_thread),
                 "Provider polling must not run on the outer waiting thread"
@@ -167,14 +207,21 @@ fn test_provider_executor_polls_managed_and_legacy_routes() {
             assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
             assert_eq!(
                 0,
-                service
+                scope_service
                     .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
                     .snapshot
                     .active_operations
             );
             assert_eq!(
                 0,
-                supervisor
+                scope_manager
+                    .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+                    .snapshot
+                    .active_operations
+            );
+            assert_eq!(
+                0,
+                runtime_manager
                     .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
                     .snapshot
                     .active_operations
@@ -1232,6 +1279,54 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(30));
     let first_observer = first.observer();
+    let first_running_snapshot = detector.runtime_snapshot();
+    let bytes = PYTHON.to_vec();
+    let second_bytes_len = bytes.len();
+    assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
+    let second_detector = Arc::clone(&detector);
+    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let mut second = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, bytes));
+            let result = std::future::poll_fn(|context| match inference.as_mut().poll(context) {
+                Poll::Ready(result) => {
+                    let _ = admitted_tx.send("completed".to_owned());
+                    Poll::Ready(result)
+                }
+                Poll::Pending => {
+                    let _ = admitted_tx.send("pending".to_owned());
+                    Poll::Pending
+                }
+            })
+            .await;
+            let _ = completed_tx.send(());
+            result
+        })
+        .unwrap();
+    let admission_state = admitted_rx.recv_timeout(Duration::from_secs(30));
+    if let Ok(state) = admission_state.as_ref() {
+        assert_eq!(state, "pending", "second owned-byte request ended before queueing");
+    } else {
+        panic!(
+            "second owned-byte request body ended before its queue handshake: {admission_state:?}; outcome={:?}",
+            run_ready(second.wait_outcome())
+        );
+    }
+    assert!(!gate.is_released(), "the first Provider read remains gated after second admission");
+    let second_admitted_snapshot = detector.runtime_snapshot();
+    assert_eq!(
+        first_running_snapshot.reserved_bytes + second_bytes_len,
+        second_admitted_snapshot.reserved_bytes,
+        "the queued second request should hold its own runtime byte reservation: {second_admitted_snapshot:?}"
+    );
+    // Observe completion through a synchronized channel with a finite timeout
+    // while the provider gate remains closed. This does not poll in a loop or
+    // sleep; no observer thread is spawned, so unwinding cannot strand one.
+    let completion_while_gated = completed_rx.recv_timeout(Duration::from_millis(200)).is_ok();
+    assert!(!gate.is_released(), "the provider gate stays closed for the full bounded observation");
+
     let _ = first.request_stop(StopReason::UserCancelled);
     let first_result = run_ready(first.wait_outcome());
     assert!(
@@ -1258,53 +1353,6 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
     let retained_snapshot = detector.runtime_snapshot();
     gate.wait_until_wait_dropped(Duration::from_secs(5));
 
-    let bytes = PYTHON.to_vec();
-    let second_bytes_len = bytes.len();
-    assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
-    let second_detector = Arc::clone(&detector);
-    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
-    let mut second = service
-        .as_async()
-        .try_submit(OperationOptions::default(), move |scope| async move {
-            let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, bytes));
-            std::future::poll_fn(|context| match inference.as_mut().poll(context) {
-                Poll::Ready(result) => {
-                    let _ = admitted_tx.send(format!("completed: {result:?}"));
-                    Poll::Ready(result)
-                }
-                Poll::Pending => {
-                    let _ = admitted_tx.send("pending".to_owned());
-                    Poll::Pending
-                }
-            })
-            .await
-        })
-        .unwrap();
-    let admission_state = admitted_rx.recv_timeout(Duration::from_secs(30));
-    if let Ok(state) = admission_state.as_ref() {
-        assert_eq!(state, "pending", "second owned-byte request ended before queueing");
-    } else {
-        panic!(
-            "second owned-byte request body ended before its queue handshake: {admission_state:?}; outcome={:?}",
-            run_ready(second.wait_outcome())
-        );
-    }
-    assert!(!gate.is_released(), "the first Provider read remains gated after second admission");
-    let second_admitted_snapshot = detector.runtime_snapshot();
-    assert_eq!(
-        retained_snapshot.reserved_bytes + second_bytes_len,
-        second_admitted_snapshot.reserved_bytes,
-        "the queued second request should hold its own runtime byte reservation: {second_admitted_snapshot:?}"
-    );
-    // The second operation must still be waiting on the shared worker before
-    // releasing the provider read.
-    let mut second_result = Box::pin(second.wait_outcome());
-    let result_state = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(second_result.as_mut().poll(context))
-    }));
-    assert!(result_state.is_pending());
-    drop(second_result);
-
     // Releasing the read lets the second owned-byte request progress.
     gate.release();
     let second_result = run_ready(second.wait_outcome());
@@ -1314,9 +1362,13 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
         Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
     ));
     assert!(second_settlement.all_released());
+    assert!(
+        !completion_while_gated,
+        "the second job must remain incomplete during the bounded closed-gate observation"
+    );
     let after_second_release = detector.runtime_snapshot();
     assert_eq!(
-        retained_snapshot.reserved_bytes,
+        first_running_snapshot.reserved_bytes,
         after_second_release.reserved_bytes,
         "the second request's runtime byte reservation should be reclaimed while the cancelled first request remains retained: {after_second_release:?}"
     );
