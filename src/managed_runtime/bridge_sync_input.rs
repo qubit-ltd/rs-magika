@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use magika::Result as MagikaResult;
 use magika::SyncInput;
 
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
@@ -22,7 +23,7 @@ pub(super) struct BridgeSyncInput(
 
 impl SyncInput for BridgeSyncInput {
     /// Reports the immutable input length held by the bridge.
-    fn length(&self) -> magika::Result<u64> {
+    fn length(&self) -> MagikaResult<u64> {
         Ok(self.0.length())
     }
 
@@ -32,7 +33,7 @@ impl SyncInput for BridgeSyncInput {
     ///
     /// * `buffer` - Exact-size destination buffer supplied by Magika.
     /// * `offset` - Start offset of the requested range.
-    fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> magika::Result<()> {
+    fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> MagikaResult<()> {
         self.0.read_at(offset, buffer).map_err(Into::into)
     }
 }

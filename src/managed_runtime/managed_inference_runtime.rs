@@ -34,6 +34,7 @@ use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
 use qubit_operation::ShutdownReport;
 use qubit_operation::ShutdownSnapshot;
+use qubit_operation::StopReason;
 
 use super::bridge_sync_input::BridgeSyncInput;
 use super::byte_budget::ByteBudget;
@@ -568,7 +569,7 @@ impl ManagedInferenceRuntime {
                 BodyStartOr::BodyStarted => outcome.await,
                 BodyStartOr::Closed(reason) => {
                     drop(outcome);
-                    let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                    let _ = operation.request_stop(StopReason::UserCancelled);
                     return Err(MimeError::detector_backend("magika", reason.as_str()));
                 }
             }

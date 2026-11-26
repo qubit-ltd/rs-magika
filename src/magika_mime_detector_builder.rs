@@ -12,6 +12,7 @@ use std::sync::Arc;
 use qubit_mime::MediaStreamClassifier;
 use qubit_mime::MimeConfig;
 use qubit_mime::MimeDetectorCore;
+use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_mime::RepositoryMimeDetector;
 use qubit_operation::ManagerOptions;
@@ -177,14 +178,14 @@ impl MagikaMimeDetectorBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`qubit_mime::MimeError::DetectorBackend`] if a supplied
+    /// Returns [`MimeError::DetectorBackend`] if a supplied
     /// runtime's byte budget is smaller than the MIME buffer limit, the default
     /// operation manager or service group cannot be created, the worker cannot
     /// start, or Magika reports a non-I/O initialization failure. Magika
     /// initialization I/O failures are returned as
-    /// [`qubit_mime::MimeError::Io`]. Errors creating a service group from an
+    /// [`MimeError::Io`]. Errors creating a service group from an
     /// application-owned [`OperationManager`] are mapped
-    /// to [`qubit_mime::MimeError::DetectorBackend`]. A zero
+    /// to [`MimeError::DetectorBackend`]. A zero
     /// `MimeConfig::max_buffer_size()` is rejected when this builder creates a
     /// new runtime; a supplied shared runtime may be reused with that zero
     /// per-request limit.
@@ -193,7 +194,7 @@ impl MagikaMimeDetectorBuilder {
         let runtime = match self.runtime {
             Some(runtime) if runtime.max_in_flight_bytes() >= max_buffer_size => runtime,
             Some(_) => {
-                return Err(qubit_mime::MimeError::detector_backend(
+                return Err(MimeError::detector_backend(
                     "magika",
                     "managed runtime byte budget is smaller than the configured MIME buffer limit",
                 ));
@@ -202,10 +203,7 @@ impl MagikaMimeDetectorBuilder {
                 let manager = match self.manager {
                     Some(manager) => manager,
                     None => OperationManager::new(ManagerOptions::default()).map_err(|error| {
-                        qubit_mime::MimeError::detector_backend(
-                            "magika",
-                            format!("could not create operation manager: {error}"),
-                        )
+                        MimeError::detector_backend("magika", format!("could not create operation manager: {error}"))
                     })?,
                 };
                 Arc::new(ManagedInferenceRuntime::new(manager, max_buffer_size)?)

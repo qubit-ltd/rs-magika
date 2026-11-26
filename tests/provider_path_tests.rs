@@ -97,18 +97,23 @@ fn test_provider_executor_polls_managed_and_legacy_routes() {
             let outer_thread = std::thread::current().id();
             let scope_manager = one_worker_manager();
             let runtime_manager = one_worker_manager();
-            let scope_service = scope_manager.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+            let scope_service = scope_manager
+                .group(qubit_operation::GroupOptions { capacity: 4 })
+                .unwrap();
             // Operation groups from one manager share its configured async
             // executor; this probe identifies the runtime manager's executor
             // without exposing the runtime's private service group.
-            let runtime_probe_service = runtime_manager.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+            let runtime_probe_service = runtime_manager
+                .group(qubit_operation::GroupOptions { capacity: 4 })
+                .unwrap();
             let scope_executor = probe_operation_executor(&scope_service);
             let runtime_service_executor = probe_operation_executor(&runtime_probe_service);
             assert_ne!(scope_executor, runtime_service_executor);
             assert_ne!(scope_executor, outer_thread);
             assert_ne!(runtime_service_executor, outer_thread);
             let config = qubit_mime::MimeConfig::default();
-            let runtime = Arc::new(ManagedInferenceRuntime::new(runtime_manager.clone(), config.max_buffer_size()).unwrap());
+            let runtime =
+                Arc::new(ManagedInferenceRuntime::new(runtime_manager.clone(), config.max_buffer_size()).unwrap());
             let detector = Arc::new(
                 qubit_magika::MagikaMimeDetector::builder()
                     .mime_config(config)
@@ -184,7 +189,10 @@ fn test_provider_executor_polls_managed_and_legacy_routes() {
                 poll_threads.iter().all(|thread| *thread == expected_executor),
                 "Provider polls must run on the route's executor: managed={managed}, read_all={read_all}, expected={expected_executor:?}, scope={scope_executor:?}, runtime_service={runtime_service_executor:?}, polls={poll_threads:?}"
             );
-            assert_ne!(expected_executor, outer_thread, "the executor must differ from the outer test caller");
+            assert_ne!(
+                expected_executor, outer_thread,
+                "the executor must differ from the outer test caller"
+            );
             assert!(
                 poll_threads.iter().all(|thread| *thread != outer_thread),
                 "Provider polling must not run on the outer waiting thread"
@@ -204,7 +212,11 @@ fn test_provider_executor_polls_managed_and_legacy_routes() {
                     "read_all Provider I/O is polled while its runtime reservation is admitted but no worker input is running: {snapshots:?}"
                 );
             }
-            assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
+            assert!(
+                detector
+                    .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30))
+                    .worker_stopped
+            );
             assert_eq!(
                 0,
                 scope_service
@@ -1314,7 +1326,10 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
             run_ready(second.wait_outcome())
         );
     }
-    assert!(!gate.is_released(), "the first Provider read remains gated after second admission");
+    assert!(
+        !gate.is_released(),
+        "the first Provider read remains gated after second admission"
+    );
     let second_admitted_snapshot = detector.runtime_snapshot();
     assert_eq!(
         first_running_snapshot.reserved_bytes + second_bytes_len,
@@ -1325,7 +1340,10 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
     // while the provider gate remains closed. This does not poll in a loop or
     // sleep; no observer thread is spawned, so unwinding cannot strand one.
     let completion_while_gated = completed_rx.recv_timeout(Duration::from_millis(200)).is_ok();
-    assert!(!gate.is_released(), "the provider gate stays closed for the full bounded observation");
+    assert!(
+        !gate.is_released(),
+        "the provider gate stays closed for the full bounded observation"
+    );
 
     let _ = first.request_stop(StopReason::UserCancelled);
     let first_result = run_ready(first.wait_outcome());
@@ -1368,8 +1386,7 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
     );
     let after_second_release = detector.runtime_snapshot();
     assert_eq!(
-        first_running_snapshot.reserved_bytes,
-        after_second_release.reserved_bytes,
+        first_running_snapshot.reserved_bytes, after_second_release.reserved_bytes,
         "the second request's runtime byte reservation should be reclaimed while the cancelled first request remains retained: {after_second_release:?}"
     );
     if first_settlement.is_none() {
@@ -1402,12 +1419,18 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
         shutdown.worker_stopped,
         "the inference worker should stop even while recovery retains the Provider request: {shutdown:?}"
     );
-    assert!(gate.is_entered(), "the selected Provider read route must enter its controlled gate");
+    assert!(
+        gate.is_entered(),
+        "the selected Provider read route must enter its controlled gate"
+    );
     assert!(
         gate.is_wait_dropped(),
         "stop must be observable independently of Provider resource settlement"
     );
-    assert!(gate.is_released(), "controlled Provider I/O is released before the second request settles");
+    assert!(
+        gate.is_released(),
+        "controlled Provider I/O is released before the second request settles"
+    );
 }
 
 #[test]

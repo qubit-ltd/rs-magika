@@ -787,10 +787,10 @@ struct ProviderReader {
 
 impl Drop for ProviderReader {
     fn drop(&mut self) {
-        if self.read_wait_pending {
-            if let Some(gate) = &self.async_gate {
-                gate.mark_wait_dropped();
-            }
+        if self.read_wait_pending
+            && let Some(gate) = &self.async_gate
+        {
+            gate.mark_wait_dropped();
         }
     }
 }

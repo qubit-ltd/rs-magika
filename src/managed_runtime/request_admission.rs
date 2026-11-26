@@ -16,6 +16,7 @@ use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
 use qubit_operation::ChildOutcomeKind;
 use qubit_operation::OperationScope;
+use qubit_operation::ResourceScopeError;
 use qubit_operation::ResourceScopeOptions;
 
 use super::byte_permit::BytePermit;
@@ -402,10 +403,7 @@ impl RequestAdmission {
         if scope.context().stop_reason().is_some() {
             return Err(MimeError::detector_backend(
                 "magika",
-                format!(
-                    "operation scope rejected inference: {:?}",
-                    qubit_operation::ResourceScopeError::Stopped
-                ),
+                format!("operation scope rejected inference: {:?}", ResourceScopeError::Stopped),
             ));
         }
         let resource_scope = scope

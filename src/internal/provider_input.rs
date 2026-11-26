@@ -11,6 +11,7 @@ use std::io;
 
 use magika::Error;
 use magika::Result as MagikaResult;
+use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
 use qubit_fs::Path;
 use qubit_fs::metadata::ResourceVersion;
@@ -147,7 +148,7 @@ pub(crate) fn read_sync_segments(
 /// Returns an I/O error when validation, budget reservation, or any provider
 /// range fails or the observer stops the operation.
 pub(crate) async fn read_async_observed<O: ReadIoObserver>(
-    file_system: &qubit_fs::AsyncFileSystem,
+    file_system: &AsyncFileSystem,
     path: &Path,
     length: u64,
     options: ReadOptions,
@@ -208,7 +209,7 @@ pub(crate) async fn read_async_observed<O: ReadIoObserver>(
 /// Returns an I/O error when the segment limit is zero, an offset overflows,
 /// a provider segment fails or is short, or the observer stops the operation.
 pub(crate) async fn read_async_segments_observed<O: ReadIoObserver>(
-    file_system: &qubit_fs::AsyncFileSystem,
+    file_system: &AsyncFileSystem,
     path: &Path,
     version: Option<&ResourceVersion>,
     buffer: &mut [u8],

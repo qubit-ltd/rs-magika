@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use std::task::Poll;
 
 use magika::Result as MagikaResult;
+use qubit_fs::FsResult;
 use qubit_fs::error::FsEffectState;
 use qubit_fs::error::FsError;
 use qubit_fs::error::FsErrorKind;
@@ -94,7 +95,7 @@ pub(crate) fn read_sync_session(
 /// # Errors
 ///
 /// Returns the first error that is not a safe, unchanged interruption.
-fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut [u8]) -> qubit_fs::FsResult<usize> {
+fn read_sync_at_retry(reader: &mut RandomAccessReader, offset: u64, output: &mut [u8]) -> FsResult<usize> {
     let mut retries = 0;
     loop {
         match reader.read_at(offset, output) {

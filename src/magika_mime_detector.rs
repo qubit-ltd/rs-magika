@@ -21,6 +21,7 @@ use qubit_fs::AsyncFileSystem;
 use qubit_fs::FileSystem;
 use qubit_fs::Path as FsPath;
 use qubit_fs::metadata::FileSystemCapability;
+use qubit_fs::read::ObservedReadError;
 use qubit_fs::read::ReadOptions;
 use qubit_io::std_io::ReadSeek;
 use qubit_mime::ContentRequirement;
@@ -35,6 +36,7 @@ use qubit_operation::ChildRequirement;
 use qubit_operation::OperationOptions;
 use qubit_operation::OperationScope;
 use qubit_operation::ShutdownMode;
+use qubit_operation::StopReason;
 
 use crate::internal::AsyncProviderInput;
 use crate::internal::ManagedReadObserver;
@@ -345,7 +347,7 @@ impl MagikaMimeDetector {
             crate::managed_runtime::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
             crate::managed_runtime::request_admission_handoff::BodyStartOr::Closed(reason) => {
                 drop(outcome);
-                let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                let _ = operation.request_stop(StopReason::UserCancelled);
                 return Err(MimeError::detector_backend("magika", reason.as_str()));
             }
         };
@@ -464,10 +466,10 @@ impl MagikaMimeDetector {
             .await?;
         let bytes = match read_result {
             Ok(bytes) => bytes,
-            Err(qubit_fs::read::ObservedReadError::Stopped) => {
+            Err(ObservedReadError::Stopped) => {
                 return Err(MimeError::detector_backend("magika", "provider read stopped"));
             }
-            Err(qubit_fs::read::ObservedReadError::Provider(error)) => return Err(error.into()),
+            Err(ObservedReadError::Provider(error)) => return Err(error.into()),
         };
         runtime.detect_bytes_admitted(admission, bytes).await
     }
@@ -921,12 +923,11 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// * `file_system` - Filesystem used to access the path.
     /// * `path` - File path to inspect.
     /// * `max_bytes` - Maximum cumulative logical sampling bytes; for a
-    ///   `read_all` fallback, the maximum accepted payload size.
-    ///   This request value is checked against the detector's per-request
-    ///   limit before Provider I/O, so a small file can still fail before
-    ///   `open` or `stat` when `max_bytes` is too large. The asynchronous path
-    ///   also reserves this value against the runtime's aggregate in-flight
-    ///   payload budget.
+    ///   `read_all` fallback, the maximum accepted payload size. This request
+    ///   value is checked against the detector's per-request limit before
+    ///   Provider I/O, so a small file can still fail before `open` or `stat`
+    ///   when `max_bytes` is too large. The asynchronous path also reserves
+    ///   this value against the runtime's aggregate in-flight payload budget.
     ///
     /// # Errors
     ///
@@ -1034,9 +1035,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// * `max_bytes` - Maximum cumulative logical sampling bytes. A `read_all`
     ///   fallback uses it as the accepted-payload limit and may probe one extra
     ///   byte. This does not bound provider/network traffic or total process
-    ///   memory. The value is checked against this detector's per-request
-    ///   limit before Provider I/O, and a `BufferLimitExceeded` reports the
-    ///   exact requested value and limit. The request also reserves this value
+    ///   memory. The value is checked against this detector's per-request limit
+    ///   before Provider I/O, and a `BufferLimitExceeded` reports the exact
+    ///   requested value and limit. The request also reserves this value
     ///   against the runtime's aggregate in-flight payload budget.
     ///
     /// # Errors
@@ -1097,7 +1098,7 @@ impl MimeDetectorBackend for MagikaMimeDetector {
                 crate::managed_runtime::request_admission_handoff::BodyStartOr::BodyStarted => outcome.await,
                 crate::managed_runtime::request_admission_handoff::BodyStartOr::Closed(reason) => {
                     drop(outcome);
-                    let _ = operation.request_stop(qubit_operation::StopReason::UserCancelled);
+                    let _ = operation.request_stop(StopReason::UserCancelled);
                     return Err(MimeError::detector_backend("magika", reason.as_str()));
                 }
             };

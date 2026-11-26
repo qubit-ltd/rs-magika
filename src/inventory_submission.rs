@@ -7,8 +7,12 @@
 // =============================================================================
 //! Link-time submission of the default Magika detector provider.
 
-qubit_spi::submit_sync_provider! {
-    inventory_entry = qubit_mime::detector::mime_detector_inventory::Entry;
-    spec = qubit_mime::MimeDetectorSpec;
+use qubit_mime::MimeDetectorSpec;
+use qubit_mime::detector::mime_detector_inventory::Entry;
+use qubit_spi::submit_sync_provider;
+
+submit_sync_provider! {
+    inventory_entry = Entry;
+    spec = MimeDetectorSpec;
     provider = crate::MagikaMimeDetectorProvider::new();
 }
