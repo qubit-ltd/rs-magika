@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 
@@ -155,6 +156,37 @@ def check_dynamic_metadata(metadata: dict[str, Any], expect_inventory: str | Non
     return errors
 
 
+def check_candidate_sources(metadata: dict[str, Any], expectations: list[str]) -> list[str]:
+    """Require one reachable package identity at each expected local candidate path."""
+    errors: list[str] = []
+    for expectation in expectations:
+        try:
+            name, expected_path = expectation.split("=", 1)
+            if not name or not expected_path:
+                raise ValueError
+            expected_manifest = (
+                (Path(expected_path) / "Cargo.toml").resolve()
+                if Path(expected_path).is_dir()
+                else Path(expected_path).resolve()
+            )
+            packages, node_ids = _reachable_nodes(metadata)
+            matches = [
+                package
+                for package_id, package in packages.items()
+                if package.get("name") == name and package_id in node_ids
+            ]
+            if len(matches) != 1:
+                raise ValueError(f"expected one reachable {name} package identity; found {len(matches)}")
+            actual_manifest = Path(str(matches[0].get("manifest_path", ""))).resolve()
+            if actual_manifest != expected_manifest:
+                raise ValueError(
+                    f"{name} package candidate is {actual_manifest}; expected {expected_manifest}"
+                )
+        except (ValueError, OSError) as error:
+            errors.append(f"candidate source check {expectation!r}: {error or 'expected NAME=MANIFEST_PATH'}")
+    return errors
+
+
 def dynamic_ort_feature_violations(features: set[str] | list[str] | tuple[str, ...]) -> list[str]:
     enabled = set(features)
     errors = []
@@ -240,6 +272,22 @@ def run_self_tests() -> None:
     ]
     errors = check_dynamic_metadata(missing_magika)
     assert errors and "expected one reachable qubit-magika package identity" in " ".join(errors)
+    candidate = graph(["load-dynamic"], ["disable-linking"])
+    for package in candidate["packages"]:
+        package["manifest_path"] = f"/candidate/{package['name']}/Cargo.toml"
+    assert not check_candidate_sources(candidate, ["qubit-magika=/candidate/qubit-magika/Cargo.toml"])
+    assert "candidate is" in " ".join(check_candidate_sources(
+        candidate, ["qubit-magika=/wrong/qubit-magika/Cargo.toml"]
+    ))
+    assert "expected one reachable" in " ".join(
+        check_candidate_sources(
+            candidate,
+            [
+                "qubit-magika=/candidate/qubit-magika/Cargo.toml",
+                "qubit-mime=/candidate/qubit-mime/Cargo.toml",
+            ],
+        )
+    )
     for kind in ("dev", "build"):
         wrong_kind = graph(["load-dynamic"], ["disable-linking"])
         wrong_kind["resolve"]["nodes"][0]["deps"][1]["dep_kinds"] = [{"kind": kind, "target": None}]
