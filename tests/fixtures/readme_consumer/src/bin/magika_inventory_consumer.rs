@@ -46,13 +46,9 @@ fn create_detector() -> Result<
     #[cfg(not(feature = "inventory"))]
     {
         eprintln!("Magika consumer mode: explicit registration");
-        let manager = qubit_operation::OperationManager::new(
-            qubit_operation::ManagerOptions::default(),
-        )?;
+        let manager = qubit_operation::OperationManager::new(qubit_operation::ManagerOptions::default())?;
         let runtime = Arc::new(ManagedInferenceRuntime::new(manager, config.max_buffer_size())?);
-        registry.register(
-            MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)),
-        )?;
+        registry.register(MagikaMimeDetectorProvider::new().managed_runtime(Arc::clone(&runtime)))?;
         let selection = ProviderSelection::named("magika")?;
         let detector = registry.resolve_selected(&selection)?.create_configured(&config)?;
         Ok((registry, detector, Some(runtime)))
@@ -80,10 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     drop(detector);
     if let Some(runtime) = runtime {
-        let report = runtime.shutdown_blocking(
-            qubit_operation::ShutdownMode::Drain,
-            std::time::Duration::from_secs(5),
-        );
+        let report = runtime.shutdown_blocking(qubit_operation::ShutdownMode::Drain, std::time::Duration::from_secs(5));
         assert!(report.worker_stopped);
     }
     drop(registry);

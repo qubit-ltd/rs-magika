@@ -1,8 +1,8 @@
 # relative git root	repository URL	fixed commit SHA
-../rs-fs	https://github.com/qubit-ltd/rs-fs.git	c7ea1d035498aa633f4f3c04d90fdb5d4b73de97
+../rs-fs	https://github.com/qubit-ltd/rs-fs.git	4cb4ac38f993efb99d52b16ead8aef5f72cfef49
 ../rs-fs-local	https://github.com/qubit-ltd/rs-fs-local.git	3bf4275ed601e39fdbf8532f9d80d563d9cc7182
 ../rs-fs-testkit	https://github.com/qubit-ltd/rs-fs-testkit.git	28bf195b8eef9c03d9cb1c5428186758b76aaacd
-../rs-mime	https://github.com/qubit-ltd/rs-mime.git	33424a6f63feb8dab3a1214fd68f9ce1151c7762
-../rs-operation	https://github.com/qubit-ltd/rs-operation.git	2821f739c996250fa9cfe33a86efc54c2fab6373
-../rs-fs-registry	https://github.com/qubit-ltd/rs-fs-registry.git	df6c8b7ce45495995c0b0ab9d64e14d0b41a8b1c
-../rs-local-files	https://github.com/qubit-ltd/rs-local-files.git	5b52230e0af2997fadc45b5ff48be65b0ca5a70d
+../rs-mime	https://github.com/qubit-ltd/rs-mime.git	f0118eaea5e601a4ae5fb88a0df8964f455850e2
+../rs-operation	https://github.com/qubit-ltd/rs-operation.git	893bcf6c7efb397cc8fac2f7fe18fb5e87017e63
+../rs-fs-registry	https://github.com/qubit-ltd/rs-fs-registry.git	983a8c645b31af2688ea06a55c83d1535852d401
+../rs-local-files	https://github.com/qubit-ltd/rs-local-files.git	80d4357b354f572e695f0c17ac1182f0aaad22c0
