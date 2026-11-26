@@ -3,6 +3,7 @@ name = "magika-readme-consumer"
 version = "0.0.0"
 edition = "2024"
 publish = false
+default-run = "magika-readme-consumer"
 
 [workspace]
 
@@ -19,3 +20,7 @@ ort = { version = ">=2.0.0-rc.12,<2.1", default-features = false, features = ["s
 
 [patch.crates-io]
 qubit-operation = { path = "../../../../rs-operation" }
+
+[[bin]]
+name = "magika-inventory-consumer"
+path = "src/bin/magika_inventory_consumer.rs"

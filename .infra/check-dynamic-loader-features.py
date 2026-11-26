@@ -6,20 +6,28 @@ from __future__ import annotations
 import argparse
 import sys
 
-from _dynamic_loader_feature_policy import check_dynamic_metadata, parse_metadata, run_self_tests
+from _dynamic_loader_feature_policy import (
+    check_candidate_sources,
+    check_dynamic_metadata,
+    parse_metadata,
+    run_self_tests,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--expect-inventory", choices=("enabled", "disabled"))
+    parser.add_argument("--expect-source", action="append", default=[])
     args = parser.parse_args()
     if args.self_test:
         run_self_tests()
         print("dynamic loader feature checker self-tests passed")
         return 0
     try:
-        errors = check_dynamic_metadata(parse_metadata(sys.stdin.read()), args.expect_inventory)
+        metadata = parse_metadata(sys.stdin.read())
+        errors = check_dynamic_metadata(metadata, args.expect_inventory)
+        errors.extend(check_candidate_sources(metadata, args.expect_source))
     except ValueError as error:
         errors = [str(error)]
     if errors:
