@@ -80,7 +80,7 @@ jobs:
       - name: Record candidate source commits
         run: |
           set -euo pipefail
-          for repo in . ../rs-mime ../rs-fs-local ../rs-local-files ../rs-operation; do
+          for repo in . ../rs-fs ../rs-fs-local ../rs-fs-testkit ../rs-mime ../rs-operation ../rs-fs-registry ../rs-local-files; do
             printf '%s ' "$repo"
             git -C "$repo" rev-parse HEAD
           done
@@ -133,6 +133,7 @@ jobs:
           cargo +1.94.0 check --locked --manifest-path tests/fixtures/dynamic_loader/Cargo.toml --bin magika-dynamic-loader-fixture
           candidate_sources=(
             --expect-source "qubit-magika=$PWD/Cargo.toml"
+            --expect-source "qubit-fs=$PWD/../rs-fs/Cargo.toml"
             --expect-source "qubit-mime=$PWD/../rs-mime/Cargo.toml"
             --expect-source "qubit-local-files=$PWD/../rs-local-files/Cargo.toml"
             --expect-source "qubit-operation=$PWD/../rs-operation/Cargo.toml"
