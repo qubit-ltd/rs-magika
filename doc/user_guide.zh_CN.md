@@ -411,6 +411,11 @@ Unix 打开阶段的保证。若打开后的句柄不是普通文件，检测会
 可能等待 Provider 读取；这会延迟共享同一 runtime 的其他请求，形成共同的等待和故障域。若应用需要隔离
 延迟，可以为调用方使用独立 runtime，但每个 runtime 都会额外占用一个 Magika Session。同步借用内容、reader 和本地
 文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待，仓库规则命中时可以直接返回。
+Managed Provider 的 `open`、`stat` 和 session/范围样本读取由 scope manager 执行器在 operation body 中轮询；
+旧 hook 使用 runtime 服务组执行器。调用方等待 operation outcome。Provider poll 必须非阻塞且兼容该执行器的
+reactor。session 或旧范围读取不得同步等待同一 runtime 中已受理且仍需同一 worker 的嵌套检测；应解除依赖，
+或使用独立 runtime。`read_all` 回退会在 payload 派发给 worker 前完成 I/O。两种路由保留取消与结算差异：
+managed API 单独暴露 scope 结算，旧 Provider hook 返回业务结果，并可能在 runtime 取消时提前返回。
 借用内容不会仅因逻辑长度超过 `MimeConfig::max_buffer_size()` 而拒绝。异步 Provider route
 通过容量为 1 的范围读取 bridge 与 worker 协作：调用方 future 异步读取 Provider。旧
 `guess_from_content_async` hook 在首次轮询时检查 detector 的单请求 owned payload 上限，先预留
@@ -421,6 +426,10 @@ runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由
 `read_all` 中发现超限时返回 `MimeError::FileSystem`。旧范围采样要求长度已知且声明支持范围读取；只有不能使用范围采样时，才会在完整读取前拒绝已知超大资源。这些逻辑预算和复制的
 payload 长度不构成总进程内存上限，Provider 缓冲区和临时分配也会占用内存。runtime 关闭后，规则
 分类的同步输入仍可直接返回；需要模型推理的请求经由已关闭 runtime 失败。
+同步和异步 Provider path 都会在任何 Provider I/O 前将请求的 `max_bytes` 与 detector 单请求上限比较，并在
+`BufferLimitExceeded` 中给出精确的 `requested` 与 `limit`。所以即使文件很小，过大的参数也会在 `open`、`stat`
+或读取之前失败。异步 managed 和旧 hook 还会按请求值预留 runtime 聚合在途 payload 预算；这与逻辑采样预算和
+`read_all` 可接受 payload 上限分别核算。
 
 async content hook 与同步 content hook 一样返回 backend 原始 Magika 候选，不执行高层 MIME
 选择或媒体细化。输入受理后会按 owned payload 计入共享 runtime 聚合字节预算；即使仓库规则原本

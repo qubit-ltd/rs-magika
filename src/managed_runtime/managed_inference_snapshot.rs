@@ -32,7 +32,12 @@ pub struct ManagedInferenceSnapshot {
     pub admitted_not_started: usize,
     /// Unreleased requests whose worker participant has started but not
     /// completed. This can include time while the worker waits for a Provider
-    /// sample read to be serviced by the caller's future.
+    /// sample read to be serviced by the operation body. Managed Provider
+    /// `open`, `stat`, and session/range reads are polled by the operation
+    /// executor; the caller waits for the child outcome. Provider futures
+    /// must therefore be nonblocking and compatible with that executor's
+    /// reactor. A Provider must not synchronously wait here for nested work
+    /// that needs the same runtime's worker.
     pub worker_running: usize,
     /// Requests whose worker completed but whose resources remain retained.
     pub awaiting_release: usize,
