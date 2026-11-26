@@ -512,12 +512,24 @@ sampling; that wait can delay other requests sharing the same runtime. This is
 a shared wait and failure domain. Applications that need delay isolation can
 use independent runtimes, at the cost of an additional Magika session per
 runtime.
+Managed Provider `open`, `stat`, and session/range sample reads are polled in
+the operation body by the scope manager's executor. Legacy hooks use the
+runtime service group's executor. The caller waits for the operation outcome;
+Provider polls must be nonblocking and compatible with that executor's reactor.
+Do not make a session or legacy-range read synchronously wait for nested
+detection already accepted by the same runtime when it needs the same worker:
+release that dependency or use an independent runtime. The `read_all` fallback
+performs I/O before dispatching its owned payload to the worker. These routes
+retain their cancellation and settlement differences: managed calls expose
+scope settlement separately, whereas legacy Provider hooks return their
+business result and may return early on runtime cancellation.
 Synchronous borrowed content, reader, and local-file entry points sample on the
 caller thread, then wait synchronously when model work is needed; repository
 rules can return without model work. Borrowed content is not rejected solely
 because its logical length exceeds `MimeConfig::max_buffer_size()`. Async
 provider routes cooperate with the worker through a capacity-one range bridge;
-provider reads are awaited by the calling future. The legacy
+the operation body asynchronously services Provider reads on its executor.
+The legacy
 `guess_from_content_async` hook checks the detector's per-request owned-payload
 limit when first polled, reserves runtime request capacity and aggregate
 owned-payload byte capacity before copying the input, and runs sampling and
@@ -533,6 +545,13 @@ during `read_all` returns `MimeError::FileSystem`. These logical budgets and cop
 lengths do not cap total process memory, including provider buffers and
 transient allocations. After shutdown, ruled sync inputs can still return
 directly; requests needing model inference use the closed runtime and fail.
+Before any Provider I/O, both sync and async path APIs compare the requested
+`max_bytes` with the detector's per-request limit and report the exact
+`requested` and `limit` in `BufferLimitExceeded`. Thus an oversized parameter
+can reject a small file without calling Provider `open`, `stat`, or read. Async
+managed and legacy requests additionally reserve the requested amount against
+the runtime aggregate in-flight payload budget; that reservation is distinct
+from logical sampling and the `read_all` accepted-payload limit.
 
 The legacy content hook normally waits for its internal operation to settle;
 the legacy Provider hook normally waits for its business result. Runtime

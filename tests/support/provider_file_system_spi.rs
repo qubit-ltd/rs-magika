@@ -70,6 +70,7 @@ pub(crate) struct ProviderFileSystemSpi {
     completion_gate: Option<Arc<ProviderReadCompletionGate>>,
     interruption_gate: Option<Arc<ProviderReadCompletionGate>>,
     session_open_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    read_poll_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,6 +242,13 @@ impl AsyncProviderGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .wait_dropped
     }
+    fn mark_wait_dropped(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .wait_dropped = true;
+        self.changed.notify_all();
+    }
     pub(crate) fn release(&self) {
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.released = true;
@@ -257,6 +265,12 @@ impl AsyncProviderGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entered
+    }
+    pub(crate) fn is_released(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .released
     }
 }
 
@@ -288,6 +302,16 @@ pub(crate) struct ProviderObservations {
     pub(crate) read_bytes: AtomicUsize,
     pub(crate) range_reads: AtomicUsize,
     pub(crate) options: Mutex<Vec<ReadOptions>>,
+    pub(crate) poll_threads: Mutex<Vec<std::thread::ThreadId>>,
+}
+
+impl ProviderObservations {
+    fn record_poll(&self) {
+        self.poll_threads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(std::thread::current().id());
+    }
 }
 
 pub(crate) type SessionDropObserver = Arc<dyn Fn() -> (usize, usize) + Send + Sync>;
@@ -312,6 +336,7 @@ impl ProviderFileSystemSpi {
             completion_gate: None,
             interruption_gate: None,
             session_open_hook: None,
+            read_poll_hook: None,
         }
     }
 
@@ -378,6 +403,11 @@ impl ProviderFileSystemSpi {
 
     pub(crate) fn with_session_open_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.session_open_hook = Some(hook);
+        self
+    }
+
+    pub(crate) fn with_read_poll_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.read_poll_hook = Some(hook);
         self
     }
 
@@ -511,6 +541,8 @@ impl FileSystemSpi for ProviderFileSystemSpi {
                 observations: Arc::clone(&self.observations),
                 async_gate: self.async_gate.clone(),
                 completion_gate: self.completion_gate.clone(),
+                read_wait_pending: false,
+                read_poll_hook: self.read_poll_hook.clone(),
             }),
         ))
     }
@@ -554,6 +586,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
 
     fn stat<'a>(&'a self, request: StatRequest<'a>) -> SpiFuture<'a, FsResult<StatResponse>> {
         Box::pin(async move {
+            self.observations.record_poll();
             if let Some(gate) = self
                 .async_gate
                 .as_ref()
@@ -567,6 +600,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
 
     fn open_reader<'a>(&'a self, request: OpenReaderRequest<'a>) -> SpiFuture<'a, FsResult<OpenedAsyncReader>> {
         Box::pin(async move {
+            self.observations.record_poll();
             if let Some(gate) = self
                 .async_gate
                 .as_ref()
@@ -586,6 +620,8 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
                     observations: Arc::clone(&self.observations),
                     async_gate: self.async_gate.clone(),
                     completion_gate: self.completion_gate.clone(),
+                    read_wait_pending: false,
+                    read_poll_hook: self.read_poll_hook.clone(),
                 }),
             ))
         })
@@ -596,6 +632,7 @@ impl AsyncFileSystemSpi for ProviderFileSystemSpi {
         request: OpenReaderRequest<'a>,
     ) -> SpiFuture<'a, FsResult<qubit_fs::spi::OpenedAsyncRandomAccessReader>> {
         Box::pin(async move {
+            self.observations.record_poll();
             if let Some(gate) = self
                 .async_gate
                 .as_ref()
@@ -720,6 +757,7 @@ impl qubit_fs::spi::AsyncRandomAccessReadSession for ProviderSession {
         output: &'a mut [u8],
     ) -> SpiFuture<'a, FsResult<usize>> {
         Box::pin(async move {
+            self.as_ref().get_ref().observations.record_poll();
             if let Some(gate) = self
                 .as_ref()
                 .get_ref()
@@ -743,6 +781,18 @@ struct ProviderReader {
     observations: Arc<ProviderObservations>,
     async_gate: Option<Arc<AsyncProviderGate>>,
     completion_gate: Option<Arc<ProviderReadCompletionGate>>,
+    read_wait_pending: bool,
+    read_poll_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Drop for ProviderReader {
+    fn drop(&mut self) {
+        if self.read_wait_pending {
+            if let Some(gate) = &self.async_gate {
+                gate.mark_wait_dropped();
+            }
+        }
+    }
 }
 
 impl ProviderReader {
@@ -786,13 +836,20 @@ impl AsyncInput for ProviderReader {
         index: usize,
         count: usize,
     ) -> std::task::Poll<io::Result<usize>> {
+        self.observations.record_poll();
+        if let Some(hook) = &self.read_poll_hook {
+            hook();
+        }
         if let Some(gate) = self
             .async_gate
             .as_ref()
             .filter(|gate| gate.point == AsyncProviderGatePoint::Read)
-            && gate.poll_wait(cx).is_pending()
         {
-            return std::task::Poll::Pending;
+            if gate.poll_wait(cx).is_pending() {
+                self.read_wait_pending = true;
+                return std::task::Poll::Pending;
+            }
+            self.read_wait_pending = false;
         }
         std::task::Poll::Ready(self.read_bytes(&mut output[index..index + count]))
     }

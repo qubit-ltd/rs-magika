@@ -69,6 +69,120 @@ fn path(value: &str) -> Path {
     Path::parse(value).expect("test path should be valid")
 }
 
+#[test]
+fn test_provider_executor_polls_managed_and_legacy_routes() {
+    for managed in [true, false] {
+        for read_all in [false, true] {
+            let outer_thread = std::thread::current().id();
+            let mut options = ManagerOptions::default();
+            options.async_executor.worker_count = 1;
+            let supervisor = OperationManager::new(options).unwrap();
+            let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
+            let config = qubit_mime::MimeConfig::default();
+            let runtime = Arc::new(ManagedInferenceRuntime::new(supervisor.clone(), config.max_buffer_size()).unwrap());
+            let detector = Arc::new(
+                qubit_magika::MagikaMimeDetector::builder()
+                    .mime_config(config)
+                    .managed_runtime(Arc::clone(&runtime))
+                    .build()
+                    .unwrap(),
+            );
+            let read_snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let provider = if read_all {
+                let read_snapshots = Arc::clone(&read_snapshots);
+                let read_runtime = Arc::clone(&runtime);
+                ProviderFileSystemSpi::new(PYTHON.to_vec())
+                    .with_range()
+                    .unknown_length()
+                    .with_read_poll_hook(Arc::new(move || {
+                        let snapshot = read_runtime.snapshot();
+                        read_snapshots
+                            .lock()
+                            .unwrap()
+                            .push((snapshot.worker_running, snapshot.admitted_not_started));
+                    }))
+            } else {
+                ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access()
+            };
+            let observations = provider.observations();
+            let file_system = provider.async_file_system();
+            let body_detector = Arc::clone(&detector);
+            let (executor_tx, executor_rx) = std::sync::mpsc::channel();
+            let mut operation = service
+                .as_async()
+                .try_submit(OperationOptions::default(), move |scope| async move {
+                    executor_tx
+                        .send(std::thread::current().id())
+                        .expect("test receiver remains alive");
+                    if managed {
+                        body_detector
+                            .detect_async_provider_path_managed(&scope, &file_system, &path("/executor.py"), 4096)
+                            .await
+                    } else {
+                        MimeDetector::detect_async_path(
+                            &*body_detector,
+                            &file_system,
+                            &path("/executor.py"),
+                            4096,
+                            MimeDetectionPolicy::VerifyContent,
+                        )
+                        .await
+                    }
+                })
+                .unwrap();
+            assert!(matches!(
+                run_ready(operation.wait_outcome()).unwrap(),
+                qubit_operation::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/x-python"
+            ));
+            assert!(run_ready(operation.wait_settlement()).all_released());
+            let operation_executor = executor_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("operation body should report its executor");
+            let poll_threads = observations.poll_threads.lock().unwrap();
+            assert!(!poll_threads.is_empty(), "Provider futures should be polled");
+            assert!(
+                poll_threads.iter().all(|thread| *thread == operation_executor),
+                "Provider polls must run on the operation-body executor: managed={managed}, read_all={read_all}, body={operation_executor:?}, polls={poll_threads:?}"
+            );
+            assert_ne!(operation_executor, outer_thread, "the executor must differ from the caller waiting for outcome");
+            assert!(
+                poll_threads.iter().all(|thread| *thread != outer_thread),
+                "Provider polling must not run on the outer waiting thread"
+            );
+            drop(poll_threads);
+            if read_all {
+                let observations = observations;
+                assert!(observations.stats.load(Ordering::SeqCst) > 0);
+                assert_eq!(1, observations.opens.load(Ordering::SeqCst));
+                assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+                assert!(observations.read_bytes.load(Ordering::SeqCst) > 0);
+                assert_single_full_read_open(&observations);
+                let snapshots = read_snapshots.lock().unwrap();
+                assert!(!snapshots.is_empty(), "read_all Provider read poll should be observed");
+                assert!(
+                    snapshots.iter().all(|(running, queued)| *running == 0 && *queued == 1),
+                    "read_all Provider I/O is polled while its runtime reservation is admitted but no worker input is running: {snapshots:?}"
+                );
+            }
+            assert!(detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30)).worker_stopped);
+            assert_eq!(
+                0,
+                service
+                    .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+                    .snapshot
+                    .active_operations
+            );
+            assert_eq!(
+                0,
+                supervisor
+                    .shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(5))
+                    .snapshot
+                    .active_operations
+            );
+        }
+    }
+}
+
 async fn detect_managed_provider_child(
     scope: &OperationScope,
     detector: Arc<qubit_magika::MagikaMimeDetector>,
@@ -1083,15 +1197,29 @@ fn test_slow_provider_mixed_latency() {
 }
 
 #[test]
-fn test_shared_runtime_provider_head_of_line_cancellation() {
+fn test_shared_runtime_provider_session_head_of_line_cancellation() {
+    test_shared_runtime_provider_head_of_line_cancellation_for_route(true);
+}
+
+#[test]
+fn test_shared_runtime_provider_legacy_range_head_of_line_cancellation() {
+    test_shared_runtime_provider_head_of_line_cancellation_for_route(false);
+}
+
+fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: bool) {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
     let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
-    let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
-        .with_random_access()
-        .with_async_gate(Arc::clone(&gate));
+    let provider = if session {
+        ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access()
+    } else {
+        ProviderFileSystemSpi::new(PYTHON.to_vec())
+            .with_range()
+            .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation)
+    }
+    .with_async_gate(Arc::clone(&gate));
     let file_system = provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut first = service
@@ -1131,6 +1259,7 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
     gate.wait_until_wait_dropped(Duration::from_secs(5));
 
     let bytes = PYTHON.to_vec();
+    let second_bytes_len = bytes.len();
     assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
     let second_detector = Arc::clone(&detector);
     let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
@@ -1160,6 +1289,13 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
             run_ready(second.wait_outcome())
         );
     }
+    assert!(!gate.is_released(), "the first Provider read remains gated after second admission");
+    let second_admitted_snapshot = detector.runtime_snapshot();
+    assert_eq!(
+        retained_snapshot.reserved_bytes + second_bytes_len,
+        second_admitted_snapshot.reserved_bytes,
+        "the queued second request should hold its own runtime byte reservation: {second_admitted_snapshot:?}"
+    );
     // The second operation must still be waiting on the shared worker before
     // releasing the provider read.
     let mut second_result = Box::pin(second.wait_outcome());
@@ -1178,6 +1314,12 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
     ));
     assert!(second_settlement.all_released());
+    let after_second_release = detector.runtime_snapshot();
+    assert_eq!(
+        retained_snapshot.reserved_bytes,
+        after_second_release.reserved_bytes,
+        "the second request's runtime byte reservation should be reclaimed while the cancelled first request remains retained: {after_second_release:?}"
+    );
     if first_settlement.is_none() {
         first_settlement = run_until(first_observer.wait_settlement(), Duration::from_secs(2)).ok();
     }
@@ -1208,6 +1350,12 @@ fn test_shared_runtime_provider_head_of_line_cancellation() {
         shutdown.worker_stopped,
         "the inference worker should stop even while recovery retains the Provider request: {shutdown:?}"
     );
+    assert!(gate.is_entered(), "the selected Provider read route must enter its controlled gate");
+    assert!(
+        gate.is_wait_dropped(),
+        "stop must be observable independently of Provider resource settlement"
+    );
+    assert!(gate.is_released(), "controlled Provider I/O is released before the second request settles");
 }
 
 #[test]
@@ -1215,13 +1363,16 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
-    let file_system = ProviderFileSystemSpi::new(PYTHON.to_vec())
-        .with_random_access()
-        .async_file_system();
+    let session_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let session_observations = session_provider.observations();
+    let file_system = session_provider.async_file_system();
     let fallback_file_system = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .without_stat()
         .random_open_error(qubit_fs::error::FsErrorKind::UnsupportedOperation)
         .async_file_system();
+    let oversized_provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access();
+    let oversized_observations = oversized_provider.observations();
+    let oversized_file_system = oversized_provider.async_file_system();
     let body_detector = Arc::clone(&detector);
     let mut handle = service
         .as_async()
@@ -1229,12 +1380,22 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
             let rejected = body_detector
                 .detect_async_provider_path_managed(
                     &scope,
-                    &file_system,
+                    &oversized_file_system,
                     &path("/managed/oversize.py"),
                     body_detector.max_buffer_size() + 1,
                 )
                 .await;
-            assert!(rejected.is_err());
+            assert!(matches!(
+                rejected,
+                Err(MimeError::BufferLimitExceeded { requested, limit })
+                    if requested == body_detector.max_buffer_size() + 1
+                        && limit == body_detector.max_buffer_size()
+            ));
+            assert_eq!(0, oversized_observations.opens.load(Ordering::SeqCst));
+            assert_eq!(0, oversized_observations.random_opens.load(Ordering::SeqCst));
+            assert_eq!(0, oversized_observations.stats.load(Ordering::SeqCst));
+            assert_eq!(0, oversized_observations.read_bytes.load(Ordering::SeqCst));
+            assert_eq!(0, oversized_observations.random_reads.load(Ordering::SeqCst));
             let session_result = body_detector
                 .detect_async_provider_path_managed(&scope, &file_system, &path("/managed/python.py"), 4096)
                 .await
@@ -1252,6 +1413,8 @@ fn test_managed_provider_session_api_classifies_and_settles_worker() {
             if session_mime == "text/x-python" && fallback_mime == "text/x-python"
     ));
     assert!(run_ready(handle.wait_settlement()).all_released());
+    assert!(session_observations.random_opens.load(Ordering::SeqCst) > 0);
+    assert!(session_observations.random_reads.load(Ordering::SeqCst) > 0);
     let report = detector.shutdown_blocking(ShutdownMode::Drain, Duration::from_secs(30));
     assert!(report.worker_stopped);
 }
@@ -4106,28 +4269,50 @@ fn test_provider_path_async_without_range_rejects_known_oversize() {
 #[test]
 fn test_provider_path_rejects_requested_limit_above_detector_limit() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range();
+    let observations = provider.observations();
+    let requested = detector().max_buffer_size() + 1;
     let error = detector()
         .detect_path(
             &provider.file_system(),
             &path("/script.py"),
-            usize::MAX,
+            requested,
             MimeDetectionPolicy::VerifyContent,
         )
         .expect_err("requested limit above detector limit should fail");
-    assert!(matches!(error, MimeError::BufferLimitExceeded { .. }));
+    assert!(matches!(
+        error,
+        MimeError::BufferLimitExceeded { requested: actual, limit }
+            if actual == requested && limit == detector().max_buffer_size()
+    ));
+    assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_reads.load(Ordering::SeqCst));
 }
 
 #[test]
 fn test_provider_async_path_rejects_requested_limit_above_detector_limit() {
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec()).with_range();
+    let observations = provider.observations();
+    let requested = detector().max_buffer_size() + 1;
     let error = run_ready(detector().detect_async_path(
         &provider.async_file_system(),
         &path("/script.py"),
-        usize::MAX,
+        requested,
         MimeDetectionPolicy::VerifyContent,
     ))
     .expect_err("requested limit above detector limit should fail");
-    assert!(matches!(error, MimeError::BufferLimitExceeded { .. }));
+    assert!(matches!(
+        error,
+        MimeError::BufferLimitExceeded { requested: actual, limit }
+            if actual == requested && limit == detector().max_buffer_size()
+    ));
+    assert_eq!(0, observations.opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_opens.load(Ordering::SeqCst));
+    assert_eq!(0, observations.stats.load(Ordering::SeqCst));
+    assert_eq!(0, observations.read_bytes.load(Ordering::SeqCst));
+    assert_eq!(0, observations.random_reads.load(Ordering::SeqCst));
 }
 
 #[test]

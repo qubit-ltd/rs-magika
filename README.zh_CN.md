@@ -118,8 +118,12 @@ Session；builder 会校验其字节预算不小于 detector 配置的 buffer li
 `MagikaMimeDetector::detect_async_provider_path_managed` 或 `detect_bytes_managed` 传入
 `OperationScope`。受管调用会将工作关联到该 scope，使其报告能独立跟踪资源释放和业务结果。
 应用启动时创建 runtime 和 detector，每个受管请求传入 scope，并在应用关闭时 drain runtime。
-Provider path 的 session 和旧范围读取路由由 worker 发出采样请求，并等待调用方 future 执行读取；缓慢的
+Provider path 的 session 和旧范围读取路由由 worker 发出采样请求，并等待 operation body 执行读取；缓慢的
 范围读取可能占用共享 worker 并延迟其他请求。`read_all` 回退则先读取完整内容，再把拥有的缓冲区提交给 worker。
+Managed 调用由 scope manager 的执行器在 operation body 中轮询 Provider `open`、`stat` 和样本读取；旧 hook
+使用 runtime 服务组执行器，调用方等待 operation outcome。Provider poll 必须非阻塞并兼容该执行器的 reactor。
+session 或旧范围读取不得同步等待同一 runtime 中已受理且仍需该 worker 的嵌套检测；应解除依赖或使用独立 runtime。
+`read_all` 的 I/O 在派发给 worker 之前完成。
 丢弃请求会停止本地轮询；若无法观察 native 或远端 I/O 完成状态，对应的容量预留会继续保留。详见
 [Provider 采样与 runtime 说明](doc/user_guide.zh_CN.md#进阶用法)。
 检测 future 返回的是业务结果；scope observer 会单独报告资源结算。有界等待可能返回 `Pending(snapshot)`，
@@ -227,6 +231,11 @@ detector 一次并共享（例如使用 `Arc`）；共享 runtime 上的推理�
 在 builder 或 Provider 上设置分类器不会启用 provider-path media refinement。高层输入还须
 匹配已配置的 MIME 映射和 precise-detection 设置，才会进行细化。
 
+Provider `max_bytes` 会在任何 Provider I/O 前与 detector 单请求上限比较；即使文件很小，参数过大也会
+得到 `BufferLimitExceeded { requested, limit }`，且不会调用 `open`、`stat` 或读取。该值限制累计逻辑采样量和
+`read_all` 可接受的 payload；异步请求还会按该值占用 runtime 聚合在途 payload 预留。这些限制不等于进程总内存、
+Provider 缓冲区或网络流量上限。
+
 Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求预算。文件系统支持随机
 读取会话时，Magika 只打开一次，并通过调用方缓冲区从同一已打开对象读取各个样本。打开时
 观察到的长度限定可读偏移，但不是内容快照。若打开返回 `UnsupportedOperation` 或
@@ -240,8 +249,8 @@ Provider path 检测会把 `max_bytes` 作为 Magika 字节采样的累计请求
 `Unknown` 或 `Undefined` 时结果为
 `Ok(None)`，随后由选定的 `MimeDetectionPolicy` 统一处理文件名回退。
 Provider 原生异步 I/O 由调用方 future 等待；若 Provider 一直不完成，future 也可能一直
-Pending。对于 session 和旧范围读取路由，worker 会在采样期间请求样本，并等待调用方 future
-完成每次读取；`read_all` 则先读取完整内容，再提交拥有的缓冲区。旧 hooks 不提供 parent-scope
+Pending。对于 session 和旧范围读取路由，worker 会在采样期间请求样本，并由 operation body 在执行器上
+异步服务每次读取；`read_all` 则先读取完整内容，再提交拥有的缓冲区。旧 hooks 不提供 parent-scope
 生命周期观察；需要 scope 跟踪时使用 managed API。
 
 

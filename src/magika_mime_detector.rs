@@ -61,9 +61,15 @@ use crate::managed_runtime::request_admission_handoff::RequestAdmissionHandoff;
 /// session is initialized. Applications should create the detector once and
 /// share it, for example through [`std::sync::Arc`]. One worker owns the Magika
 /// session and serializes model inference. Synchronous MIME methods wait for
-/// worker results; async provider methods service bounded worker range requests
-/// without blocking their executor. The operation-aware provider method
-/// additionally registers sampling and inference in an explicit scope.
+/// worker results. Async provider I/O runs inside an operation body: managed
+/// calls use the caller's scope manager, while legacy hooks use this detector's
+/// runtime service group. The operation body polls Provider `open`, `stat`,
+/// and sample/read operations; the calling future waits for the operation
+/// outcome. Provider futures must be nonblocking and compatible with the
+/// operation executor's reactor. Session and legacy-range reads service
+/// bounded worker requests, while `read_all` completes before input dispatch
+/// to the worker. The operation-aware provider method additionally registers
+/// sampling and inference in an explicit scope.
 ///
 /// # Examples
 ///
@@ -197,6 +203,14 @@ impl MagikaMimeDetector {
     /// Before the first provider call (`open`, `stat`, `read_all`, `length`, or
     /// a range read), the runtime reserves request capacity and the
     /// `max_bytes` accounting budget and commits the optional scope child.
+    /// Provider `open`, `stat`, and session/range reads are polled by the
+    /// operation body on the scope manager's executor; this future waits for
+    /// the child outcome. Provider polling must be nonblocking and compatible
+    /// with that executor's reactor. A session or legacy-range read must not
+    /// synchronously wait for nested detection already accepted by the same
+    /// runtime when that detection needs the worker; release the dependency or
+    /// use an independent runtime. The `read_all` fallback performs its I/O
+    /// before dispatching input to the worker.
     /// Closed, full, or already-cancelled requests are rejected before
     /// provider I/O. Admission capacity is a permission/accounting reservation;
     /// it does not prove provider completion or resource release. The byte
@@ -252,8 +266,10 @@ impl MagikaMimeDetector {
     ///   may probe one extra byte to detect overflow, including when range
     ///   capability is advertised but length is unknown or unavailable.
     ///   Overflow found during `read_all` is a filesystem error. This value is
-    ///   checked against this detector's per-request limit and the shared
-    ///   runtime aggregate budget; it does not cap total process memory or
+    ///   checked against this detector's per-request limit before any Provider
+    ///   I/O, then reserved against the shared runtime aggregate budget. Thus
+    ///   even a small file is rejected before `open` or `stat` when this value
+    ///   exceeds the detector limit. It does not cap total process memory or
     ///   provider-owned buffering.
     ///
     /// # Returns
@@ -906,6 +922,11 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// * `path` - File path to inspect.
     /// * `max_bytes` - Maximum cumulative logical sampling bytes; for a
     ///   `read_all` fallback, the maximum accepted payload size.
+    ///   This request value is checked against the detector's per-request
+    ///   limit before Provider I/O, so a small file can still fail before
+    ///   `open` or `stat` when `max_bytes` is too large. The asynchronous path
+    ///   also reserves this value against the runtime's aggregate in-flight
+    ///   payload budget.
     ///
     /// # Errors
     ///
@@ -913,7 +934,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// inference fails. `max_bytes` bounds cumulative logical sampling reads
     /// and the accepted payload on the `read_all` fallback; it does not cap
     /// provider/network traffic or total
-    /// process memory.
+    /// process memory. This synchronous hook checks `max_bytes` against the
+    /// detector limit before calling Provider `open` or `stat`; the exact
+    /// requested value and limit appear in `BufferLimitExceeded`.
     fn guess_from_provider_path(
         &self,
         file_system: &FileSystem,
@@ -978,8 +1001,15 @@ impl MimeDetectorBackend for MagikaMimeDetector {
 
     /// Detects MIME candidates from an asynchronous filesystem path using this
     /// detector's shared inference runtime. This legacy MIME hook has no
-    /// caller-provided operation scope; it waits for the submitted internal
-    /// operation's business outcome on ordinary completion. Runtime
+    /// caller-provided operation scope; its runtime service group polls
+    /// Provider `open`, `stat`, and sample/read operations in the operation
+    /// body, and the calling future waits for its business outcome on ordinary
+    /// completion. Provider futures must be nonblocking and compatible with
+    /// the operation executor's reactor. A session or legacy-range read must
+    /// not synchronously wait for nested detection already accepted by the
+    /// same runtime when that detection needs the worker; release the
+    /// dependency or use an independent runtime. The `read_all` fallback
+    /// performs I/O before input dispatch to the worker. Runtime
     /// cancellation may return its stop outcome before provider I/O completion
     /// is known or resources are released. This legacy hook has no parent
     /// operation scope and exposes no settlement observer.
@@ -1004,7 +1034,10 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// * `max_bytes` - Maximum cumulative logical sampling bytes. A `read_all`
     ///   fallback uses it as the accepted-payload limit and may probe one extra
     ///   byte. This does not bound provider/network traffic or total process
-    ///   memory.
+    ///   memory. The value is checked against this detector's per-request
+    ///   limit before Provider I/O, and a `BufferLimitExceeded` reports the
+    ///   exact requested value and limit. The request also reserves this value
+    ///   against the runtime's aggregate in-flight payload budget.
     ///
     /// # Errors
     ///

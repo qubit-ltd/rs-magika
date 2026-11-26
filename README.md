@@ -131,7 +131,14 @@ For provider paths, session and legacy-range routes have the worker issue sample
 requests and wait for the caller's future to perform each read. A slow range
 read can therefore occupy the shared worker and delay other requests. The
 `read_all` fallback reads the content before submitting the owned buffer to the
-worker. Dropping a request stops local polling; when native or remote I/O
+worker. Managed calls run Provider `open`, `stat`, and sample reads in the
+operation body on the scope manager's executor; legacy hooks use the runtime's
+service-group executor. The caller waits for the operation outcome. Provider
+polls must be nonblocking and compatible with that executor's reactor. A
+session or legacy-range Provider read must not wait synchronously for nested
+detection already accepted by the same runtime when it needs that runtime's
+worker; release that dependency or use an independent runtime. `read_all` I/O
+finishes before worker dispatch. Dropping a request stops local polling; when native or remote I/O
 completion is unobservable, its capacity reservation remains in place. See the
 [provider sampling and runtime guide](doc/user_guide.md#advanced-usage).
 The returned detection result is the business outcome. The scope observer
@@ -217,6 +224,14 @@ capacity remains reserved. The settlement observer can still reach a terminal
 `Ready(report)` with `all_released() == false`. See the
 [managed lifecycle guide](doc/user_guide.md#migration-guide) for this boundary,
 worker error reporting, and shutdown timeouts.
+
+Provider `max_bytes` is checked against the detector's per-request limit
+before any Provider I/O, even when the actual file is small. A larger request
+returns `BufferLimitExceeded { requested, limit }` without calling `open`,
+`stat`, or reading. The value bounds cumulative logical sampling and the
+accepted `read_all` payload; async requests also reserve it against the
+runtime's aggregate in-flight payload budget. These limits do not bound total
+process memory, Provider buffering, or network traffic.
 
 Unknown and undefined Magika predictions have no MIME candidate and produce
 `Ok(None)`, allowing the selected `MimeDetectionPolicy` to decide filename
