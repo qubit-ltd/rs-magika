@@ -35,7 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - macos-14
+          - macos-15
           - windows-latest
     defaults:
       run:
