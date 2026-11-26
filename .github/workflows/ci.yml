@@ -26,6 +26,40 @@ jobs:
       id-token: write
     uses: qubit-ltd/rs-infra-ci/.github/workflows/github-ci.yml@main
 
+  platform-smoke:
+    name: Native platform smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-14
+          - windows-latest
+    defaults:
+      run:
+        working-directory: sources/rs-magika
+        shell: bash
+    steps:
+      - name: Checkout rs-magika under sources
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: sources/rs-magika
+      - name: Prepare pinned local path dependencies
+        run: .infra/lib/prepare-local-path-dependencies.sh
+      - name: Verify pinned local path dependencies
+        run: .infra/lib/check-locked-local-path-dependencies.sh
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal
+      - name: Detect real files with Magika
+        run: cargo +1.94.0 test --locked --test tests test_magika_detector_detect_file_
+      - name: Refine only regular local files
+        run: cargo +1.94.0 test --locked --test tests test_local_file_refinement_applies_only_to_regular_files
+      - name: Check Unix special paths
+        if: runner.os == 'macOS'
+        run: "cargo +1.94.0 test --locked --test tests local_file_type_tests::"
+
   dynamic-loader:
     name: Dynamic ONNX Runtime consumer
     runs-on: ubuntu-latest
