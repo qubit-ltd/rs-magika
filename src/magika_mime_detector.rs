@@ -57,18 +57,19 @@ use crate::managed_runtime::request_admission_handoff::RequestAdmissionHandoff;
 
 /// MIME detector backed by Google's Magika model.
 ///
-/// Creating a new runtime initializes Magika's embedded model and ONNX Runtime
-/// session synchronously before construction returns. When a runtime is
-/// supplied through the builder or provider, it is reused as-is and no second
-/// session is initialized. Applications should create the detector once and
-/// share it, for example through [`std::sync::Arc`]. One worker owns the Magika
-/// session and serializes model inference. Synchronous MIME methods wait for
-/// worker results. Async provider I/O runs inside an operation body: managed
-/// calls use the caller's scope manager, while legacy hooks use this detector's
-/// runtime service group. The operation body polls Provider `open`, `stat`,
-/// and sample/read operations; the calling future waits for the operation
-/// outcome. Provider futures must be nonblocking and compatible with the
-/// operation executor's reactor. Session and legacy-range reads service
+/// Synchronous constructors wait for the worker to initialize Magika's
+/// embedded model and ONNX Runtime session. The builder's
+/// [`build_async()`](crate::MagikaMimeDetectorBuilder::build_async) awaits that
+/// worker startup. The builder or provider can also reuse a supplied runtime
+/// without starting another session. Applications should create the detector
+/// once and share it, for example through [`std::sync::Arc`]. One worker owns
+/// the Magika session and serializes model inference. Synchronous MIME methods
+/// wait for worker results. Async provider I/O runs inside an operation body:
+/// managed calls use the caller's scope manager, while legacy hooks use this
+/// detector's runtime service group. The operation body polls Provider `open`,
+/// `stat`, and sample/read operations; the calling future waits for the
+/// operation outcome. Provider futures must be nonblocking and compatible with
+/// the operation executor's reactor. Session and legacy-range reads service
 /// bounded worker requests, while `read_all` completes before input dispatch
 /// to the worker. The operation-aware provider method additionally registers
 /// sampling and inference in an explicit scope.

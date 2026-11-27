@@ -94,7 +94,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 ```
 
 直接调用 `MagikaMimeDetector::new()` 或 `from_mime_config(...)` 会新建并初始化 runtime，
-初始化失败返回 `MimeError`。Provider 的 `create_configured(&MimeConfig)` 则返回
+初始化失败返回 `MimeError`。异步服务可调用
+`MagikaMimeDetector::builder().build_async().await`，等待模型会话就绪时让出执行器线程。Provider 的 `create_configured(&MimeConfig)` 则返回
 `ProviderFailure<MimeError>`，并保留原始错误来源。通过
 `MagikaMimeDetectorBuilder::managed_runtime` 或
 `MagikaMimeDetectorProvider::managed_runtime` 注入已有 runtime 时会直接复用，不会再初始化
@@ -201,8 +202,9 @@ Inventory 只提交未配置的 Provider。若要共享应用管理的 runtime�
 `MagikaMimeDetectorProvider::new().managed_runtime(...)`，并在 detector 使用期间保留
 runtime；[Provider runtime 示例](doc/user_guide.zh_CN.md#共享应用管理的推理-runtime)说明了
 注册方式及共享预算和关闭行为。
-构造过程新建 runtime 时，会同步等待 worker 初始化内嵌 Magika 模型和 ONNX Runtime
-Session；注入已有 runtime 时则直接复用，并校验配置的字节预算。应用应在启动阶段构造
+同步构造器新建 runtime 时，会等待 worker 初始化内嵌的 Magika 模型和 ONNX Runtime
+会话。`build_async()` 异步等待会话就绪。两种方式都可复用注入的 runtime，并校验其字节预算。
+应用应在启动阶段构造
 detector 一次并共享（例如使用 `Arc`）；共享 runtime 上的推理调用会在内部串行执行。
 
 同步借用内容、reader 和本地文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待。

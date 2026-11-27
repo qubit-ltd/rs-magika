@@ -24,8 +24,9 @@
 如果 inventory 已经注册了 Magika provider，不要再向同一个 registry 重复注册。
 
 仅按文件名检测时使用仓库中的文件名规则；按内容、reader 或本地文件检测时使用
-Magika 推理。创建新的 runtime 会在构造返回前同步初始化内嵌的 Magika 模型和 ONNX Runtime
-session。`MagikaMimeDetector::new()` 和 `from_mime_config(...)` 会创建新的 runtime；通过
+Magika 推理。`MagikaMimeDetector::new()` 和 `from_mime_config(...)` 会新建 runtime，并同步等待
+模型和 ONNX Runtime 会话就绪。异步服务可用 `MagikaMimeDetectorBuilder::build_async()` 异步等待
+worker 完成初始化。通过
 `MagikaMimeDetectorBuilder::managed_runtime` 或 `MagikaMimeDetectorProvider::managed_runtime`
 注入已有 runtime 时会直接复用，不会再初始化另一个 session。同一个 detector 内部会串行化推理调用，
 因此可以用 `Arc` 在应用中共享它。
@@ -572,6 +573,11 @@ Pending I/O 操作，以及输入析构在清理期间 panic。单凭该计数�
 scope 中其他 operation 的资源。`ManagedInferenceShutdownReport` 的 `admission` 用于服务组聚合计数，
 `worker_stopped` 只表示 worker 已 join。
 
+异步服务如果直接创建检测器，可以在启动或重新加载模型时调用
+`MagikaMimeDetector::builder().build_async().await`。该调用异步等待 worker 初始化 Magika
+会话，等待模型期间会让出执行器线程。配置和初始化错误与 `build()` 相同。若在初始化期间丢弃
+future，新 worker 的请求队列会关闭。已经开始的原生初始化可能在 worker 退出前完成。
+
 真实应用应让 service group、detector 和 supervisor 覆盖整个应用生命周期；停止接收新请求后再调用
 关闭函数。`max_bytes` 限制累计逻辑采样读取，也限制 `read_all` 可接受的载荷。完整读取可能额外探测
 1 字节；即使声明支持范围读取，长度未知或不可用时也会进入完整读取，在其中发现超限时返回
@@ -581,9 +587,7 @@ runtime 会先预留容量和字节预算，再提交可选的 scope 子操作�
 `open`、`stat`、`read_all`、`length` 或范围读取。runtime 已关闭、容量已满或 scope
 已取消时，会在 Provider 调用前拒绝请求。`read_all` 回退会把已读缓冲区交给 async dispatch 路径，
 不会主动再克隆一份完整数据。该路径在将输入派发给 worker 前，把拥有数据的 `Vec` 转为 `Box<[u8]>`；
-若需收缩未使用容量，`into_boxed_slice` 仍可能重新分配，因此不能据此承诺零分配。运行时构造时会创建 session-owning
-worker 并等待 Magika Session 初始化完成，因此
-当前没有额外的 `prepare()` API；builder 的 `build()` 就是准备阶段。采样工作在 worker
+若需收缩未使用容量，`into_boxed_slice` 仍可能重新分配，因此不能据此承诺零分配。采样工作在 worker
 上运行，async operation future 负责服务范围读取，不会阻塞执行器线程。
 
 旧版 `MimeDetector` hooks 仍可供不管理 operation scope 的调用方使用。当前上游 trait 不
@@ -673,8 +677,8 @@ provider 名称 `magika`、`magika-mime-detector` 和 `magikamimedetector` 仍�
 
 - Provider 自动发现需要启用 `inventory` feature；默认构建仍使用显式注册。
   Inventory 仅提交未配置分类器的 Provider。
-- 创建 runtime 会同步初始化模型和 ONNX Runtime session。直接构造器会新建 runtime；builder 或
-  Provider 注入已有 runtime 时会直接复用。应创建并共享 detector，不要为每个输入重复创建。
+- 同步构造器会等待模型和 ONNX Runtime 会话就绪。异步启动代码可用 `build_async()` 等待 worker。
+  builder 和 Provider 都可复用注入的 runtime。应用应创建一个检测器，供多个请求共享。
 - 同一个 detector 上的推理会在内部串行执行。
 - 旧 `MimeDetector` provider hooks 不提供 parent-scope 生命周期观察；managed provider API
   可以把接纳、子操作结果和资源释放状态关联到请求 scope，但仍受上文 Provider 完成观察限制。

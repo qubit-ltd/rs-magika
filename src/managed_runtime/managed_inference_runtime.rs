@@ -17,6 +17,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 use std::task::Context;
 use std::task::Poll;
+use std::thread::JoinHandle;
 
 use magika::AsyncInput;
 use magika::Error as MagikaError;
@@ -63,6 +64,12 @@ use crate::magika_mime_detector::map_magika_error;
 mod worker_state;
 
 use self::worker_state::WorkerState;
+
+#[path = "internal/worker_readiness.rs"]
+mod worker_readiness;
+
+use self::worker_readiness::WorkerReadiness;
+use self::worker_readiness::WorkerReadySignal;
 
 #[path = "internal/worker_loop.rs"]
 mod worker_loop;
@@ -156,6 +163,19 @@ impl std::fmt::Debug for ManagedInferenceRuntime {
     }
 }
 
+/// Owns a worker during startup. Dropping it disconnects the job queue
+/// without waiting for native session initialization to finish.
+struct StartingWorker {
+    /// Queue sender that keeps the worker alive after it initializes.
+    sender: SyncSender<Job>,
+    /// Handle for the session-owning thread.
+    handle: JoinHandle<()>,
+    /// Admission state shared with the worker.
+    admission_gate: Arc<Mutex<AdmissionGate>>,
+    /// Tasks whose resources have not yet been released.
+    tasks: Arc<Mutex<Vec<Arc<TaskState>>>>,
+}
+
 impl ManagedInferenceRuntime {
     /// Reads independent diagnostic facts for all requests sharing this
     /// runtime.
@@ -220,28 +240,69 @@ impl ManagedInferenceRuntime {
     /// Returns an error for a zero byte limit, failure to create a service
     /// group from `manager`, worker startup, or Magika session initialization.
     pub fn new(manager: OperationManager, max_in_flight_bytes: usize) -> MimeResult<Self> {
+        let (ready, signal) = WorkerReadiness::pair();
+        let worker = Self::start_worker(max_in_flight_bytes, signal)?;
+        ready.wait_blocking()?;
+        Self::finish_startup(manager, max_in_flight_bytes, worker)
+    }
+
+    /// Starts the worker and waits asynchronously for its session.
+    ///
+    /// # Parameters
+    ///
+    /// * `manager` - Application manager used to create the runtime group.
+    /// * `max_in_flight_bytes` - Aggregate payload limit for the runtime.
+    ///
+    /// # Returns
+    ///
+    /// A runtime with a ready Magika session on its worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same startup errors as [`Self::new`].
+    pub(crate) async fn new_async(manager: OperationManager, max_in_flight_bytes: usize) -> MimeResult<Self> {
+        let (ready, signal) = WorkerReadiness::pair();
+        let worker = Self::start_worker(max_in_flight_bytes, signal)?;
+        ready.wait_async().await?;
+        Self::finish_startup(manager, max_in_flight_bytes, worker)
+    }
+
+    /// Spawns the worker and transfers the readiness signal to it.
+    ///
+    /// # Parameters
+    ///
+    /// * `max_in_flight_bytes` - Aggregate payload limit for the runtime.
+    /// * `ready` - Signal for the worker to publish the session result.
+    ///
+    /// # Returns
+    ///
+    /// The worker's queue sender, handle, and shared request state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error if the limit is zero or the thread cannot start.
+    fn start_worker(max_in_flight_bytes: usize, ready: WorkerReadySignal) -> MimeResult<StartingWorker> {
         if max_in_flight_bytes == 0 {
             return Err(MimeError::detector_backend(
                 "magika",
                 "runtime byte budget must be nonzero",
             ));
         }
-        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let (sender, receiver): (SyncSender<Job>, mpsc::Receiver<Job>) = mpsc::sync_channel(SERVICE_CAPACITY);
         let admission_gate = Arc::new(Mutex::new(AdmissionGate::new()));
         let worker_admission_gate = Arc::clone(&admission_gate);
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let worker_tasks = Arc::clone(&tasks);
-        let worker = match std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("magika-inference".to_owned())
             .spawn(move || {
                 let mut session = match Session::new() {
                     Ok(session) => {
-                        let _ = ready_sender.send(Ok(()));
+                        ready.finish(Ok(()));
                         session
                     }
                     Err(error) => {
-                        let _ = ready_sender.send(Err(map_magika_error(error)));
+                        ready.finish(Err(map_magika_error(error)));
                         return;
                     }
                 };
@@ -253,25 +314,36 @@ impl ManagedInferenceRuntime {
                     || {},
                     || {},
                 );
-            }) {
-            Ok(worker) => worker,
-            Err(error) => {
-                return Err(MimeError::detector_backend(
-                    "magika",
-                    format!("could not start worker: {error}"),
-                ));
-            }
-        };
-        match ready_receiver.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {
-                return Err(MimeError::detector_backend(
-                    "magika",
-                    "worker exited during initialization",
-                ));
-            }
-        }
+            })
+            .map_err(|error| MimeError::detector_backend("magika", format!("could not start worker: {error}")))?;
+        Ok(StartingWorker {
+            sender,
+            handle,
+            admission_gate,
+            tasks,
+        })
+    }
+
+    /// Inserts the initialized worker into a new runtime.
+    ///
+    /// # Parameters
+    ///
+    /// * `manager` - Application manager used to create the runtime group.
+    /// * `max_in_flight_bytes` - Aggregate payload limit for the runtime.
+    /// * `worker` - Initialized worker and its shared state.
+    ///
+    /// # Returns
+    ///
+    /// A runtime ready to admit inference requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error if the manager cannot create the service group.
+    fn finish_startup(
+        manager: OperationManager,
+        max_in_flight_bytes: usize,
+        worker: StartingWorker,
+    ) -> MimeResult<Self> {
         let service_group = match manager.group(GroupOptions {
             capacity: SERVICE_CAPACITY,
         }) {
@@ -283,9 +355,15 @@ impl ManagedInferenceRuntime {
                 ));
             }
         };
+        let StartingWorker {
+            sender,
+            handle,
+            admission_gate,
+            tasks,
+        } = worker;
         Ok(Self {
             sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(WorkerState::new(worker)),
+            worker: Mutex::new(WorkerState::new(handle)),
             service_group,
             active_requests: Arc::new(AtomicUsize::new(0)),
             max_in_flight_bytes,

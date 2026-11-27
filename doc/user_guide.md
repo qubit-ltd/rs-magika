@@ -27,11 +27,11 @@ registry. In both inventory registries, `repository` remains the default
 selection. Avoid registering the inventory-submitted provider a second time.
 
 The detector uses repository filename rules for filename-only detection and
-Magika inference for content, reader, and local-file detection. Creating a new
-runtime initializes Magika's embedded model and the ONNX Runtime session
-synchronously before construction returns. The direct constructors
-`MagikaMimeDetector::new()` and `from_mime_config(...)` create a new runtime;
-injecting an existing runtime through `MagikaMimeDetectorBuilder::managed_runtime`
+Magika inference for content, reader, and local-file detection. The direct
+constructors `MagikaMimeDetector::new()` and `from_mime_config(...)` create a
+runtime and synchronously wait for model and session initialization.
+`MagikaMimeDetectorBuilder::build_async()` awaits that initialization on the
+worker. Injecting an existing runtime through `MagikaMimeDetectorBuilder::managed_runtime`
 or `MagikaMimeDetectorProvider::managed_runtime` reuses it without initializing
 another session. Inference calls made through one detector are serialized
 internally, so one initialized detector can be shared with `Arc`.
@@ -737,6 +737,14 @@ owned by other operations in that scope. `admission` in
 `ManagedInferenceShutdownReport` is for aggregate service-group counters, while
 `worker_stopped` reports only that the worker was joined.
 
+For an async service that creates its detector directly, use
+`MagikaMimeDetector::builder().build_async().await` during startup or reloading.
+This waits for the worker to initialize the Magika session without blocking the
+executor on model startup. The future returns the same configuration and
+initialization errors as `build()`. Dropping it during startup closes the new
+worker's request queue. Native initialization in progress can finish before
+the worker exits.
+
 In a real application, keep the service group, supervisor, and detector for the
 application lifetime so request scopes come from the same supervisor, and call
 the shutdown function after the application has stopped admitting requests.
@@ -870,10 +878,10 @@ startup and handle per-input errors at the boundary where the input is read.
 
 - Provider discovery requires the opt-in `inventory` feature; the default build
   uses explicit registration. Inventory submits only the unconfigured provider.
-- Creating a runtime initializes the model and ONNX Runtime session
-  synchronously. Direct constructors create a runtime; builder or provider
-  runtime injection reuses the supplied runtime. Create and share a detector
-  instead of constructing one per input.
+- Synchronous constructors wait for model and ONNX Runtime session startup.
+  Use `build_async()` in async startup code to await the worker. A builder or
+  provider can also reuse a supplied runtime. Build one detector and share it
+  across requests.
 - Inference on one detector is serialized internally.
 - Legacy `MimeDetector` provider hooks do not provide parent-scope lifecycle
   observation. Use the managed entry point to attach admission, child outcome,

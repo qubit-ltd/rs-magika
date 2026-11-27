@@ -100,8 +100,9 @@ Direct calls to `MagikaMimeDetector::new()` and `from_mime_config(...)` create
 a runtime, initialize the model and ONNX Runtime session synchronously, and
 return `MimeError` if initialization fails. `create_configured(&MimeConfig)`
 returns `ProviderFailure<MimeError>` with the original `MimeError` preserved as
-its source. Other constructors that create a runtime initialize it before
-returning. A runtime supplied through
+its source. In an async service, use
+`MagikaMimeDetector::builder().build_async().await` to wait for session
+initialization without blocking the executor. A runtime supplied through
 `MagikaMimeDetectorBuilder::managed_runtime` or
 `MagikaMimeDetectorProvider::managed_runtime` is reused as-is, without another
 session initialization; the builder validates its byte budget against the
@@ -265,9 +266,10 @@ runtime, register `MagikaMimeDetectorProvider::new().managed_runtime(...)`
 explicitly and keep the runtime alive for the detector lifetime; the
 [provider runtime example](doc/user_guide.md#sharing-an-application-managed-inference-runtime)
 shows the setup and shared budget/shutdown behavior.
-When construction creates a runtime, it synchronously waits for the worker to
-initialize the embedded Magika model and ONNX Runtime session. Injecting an
-existing runtime reuses it and checks the configured byte budget. Build the
+Synchronous constructors wait for the worker to initialize the embedded model
+and ONNX Runtime session when they create a runtime. The builder's
+`build_async()` waits asynchronously. Both reuse an injected runtime and check
+its byte budget. Build the
 detector during application startup, create it once, and share it (for example
 with `Arc`). Inference calls on its shared runtime are serialized internally.
 

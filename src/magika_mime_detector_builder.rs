@@ -189,35 +189,105 @@ impl MagikaMimeDetectorBuilder {
     /// `MimeConfig::max_buffer_size()` is rejected when this builder creates a
     /// new runtime; a supplied shared runtime may be reused with that zero
     /// per-request limit.
-    pub fn build(self) -> MimeResult<MagikaMimeDetector> {
-        let max_buffer_size = self.mime_config.max_buffer_size();
-        let runtime = match self.runtime {
-            Some(runtime) if runtime.max_in_flight_bytes() >= max_buffer_size => runtime,
-            Some(_) => {
-                return Err(MimeError::detector_backend(
-                    "magika",
-                    "managed runtime byte budget is smaller than the configured MIME buffer limit",
-                ));
-            }
-            None => {
-                let manager = match self.manager {
-                    Some(manager) => manager,
-                    None => OperationManager::new(ManagerOptions::default()).map_err(|error| {
-                        MimeError::detector_backend("magika", format!("could not create operation manager: {error}"))
-                    })?,
-                };
-                Arc::new(ManagedInferenceRuntime::new(manager, max_buffer_size)?)
-            }
+    pub fn build(mut self) -> MimeResult<MagikaMimeDetector> {
+        let runtime = match self.take_shared_runtime()? {
+            Some(runtime) => runtime,
+            None => Arc::new(ManagedInferenceRuntime::new(
+                self.take_manager()?,
+                self.mime_config.max_buffer_size(),
+            )?),
         };
+        Ok(self.finish(runtime))
+    }
+
+    /// Builds a detector while asynchronously waiting for a new Magika
+    /// session to initialize on the inference worker.
+    ///
+    /// The builder starts the worker on the first poll and awaits model
+    /// initialization. A supplied runtime is reused without starting another
+    /// worker. Dropping the future during startup abandons the new runtime.
+    /// Native initialization already in progress can finish on the worker,
+    /// which then exits without serving any requests.
+    ///
+    /// # Returns
+    ///
+    /// A detector configured with the builder's MIME settings and classifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same configuration and initialization errors as
+    /// [`Self::build`].
+    pub async fn build_async(mut self) -> MimeResult<MagikaMimeDetector> {
+        let runtime = match self.take_shared_runtime()? {
+            Some(runtime) => runtime,
+            None => Arc::new(
+                ManagedInferenceRuntime::new_async(self.take_manager()?, self.mime_config.max_buffer_size()).await?,
+            ),
+        };
+        Ok(self.finish(runtime))
+    }
+
+    /// Takes the supplied runtime after checking its payload budget.
+    ///
+    /// # Returns
+    ///
+    /// The shared runtime, if one was supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error if the runtime cannot cover the MIME buffer
+    /// limit.
+    fn take_shared_runtime(&mut self) -> MimeResult<Option<Arc<ManagedInferenceRuntime>>> {
+        let runtime = self.runtime.take();
+        if runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.max_in_flight_bytes() < self.mime_config.max_buffer_size())
+        {
+            return Err(MimeError::detector_backend(
+                "magika",
+                "managed runtime byte budget is smaller than the configured MIME buffer limit",
+            ));
+        }
+        Ok(runtime)
+    }
+
+    /// Takes the supplied manager or creates a default manager.
+    ///
+    /// # Returns
+    ///
+    /// The manager to use when constructing a new worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error if the default manager cannot be created.
+    fn take_manager(&mut self) -> MimeResult<OperationManager> {
+        match self.manager.take() {
+            Some(manager) => Ok(manager),
+            None => OperationManager::new(ManagerOptions::default()).map_err(|error| {
+                MimeError::detector_backend("magika", format!("could not create operation manager: {error}"))
+            }),
+        }
+    }
+
+    /// Combines MIME configuration and a ready inference runtime.
+    ///
+    /// # Parameters
+    ///
+    /// * `runtime` - Shared runtime owning the Magika worker.
+    ///
+    /// # Returns
+    ///
+    /// A detector using the prepared runtime.
+    fn finish(self, runtime: Arc<ManagedInferenceRuntime>) -> MagikaMimeDetector {
         let mut core = MimeDetectorCore::from_mime_config(self.mime_config.clone());
         core.set_media_stream_classifier(self.media_stream_classifier.map(|classifier| {
             Arc::new(RegularFileMediaStreamClassifier::new(classifier)) as Arc<dyn MediaStreamClassifier>
         }));
-        Ok(MagikaMimeDetector {
+        MagikaMimeDetector {
             core,
             filename_detector: RepositoryMimeDetector::from_mime_config(self.mime_config),
             runtime,
-        })
+        }
     }
 }
 
