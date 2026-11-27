@@ -2,7 +2,7 @@
 ../rs-fs	https://github.com/qubit-ltd/rs-fs.git	2d725c9b3bd0926dbbaf77428ab3596b08af0a47
 ../rs-fs-local	https://github.com/qubit-ltd/rs-fs-local.git	f7630dd357c96109644545bd010942b164ebf10a
 ../rs-fs-testkit	https://github.com/qubit-ltd/rs-fs-testkit.git	6b5c5f676a6a624b68ab7ce1e1e1d3d0bd9e22aa
-../rs-mime	https://github.com/qubit-ltd/rs-mime.git	ff8fa6e3f39585ef059a3c5a23ab3f1d2415a66b
+../rs-mime	https://github.com/qubit-ltd/rs-mime.git	c39b8fa561bf154ec0c9b00f389bf5f73e70f62e
 ../rs-operation	https://github.com/qubit-ltd/rs-operation.git	893bcf6c7efb397cc8fac2f7fe18fb5e87017e63
 ../rs-fs-registry	https://github.com/qubit-ltd/rs-fs-registry.git	be7c9c956829d8b48061b78f02b9a04972a61f54
 ../rs-local-files	https://github.com/qubit-ltd/rs-local-files.git	3e81d3e58f42fcbc2f7d6d9acd142d43d8ade66d
