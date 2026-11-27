@@ -27,17 +27,11 @@ pub struct ManagedInferenceSnapshot {
     /// records an uncaught panic observed while joining the worker.
     pub faulted: bool,
     /// Admitted, unreleased requests whose worker has not started processing
-    /// them, including provider setup and admission queue time; this is not an
-    /// exact queue length.
+    /// them. Includes Provider setup and sampling on the operation executor
+    /// as well as time in the model queue; this is not an exact queue length.
     pub admitted_not_started: usize,
-    /// Unreleased requests whose worker participant has started but not
-    /// completed. This can include time while the worker waits for a Provider
-    /// sample read to be serviced by the operation body. Managed Provider
-    /// `open`, `stat`, and session/range reads are polled by the operation
-    /// executor; the caller waits for the child outcome. Provider futures
-    /// must therefore be nonblocking and compatible with that executor's
-    /// reactor. A Provider must not synchronously wait here for nested work
-    /// that needs the same runtime's worker.
+    /// Unreleased requests whose model worker participant has started but not
+    /// completed. Provider reads do not occupy that worker.
     pub worker_running: usize,
     /// Requests whose worker completed but whose resources remain retained.
     pub awaiting_release: usize,

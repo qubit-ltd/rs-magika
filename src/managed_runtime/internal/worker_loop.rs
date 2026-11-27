@@ -95,6 +95,7 @@ pub(super) fn run_worker_with_before_first_recv(
     before_first_recv();
     while let Ok(job) = receiver.recv() {
         let Job { input, state, owner } = job;
+        #[cfg(test)]
         let bridge = match &input {
             WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
             _ => None,
@@ -128,6 +129,7 @@ pub(super) fn run_worker_with_before_first_recv(
             }
             state.finish_business(result, outcome);
         }
+        #[cfg(test)]
         if let Some(bridge) = bridge {
             bridge.close();
         }
@@ -151,6 +153,7 @@ pub(super) fn run_worker_with_before_first_recv(
 fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
     for job in receiver.try_iter() {
         let Job { input, state, owner } = job;
+        #[cfg(test)]
         let bridge = match &input {
             WorkerInput::Bridge(bridge, _, _) => Some(Arc::clone(bridge)),
             _ => None,
@@ -160,6 +163,7 @@ fn settle_queued_jobs(receiver: &mpsc::Receiver<Job>, reason: &str) {
             ChildOutcomeKind::Failed,
         );
         drop(input);
+        #[cfg(test)]
         if let Some(bridge) = bridge {
             bridge.close();
         }

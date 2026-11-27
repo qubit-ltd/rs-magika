@@ -1657,19 +1657,13 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let gate_for_worker = Arc::clone(&gate);
-    let (engine_started_tx, engine_started_rx) = mpsc::sync_channel(1);
-    let (engine_release_tx, engine_release_rx) = mpsc::sync_channel(1);
     let (published_tx, published_rx) = mpsc::sync_channel(1);
-    let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
+    let (receive_tx, receive_rx) = mpsc::sync_channel(1);
+    let runtime = Arc::new(ManagedInferenceRuntime::with_engine_hooks(
         supervisor.clone(),
         128,
-        Box::new(move |_| {
-            engine_started_tx.send(()).unwrap();
-            engine_release_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("published range inference release barrier");
-            Ok(Some("application/x-published-range".to_owned()))
-        }),
+        Box::new(|_| panic!("short Provider sample is classified by rules")),
+        Box::new(move || receive_rx.recv_timeout(Duration::from_secs(5)).unwrap()),
         Box::new(move || {
             published_tx.send(()).unwrap();
             let (lock, changed) = &*gate_for_worker;
@@ -1678,6 +1672,7 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
                 released = changed.wait(released).unwrap();
             }
         }),
+        Box::new(|| {}),
     ));
     let _release_gate = ReleaseWorkerGate(Arc::clone(&gate));
     let operation_runtime = Arc::clone(&runtime);
@@ -1685,12 +1680,13 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
             let admission = operation_runtime.reserve_for_provider(Some(&scope), 128)?;
-            let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(vec![b'x'; 128])
-                .with_range();
+            let state = admission.task_state();
+            let provider =
+                crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(vec![b'x']).with_range();
             let input = crate::internal::AsyncProviderInput::new_owned(
                 provider.async_file_system(),
                 qubit_fs::Path::parse("/published.py").unwrap(),
-                128,
+                1,
                 None,
                 128,
             );
@@ -1698,29 +1694,22 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
                 &scope,
                 admission,
                 input,
-                128,
                 map_provider_test_error,
             ));
             let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
             let mut context = Context::from_waker(&waker);
-            assert!(detection.as_mut().poll(&mut context).is_pending());
+            // Let sampling dispatch its result while the worker is gated.
+            // Once published, leave that result unobserved until Cancel.
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                match engine_started_rx.try_recv() {
-                    Ok(()) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        panic!("worker exited before engine start")
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {}
-                }
+            while !state.was_dispatched() {
+                assert!(detection.as_mut().poll(&mut context).is_pending());
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "provider range did not reach the worker"
+                    "completed range sampling did not dispatch the result"
                 );
-                assert!(detection.as_mut().poll(&mut context).is_pending());
                 std::thread::park_timeout(Duration::from_millis(1));
             }
-            engine_release_tx.send(()).unwrap();
+            receive_tx.send(()).unwrap();
             published_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
             let shutdown_runtime = Arc::clone(&operation_runtime);
@@ -1761,7 +1750,7 @@ fn test_admitted_range_returns_published_result_when_cancel_precedes_observer_po
     let OperationOutcome::Succeeded(result) = outcome else {
         panic!("outer operation should return the managed result observation: {outcome:?}");
     };
-    assert_eq!(Some("application/x-published-range".to_owned()), result.unwrap());
+    assert_eq!(Some("text/plain".to_owned()), result.unwrap());
 }
 
 #[test]
@@ -2009,6 +1998,11 @@ fn test_managed_public_handoffs_deliver_admission_and_complete() {
     use std::sync::atomic::Ordering;
 
     for provider_entry in [false, true] {
+        let expected_mime = if provider_entry {
+            "text/plain"
+        } else {
+            "application/x-managed-delivered"
+        };
         let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
         let max_bytes = qubit_mime::MimeConfig::default().max_buffer_size();
         let engine_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2028,10 +2022,8 @@ fn test_managed_public_handoffs_deliver_admission_and_complete() {
                 .build()
                 .unwrap(),
         );
-        let provider = crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(
-            b"delivered provider contents".to_vec(),
-        )
-        .with_range();
+        let provider =
+            crate::tests::internal::provider_input_fixture::ProviderFileSystemSpi::new(b"file".to_vec()).with_range();
         let observations = provider.observations();
         let file_system = provider.async_file_system();
         let path = qubit_fs::Path::parse("/managed-delivered.py").unwrap();
@@ -2057,13 +2049,13 @@ fn test_managed_public_handoffs_deliver_admission_and_complete() {
                 Duration::from_secs(2),
             )
             .unwrap(),
-            OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-managed-delivered"
+            OperationOutcome::Succeeded(Some(ref mime)) if mime == expected_mime
         ));
-        assert_eq!(1, engine_calls.load(Ordering::SeqCst));
+        assert_eq!(usize::from(!provider_entry), engine_calls.load(Ordering::SeqCst));
         assert_eq!(0, runtime.snapshot().reserved_bytes);
         assert_eq!(0, runtime.active_requests.load(Ordering::SeqCst));
         if provider_entry {
-            assert_eq!(1, observations.opens.load(Ordering::SeqCst));
+            assert_eq!(2, observations.opens.load(Ordering::SeqCst));
             assert!(observations.read_bytes.load(Ordering::SeqCst) > 0);
         } else {
             assert_eq!(0, observations.opens.load(Ordering::SeqCst));
@@ -2948,7 +2940,7 @@ fn test_provider_input_drops_before_first_setup_poll_releases_admission() {
                 );
             let input = crate::internal::AsyncProviderInput::from_session(reader, 4, Some(4));
             let detection =
-                operation_runtime.detect_async_input_admitted(&scope, admission, input, 4, map_provider_test_error);
+                operation_runtime.detect_async_input_admitted(&scope, admission, input, map_provider_test_error);
             let _ = operation_runtime.shutdown_blocking(ShutdownMode::Cancel, Duration::ZERO);
             drop(detection);
             assert_eq!(4, observed_bytes.load(std::sync::atomic::Ordering::SeqCst));
@@ -3857,10 +3849,7 @@ fn test_drain_real_managed_provider_route_completes_gated_read() {
     let runtime = Arc::new(ManagedInferenceRuntime::with_engine(
         supervisor.clone(),
         qubit_mime::MimeConfig::default().max_buffer_size(),
-        Box::new(|bytes| {
-            assert_eq!(bytes, b"sample");
-            Ok(Some("application/x-fixture".to_owned()))
-        }),
+        Box::new(|_| panic!("short Provider sample is classified by rules")),
         Box::new(|| {}),
     ));
     let detector = Arc::new(
@@ -3883,7 +3872,7 @@ fn test_drain_real_managed_provider_route_completes_gated_read() {
                     &scope,
                     &file_system,
                     &qubit_fs::Path::parse("/drain/gated-read").unwrap(),
-                    6,
+                    12,
                 )
                 .await
         })
@@ -3908,7 +3897,7 @@ fn test_drain_real_managed_provider_route_completes_gated_read() {
             Duration::from_secs(2),
         )
         .unwrap(),
-        OperationOutcome::Succeeded(Some(ref mime)) if mime == "application/x-fixture"
+        OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/plain"
     ));
     assert!(
         crate::tests::internal::bridge_wait::poll_before(
@@ -4228,7 +4217,7 @@ fn test_worker_panic_wakes_real_pending_provider_path_stages() {
         }
     }
 
-    for phase in ["open", "stat", "read_all"] {
+    for phase in ["open", "stat", "read_all", "session_sample"] {
         let manager = OperationManager::new(ManagerOptions::default()).unwrap();
         let service = manager.group(GroupOptions { capacity: 2 }).unwrap();
         let (engine_started_tx, engine_started_rx) = mpsc::sync_channel(1);
@@ -4259,6 +4248,8 @@ fn test_worker_panic_wakes_real_pending_provider_path_stages() {
             "read_all" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
                 .without_async_random_access()
                 .with_async_stream_read_gate(Arc::clone(&gate)),
+            "session_sample" => Fixture::new(b"sample", qubit_fs::metadata::FileSystemLimit::Maximum(6))
+                .with_async_read_gate(Arc::clone(&gate)),
             _ => unreachable!("test stage is enumerated above"),
         };
         let file_system = qubit_fs::AsyncFileSystem::from_spi(fixture).unwrap();

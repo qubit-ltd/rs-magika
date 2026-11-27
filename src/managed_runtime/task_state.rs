@@ -23,6 +23,7 @@ pub(super) use super::admission_gate::AdmissionGate;
 use super::request_resource_scope_guard::RequestResourceScopeGuard;
 use super::task_control::register_waker;
 use super::task_inner::TaskInner;
+#[cfg(test)]
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 use crate::internal::waker_notify;
 
@@ -35,6 +36,7 @@ pub(crate) struct TaskState {
     /// Blocking notification used by synchronous inference callers.
     pub(super) released: Condvar,
     /// Bridge closed when cancellation stops async sampling.
+    #[cfg(test)]
     bridge: std::sync::Mutex<Option<Weak<AsyncSampleBridge>>>,
     /// Aggregate owner that releases permits after worker and driver
     /// completion.
@@ -81,7 +83,7 @@ impl TaskState {
     /// A new state with no result or lifecycle facts recorded.
     pub(super) fn new_registered(
         operation_id: u64,
-        bridge: Option<Weak<AsyncSampleBridge>>,
+        #[cfg(test)] bridge: Option<Weak<AsyncSampleBridge>>,
         active_tasks: Option<Weak<Mutex<Vec<Arc<TaskState>>>>>,
         admission_gate: Option<Weak<Mutex<AdmissionGate>>>,
     ) -> Self {
@@ -89,6 +91,7 @@ impl TaskState {
             operation_id,
             inner: Mutex::new(TaskInner::new()),
             released: Condvar::new(),
+            #[cfg(test)]
             bridge: std::sync::Mutex::new(bridge),
             owner: std::sync::Mutex::new(None),
             scope_resource: std::sync::Mutex::new(None),
@@ -228,14 +231,17 @@ impl TaskState {
             handoff.close_for_stop();
         }
         waker_notify::wake_all(wakers);
-        let bridge = self
-            .bridge
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()
-            .and_then(Weak::upgrade);
-        if let Some(bridge) = bridge {
-            bridge.close();
+        #[cfg(test)]
+        {
+            let bridge = self
+                .bridge
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if let Some(bridge) = bridge {
+                bridge.close();
+            }
         }
     }
 
@@ -298,6 +304,7 @@ impl TaskState {
     /// # Parameters
     ///
     /// * `bridge` - Weak reference to the sampling bridge.
+    #[cfg(test)]
     pub(super) fn attach_bridge(&self, bridge: Weak<AsyncSampleBridge>) {
         *self.bridge.lock().unwrap_or_else(|error| error.into_inner()) = Some(bridge);
         if self.stop_requested() {

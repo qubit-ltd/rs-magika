@@ -9,6 +9,7 @@
 
 mod async_provider_input;
 mod async_route;
+#[cfg(test)]
 pub(crate) mod async_sample_bridge;
 mod async_session_read_options;
 mod cooperative_read;

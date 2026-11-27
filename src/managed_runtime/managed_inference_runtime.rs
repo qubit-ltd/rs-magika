@@ -23,6 +23,7 @@ use magika::AsyncInput;
 use magika::Error as MagikaError;
 use magika::Features;
 use magika::FeaturesOrRuled;
+use magika::Result as MagikaResult;
 use magika::Session;
 use qubit_mime::MimeError;
 use qubit_mime::MimeResult;
@@ -37,14 +38,17 @@ use qubit_operation::ShutdownReport;
 use qubit_operation::ShutdownSnapshot;
 use qubit_operation::StopReason;
 
+#[cfg(test)]
 use super::bridge_sync_input::BridgeSyncInput;
 use super::byte_budget::ByteBudget;
+#[cfg(test)]
 use super::drive_event::DriveEvent;
 use super::inference_future::InferenceFuture;
 use super::job::Job;
 use super::managed_inference_shutdown_report::ManagedInferenceShutdownReport;
 use super::managed_inference_snapshot::ManagedInferenceSnapshot;
 use super::provider_driver_guard::ProviderDriverGuard;
+#[cfg(test)]
 use super::provider_read_event::ProviderReadEvent;
 use super::request_admission::RequestAdmission;
 use super::request_admission_handoff::BodyStartOr;
@@ -55,6 +59,7 @@ use super::worker_input::WorkerInput;
 use super::worker_input::worker_bytes;
 use crate::internal::AsyncProviderInput;
 use crate::internal::INFERENCE_OUTCOME;
+#[cfg(test)]
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 use crate::internal::map_operation_outcome;
 use crate::magika_mime_detector::content_type_to_mime;
@@ -707,23 +712,17 @@ impl ManagedInferenceRuntime {
 
     /// Drives provider reads for an already admitted async input.
     ///
-    /// `scope` is observed during provider setup and while driving reads. A
-    /// published worker result takes precedence over a concurrent stop; this
-    /// future returns a Magika stop error only when cancellation wins the
-    /// observation race. The driver checks for a published result before
-    /// checking stop notifications, and checks again if a provider read returns
-    /// the internal stop marker in the same poll. Owned setup values are
-    /// dropped before admission is released. A provider read already polled to
-    /// `Pending` remains unconfirmed even after its local future, input, and
-    /// driver are dropped.
+    /// Provider sampling runs on the operation executor before dispatch to
+    /// the model worker. Capacity is retained until local provider access and
+    /// inference complete. A provider read dropped in `Pending` remains
+    /// unconfirmed even after its local future and input are destroyed.
     ///
     /// # Parameters
     ///
-    /// * `scope` - Parent operation scope observed during provider setup and
-    ///   reads; stopping it rejects or stops the request.
+    /// * `scope` - Parent operation scope observed during sampling and
+    ///   inference.
     /// * `admission` - Previously reserved operation and byte capacity.
-    /// * `input` - Provider source read on demand by Magika sampling.
-    /// * `max_bytes` - Bound used for provider range requests.
+    /// * `input` - Provider source with a cumulative logical sampling budget.
     /// * `map_error` - Route-specific conversion for Magika failures.
     ///
     /// # Returns
@@ -738,65 +737,65 @@ impl ManagedInferenceRuntime {
         scope: &'a OperationScope,
         admission: RequestAdmission,
         input: AsyncProviderInput,
-        max_bytes: usize,
         map_error: fn(MagikaError) -> MimeError,
     ) -> impl Future<Output = MimeResult<Option<String>>> + Send + 'a {
-        // Keep these values in one ordered owner until setup succeeds. If the
-        // returned future is dropped before its first poll, input drops first.
+        // The future may be dropped before its first poll. Keep input ahead
+        // of admission in that case as well as during sampling.
         let owner = ProviderSetupOwner { input, admission };
         async move {
-            let state = Arc::clone(&owner.admission.state);
-            let state_for_stop = Arc::clone(&state);
-            let mut scope_stop = Box::pin(scope.context().stop_requested());
-            let mut request_stop = Box::pin(state_for_stop.wait_stopped());
-            let stop_state = Arc::clone(&state_for_stop);
-            let setup_runtime = self;
-            let setup = async move {
-                let mut owner = owner;
-                if let Err(error) = owner.admission.try_begin_provider_operation() {
-                    drop(owner);
-                    return Err(error);
-                }
-                let length_result = owner.input.length().await;
-                owner.admission.provider_operation_completed();
-                let length = match length_result {
-                    Ok(length) => length,
-                    Err(error) => {
-                        let business_error = map_error(error);
-                        drop(owner.input);
-                        owner
-                            .admission
-                            .settle_error(MimeError::detector_backend("magika", "provider length lookup failed"));
-                        return Err(business_error);
+            let ProviderSetupOwner { input, mut admission } = owner;
+            let state = Arc::clone(&admission.state);
+            let io_in_flight = input.io_in_flight();
+            admission.require_provider_driver();
+            let mut guard = ProviderDriverGuard::new_sampling(input, Arc::clone(&state));
+            let input = SamplingInput(guard.input.as_mut().expect("sampling input remains owned"));
+            let sampled = admission
+                .run_provider_operation_with_status(scope, FeaturesOrRuled::extract_async(input), io_in_flight)
+                .await;
+            // A borrowed sample never outlives the owned input. Record
+            // uncertain I/O and destroy the input before settling or dispatch.
+            drop(guard);
+            let sampled = match sampled {
+                Ok(Err(sample_error @ MagikaError::IOError(_))) if is_provider_stop_marker(&sample_error) => {
+                    if state.worker_faulted() {
+                        return Err(MimeError::detector_backend("magika", state.provider_stop_reason()));
                     }
-                };
-                let bridge = AsyncSampleBridge::new(length);
-                let driver = bridge.driver();
-                let io_in_flight = owner.input.io_in_flight();
-                owner.admission.require_provider_driver();
-                let guard = ProviderDriverGuard::new_with_io_status(
-                    owner.input,
-                    driver,
-                    Arc::clone(&state),
-                    Some(io_in_flight),
-                );
-                let inference =
-                    setup_runtime.dispatch(owner.admission, WorkerInput::Bridge(bridge, max_bytes, map_error))?;
-                Ok::<_, MimeError>((guard, inference))
+                    if state.cancellation_requested() || scope.context().stop_reason().is_some() {
+                        state.request_stop();
+                        return Err(provider_inference_stopped());
+                    }
+                    Err(sample_error)
+                }
+                Ok(sampled) => sampled,
+                Err(_) if state.cancellation_requested() => return Err(provider_inference_stopped()),
+                Err(error) => return Err(error),
             };
-            let mut setup = Box::pin(setup);
-            let (guard, inference) = poll_fn(|context| {
-                if scope_stop.as_mut().poll(context).is_ready() {
-                    stop_state.request_stop();
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+            let inference = match sampled {
+                Ok(FeaturesOrRuled::Features(features)) => {
+                    self.dispatch(admission, WorkerInput::Features(features, map_error))?
                 }
-                if request_stop.as_mut().poll(context).is_ready() {
-                    return Poll::Ready(Err(MimeError::detector_backend("magika", "provider inference stopped")));
+                Ok(FeaturesOrRuled::Ruled(content_type)) => {
+                    self.dispatch(admission, WorkerInput::Ruled(content_type_to_mime(content_type)))?
                 }
-                setup.as_mut().poll(context)
+                Err(error) => {
+                    admission.settle_error(map_error(error));
+                    return InferenceFuture::new(state).await;
+                }
+            };
+            let mut inference = std::pin::pin!(inference);
+            let mut scope_stop = std::pin::pin!(scope.context().stop_requested());
+            let mut request_stop = std::pin::pin!(state.wait_stopped());
+            poll_fn(|context| {
+                if let Poll::Ready(result) = inference.as_mut().poll(context) {
+                    return Poll::Ready(result);
+                }
+                if scope_stop.as_mut().poll(context).is_ready() || request_stop.as_mut().poll(context).is_ready() {
+                    state.request_stop();
+                    return Poll::Ready(Err(provider_inference_stopped()));
+                }
+                Poll::Pending
             })
-            .await?;
-            drive_async_input_with_stops(guard, inference, scope_stop, request_stop).await
+            .await
         }
     }
 
@@ -917,13 +916,14 @@ impl ManagedInferenceRuntime {
     fn submit(&self, scope: Option<&OperationScope>, input: WorkerInput) -> MimeResult<InferenceFuture> {
         let byte_count = match &input {
             WorkerInput::Bytes(bytes) => bytes.len(),
+            #[cfg(test)]
             WorkerInput::Bridge(_, byte_limit, _) => *byte_limit,
             // Magika keeps Features opaque and does not expose its allocation
             // length. It consumes no payload-byte budget. Runtime request-slot
             // admission still bounds retained jobs independently of the shared
             // runtime-wide byte limit; the internal service group is used only
             // for scope-less operation submission.
-            WorkerInput::Features(_, _) => 0,
+            WorkerInput::Features(_, _) | WorkerInput::Ruled(_) => 0,
         };
         let admission = self.reserve_request(scope, byte_count)?;
         self.dispatch(admission, input)
@@ -995,6 +995,7 @@ impl ManagedInferenceRuntime {
         let id = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let state = Arc::new(TaskState::new_registered(
             id,
+            #[cfg(test)]
             None,
             Some(Arc::downgrade(&self.tasks)),
             Some(Arc::downgrade(&self.admission_gate)),
@@ -1310,7 +1311,7 @@ fn remaining_timeout(deadline: Option<std::time::Instant>) -> std::time::Duratio
 /// # Parameters
 ///
 /// * `session` - Worker-owned initialized Magika session.
-/// * `input` - Owned bytes, bridged async input, or extracted features.
+/// * `input` - Owned bytes, extracted features, or a rule-classified result.
 ///
 /// # Returns
 ///
@@ -1321,6 +1322,7 @@ fn infer_input(session: &mut Session, input: WorkerInput) -> MimeResult<Option<S
             FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
             FeaturesOrRuled::Features(features) => identify_features(session, &features, map_magika_error),
         },
+        #[cfg(test)]
         WorkerInput::Bridge(bridge, _, map_error) => {
             match FeaturesOrRuled::extract_sync(BridgeSyncInput(bridge)).map_err(map_error)? {
                 FeaturesOrRuled::Ruled(content_type) => Ok(content_type_to_mime(content_type)),
@@ -1328,6 +1330,7 @@ fn infer_input(session: &mut Session, input: WorkerInput) -> MimeResult<Option<S
             }
         }
         WorkerInput::Features(features, map_error) => identify_features(session, &features, map_error),
+        WorkerInput::Ruled(result) => Ok(result),
     }
 }
 
@@ -1351,6 +1354,36 @@ fn identify_features(
         .identify_features_sync(features)
         .map(|file_type| file_type.content_type().and_then(content_type_to_mime))
         .map_err(map_error)
+}
+
+/// Borrows a Provider input for extraction while the guard retains ownership.
+struct SamplingInput<'a>(&'a mut AsyncProviderInput);
+
+impl AsyncInput for SamplingInput<'_> {
+    fn length(&self) -> impl Future<Output = MagikaResult<u64>> {
+        self.0.length()
+    }
+
+    fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> impl Future<Output = MagikaResult<()>> {
+        self.0.read_at(buffer, offset)
+    }
+}
+
+/// Checks the private provider stop marker without treating an ordinary
+/// interrupted read as cancellation.
+fn is_provider_stop_marker(error: &MagikaError) -> bool {
+    matches!(
+        error,
+        MagikaError::IOError(error)
+            if crate::internal::is_session_stop_error(error)
+                || crate::internal::provider_input::is_observed_read_stopped_error(error)
+    )
+}
+
+/// Creates the stop result for a Provider inference interrupted before its
+/// business outcome is published.
+fn provider_inference_stopped() -> MimeError {
+    MimeError::detector_backend("magika", "provider inference stopped")
 }
 
 /// Serves sampler range requests while keeping executor work asynchronous.
@@ -1396,6 +1429,7 @@ where
 /// * `inference` - Worker inference future whose result takes precedence.
 /// * `scope_stop` - Owning scope stop notification.
 /// * `request_stop` - Request-specific stop notification.
+#[cfg(test)]
 async fn drive_async_input_with_stops<I, S, R>(
     mut guard: ProviderDriverGuard<I>,
     inference: InferenceFuture,
@@ -1578,6 +1612,7 @@ where
 ///
 /// Returns the worker's inference error or the backend error for the winning
 /// stop signal.
+#[cfg(test)]
 async fn finish_after_driver_close<S, R>(
     inference: &mut std::pin::Pin<Box<InferenceFuture>>,
     scope_stop: &mut std::pin::Pin<Box<S>>,

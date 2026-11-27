@@ -199,7 +199,7 @@ impl MagikaMimeDetector {
     }
 
     /// Detects an async provider path as a child of `scope`, extracting
-    /// Magika samples on the managed worker through bounded range requests.
+    /// Magika samples through bounded range requests before model inference.
     ///
     /// This explicit API owns an operation scope. The legacy MIME trait hook
     /// remains scope-less because its upstream contract does not pass one.
@@ -209,11 +209,10 @@ impl MagikaMimeDetector {
     /// Provider `open`, `stat`, and session/range reads are polled by the
     /// operation body on the scope manager's executor; this future waits for
     /// the child outcome. Provider polling must be nonblocking and compatible
-    /// with that executor's reactor. A session or legacy-range read must not
-    /// synchronously wait for nested detection already accepted by the same
-    /// runtime when that detection needs the worker; release the dependency or
-    /// use an independent runtime. The `read_all` fallback performs its I/O
-    /// before dispatching input to the worker.
+    /// with that executor's reactor. Session and legacy-range sampling
+    /// finish before features are dispatched, so a pending read does not
+    /// occupy the model worker. The `read_all` fallback also performs its
+    /// I/O before dispatching input to the worker.
     /// Closed, full, or already-cancelled requests are rejected before
     /// provider I/O. Admission capacity is a permission/accounting reservation;
     /// it does not prove provider completion or resource release. The byte
@@ -413,7 +412,7 @@ impl MagikaMimeDetector {
                     .with_stop_state(admission.task_state())
                     .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
-                    .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
+                    .detect_async_input_admitted(scope, admission, input, map_provider_magika_error)
                     .await;
             }
             Err(error) if is_unsupported_provider_error(&error) => {}
@@ -441,7 +440,7 @@ impl MagikaMimeDetector {
                         .with_stop_state(admission.task_state())
                         .with_stop_watcher(StopWatcher::new(scope.context()));
                 return runtime
-                    .detect_async_input_admitted(scope, admission, input, max_bytes, map_provider_magika_error)
+                    .detect_async_input_admitted(scope, admission, input, map_provider_magika_error)
                     .await;
             }
             ProviderPathRoute::TooLarge { requested } => {
@@ -1007,11 +1006,9 @@ impl MimeDetectorBackend for MagikaMimeDetector {
     /// Provider `open`, `stat`, and sample/read operations in the operation
     /// body, and the calling future waits for its business outcome on ordinary
     /// completion. Provider futures must be nonblocking and compatible with
-    /// the operation executor's reactor. A session or legacy-range read must
-    /// not synchronously wait for nested detection already accepted by the
-    /// same runtime when that detection needs the worker; release the
-    /// dependency or use an independent runtime. The `read_all` fallback
-    /// performs I/O before input dispatch to the worker. Runtime
+    /// the operation executor's reactor. Session and legacy-range sampling
+    /// finish before features are dispatched, and the `read_all` fallback
+    /// also performs I/O before input dispatch to the worker. Runtime
     /// cancellation may return its stop outcome before provider I/O completion
     /// is known or resources are released. This legacy hook has no parent
     /// operation scope and exposes no settlement observer.
@@ -1173,11 +1170,11 @@ fn owned_mime_type(mime_type: Option<&str>) -> Option<String> {
 pub(crate) fn map_magika_error(error: Error) -> MimeError {
     match error {
         Error::IOError(error) => {
+            #[cfg(test)]
             if crate::internal::async_sample_bridge::is_closed_error(&error) {
-                MimeError::detector_backend("magika", "provider inference stopped")
-            } else {
-                MimeError::Io(error)
+                return MimeError::detector_backend("magika", "provider inference stopped");
             }
+            MimeError::Io(error)
         }
         error => MimeError::detector_backend("magika", error.to_string()),
     }

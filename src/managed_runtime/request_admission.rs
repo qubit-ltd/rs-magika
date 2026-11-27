@@ -299,7 +299,7 @@ impl RequestAdmission {
         input: WorkerInput,
         sender: &std::sync::mpsc::SyncSender<Job>,
     ) -> Result<Arc<TaskState>, RejectedJob> {
-        let driver_required = matches!(&input, WorkerInput::Bridge(..));
+        #[cfg(test)]
         if let WorkerInput::Bridge(bridge, _, _) = &input {
             self.state.attach_bridge(Arc::downgrade(bridge));
         }
@@ -316,7 +316,8 @@ impl RequestAdmission {
                 owner
             }
         };
-        if driver_required {
+        #[cfg(test)]
+        if matches!(&input, WorkerInput::Bridge(..)) {
             owner.require_driver();
         }
         let job = Job {
@@ -353,6 +354,7 @@ impl RequestAdmission {
     /// The task state completed with the rejection error.
     pub(super) fn settle_rejected_job(rejected: RejectedJob) -> Arc<TaskState> {
         let Job { input, state, owner } = rejected.job;
+        #[cfg(test)]
         if let WorkerInput::Bridge(bridge, _, _) = &input {
             bridge.close();
         }

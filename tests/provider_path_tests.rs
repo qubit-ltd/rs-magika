@@ -49,6 +49,7 @@ use crate::support::wait_for_stage;
 
 const PYTHON: &[u8] = b"#!/usr/bin/env python3\nprint('hello')\n";
 
+/// Releases a provider gate during unwinding to keep failed tests bounded.
 struct ReleaseProviderGateOnDrop(Arc<AsyncProviderGate>);
 
 impl Drop for ReleaseProviderGateOnDrop {
@@ -1008,18 +1009,8 @@ fn test_managed_guide_reuses_detector_for_two_requests() {
     );
 }
 
-/// Releases a provider gate during unwinding so a failed assertion cannot
-/// leave the managed runtime worker blocked in test I/O.
-struct ReleaseGateOnDrop(Arc<AsyncProviderGate>);
-
-impl Drop for ReleaseGateOnDrop {
-    fn drop(&mut self) {
-        self.0.release();
-    }
-}
-
 #[test]
-fn test_slow_provider_blocks_shared_worker_order() {
+fn test_slow_provider_and_ready_inference_both_settle() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let config = qubit_mime::MimeConfig::default();
@@ -1037,7 +1028,7 @@ fn test_slow_provider_blocks_shared_worker_order() {
     );
 
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
-    let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
     let first_provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_random_access()
         .with_async_gate(Arc::clone(&gate));
@@ -1047,7 +1038,7 @@ fn test_slow_provider_blocks_shared_worker_order() {
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
             first_detector
-                .detect_async_provider_path_managed(&scope, &first_fs, &path("/hol/first.py"), 4096)
+                .detect_async_provider_path_managed(&scope, &first_fs, &path("/sampling/first.py"), 4096)
                 .await
         })
         .unwrap();
@@ -1058,50 +1049,30 @@ fn test_slow_provider_blocks_shared_worker_order() {
     let second_bytes = PYTHON.to_vec();
     assert!(4096 + second_bytes.len() <= runtime_budget);
     let second_detector = Arc::clone(&detector);
-    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
     let mut second = service
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
-            let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, second_bytes));
-            std::future::poll_fn(|context| match inference.as_mut().poll(context) {
-                Poll::Ready(result) => Poll::Ready(result),
-                Poll::Pending => {
-                    admitted_tx.send(()).expect("test receiver remains alive");
-                    Poll::Pending
-                }
-            })
-            .await
+            second_detector.detect_bytes_managed(&scope, second_bytes).await
         })
         .unwrap();
-    admitted_rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("second owned-byte request should be admitted and queued");
-    let snapshot = runtime.snapshot();
+    let second_outcome = run_until(second.wait_outcome(), Duration::from_secs(10))
+        .expect("ready inference should finish while the Provider read is pending");
+    let second_settlement = run_until(second.wait_settlement(), Duration::from_secs(5))
+        .expect("ready inference should release independently of the Provider");
+    assert!(!gate.is_released());
     assert_eq!(
-        1, snapshot.worker_running,
-        "the first worker owns the gated provider read"
-    );
-    assert_eq!(
-        1, snapshot.admitted_not_started,
-        "the second admitted request waits for the worker"
+        4096,
+        runtime.snapshot().reserved_bytes,
+        "the pending Provider keeps its reservation after the other request settles"
     );
 
-    // The notification above is emitted only after detect_bytes_managed was
-    // polled; that call reserves runtime capacity and dispatches before it
-    // waits for the shared worker. Now explicitly observe Pending at the
-    // operation result boundary while the first provider read is gated.
-    let mut second_result = Box::pin(second.wait_outcome());
-    let observed = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(second_result.as_mut().poll(context))
-    }));
-    assert!(observed.is_pending());
-    drop(second_result);
+    let drain = runtime.shutdown_blocking(ShutdownMode::Drain, Duration::ZERO);
+    assert!(!drain.worker_stopped, "drain must wait for the pending Provider");
+    assert!(runtime.snapshot().admission_closed);
 
     gate.release();
     let first_outcome = run_ready(first.wait_outcome());
     let first_settlement = run_ready(first.wait_settlement());
-    let second_outcome = run_ready(second.wait_outcome());
-    let second_settlement = run_ready(second.wait_settlement());
     assert!(matches!(
         first_outcome,
         Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
@@ -1140,7 +1111,7 @@ fn slow_provider_latency_sample(
     delay: Duration,
 ) -> (Duration, Duration) {
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
-    let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
     let provider = ProviderFileSystemSpi::new(PYTHON.to_vec())
         .with_random_access()
         .with_async_gate(Arc::clone(&gate));
@@ -1256,21 +1227,21 @@ fn test_slow_provider_mixed_latency() {
 }
 
 #[test]
-fn test_shared_runtime_provider_session_head_of_line_cancellation() {
-    test_shared_runtime_provider_head_of_line_cancellation_for_route(true);
+fn test_shared_runtime_provider_session_sampling_isolation_and_cancellation() {
+    test_shared_runtime_provider_sampling_isolation_and_cancellation_for_route(true);
 }
 
 #[test]
-fn test_shared_runtime_provider_legacy_range_head_of_line_cancellation() {
-    test_shared_runtime_provider_head_of_line_cancellation_for_route(false);
+fn test_shared_runtime_provider_legacy_range_sampling_isolation_and_cancellation() {
+    test_shared_runtime_provider_sampling_isolation_and_cancellation_for_route(false);
 }
 
-fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: bool) {
+fn test_shared_runtime_provider_sampling_isolation_and_cancellation_for_route(session: bool) {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let gate = AsyncProviderGate::new(AsyncProviderGatePoint::Read);
-    let _release_gate = ReleaseGateOnDrop(Arc::clone(&gate));
+    let _release_gate = ReleaseProviderGateOnDrop(Arc::clone(&gate));
     let provider = if session {
         ProviderFileSystemSpi::new(PYTHON.to_vec()).with_random_access()
     } else {
@@ -1285,64 +1256,40 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
             body_detector
-                .detect_async_provider_path_managed(&scope, &file_system, &path("/hol/cancelled.py"), 4096)
+                .detect_async_provider_path_managed(&scope, &file_system, &path("/sampling/cancelled.py"), 4096)
                 .await
         })
         .unwrap();
     gate.wait_until_entered(Duration::from_secs(30));
     let first_observer = first.observer();
-    let first_running_snapshot = detector.runtime_snapshot();
+    let first_reserved_bytes = detector.runtime_snapshot().reserved_bytes;
+    assert_eq!(4096, first_reserved_bytes);
     let bytes = PYTHON.to_vec();
-    let second_bytes_len = bytes.len();
     assert!(4096 + bytes.len() <= qubit_mime::MimeConfig::default().max_buffer_size());
     let second_detector = Arc::clone(&detector);
-    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
-    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
     let mut second = service
         .as_async()
         .try_submit(OperationOptions::default(), move |scope| async move {
-            let mut inference = Box::pin(second_detector.detect_bytes_managed(&scope, bytes));
-            let result = std::future::poll_fn(|context| match inference.as_mut().poll(context) {
-                Poll::Ready(result) => {
-                    let _ = admitted_tx.send("completed".to_owned());
-                    Poll::Ready(result)
-                }
-                Poll::Pending => {
-                    let _ = admitted_tx.send("pending".to_owned());
-                    Poll::Pending
-                }
-            })
-            .await;
-            let _ = completed_tx.send(());
-            result
+            second_detector.detect_bytes_managed(&scope, bytes).await
         })
         .unwrap();
-    let admission_state = admitted_rx.recv_timeout(Duration::from_secs(30));
-    if let Ok(state) = admission_state.as_ref() {
-        assert_eq!(state, "pending", "second owned-byte request ended before queueing");
-    } else {
-        panic!(
-            "second owned-byte request body ended before its queue handshake: {admission_state:?}; outcome={:?}",
-            run_ready(second.wait_outcome())
-        );
-    }
+    let second_result = run_until(second.wait_outcome(), Duration::from_secs(10))
+        .expect("ready inference should finish while the Provider read is pending");
+    let second_settlement = run_until(second.wait_settlement(), Duration::from_secs(5))
+        .expect("ready inference should release independently of the Provider");
+    assert!(matches!(
+        second_result,
+        Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
+    ));
+    assert!(second_settlement.all_released());
     assert!(
-        !gate.is_released(),
-        "the first Provider read remains gated after second admission"
+        !gate.is_released() && !gate.is_wait_dropped(),
+        "ready inference must settle before the first Provider read is released or cancelled"
     );
-    let second_admitted_snapshot = detector.runtime_snapshot();
     assert_eq!(
-        first_running_snapshot.reserved_bytes + second_bytes_len,
-        second_admitted_snapshot.reserved_bytes,
-        "the queued second request should hold its own runtime byte reservation: {second_admitted_snapshot:?}"
-    );
-    // Observe completion through a synchronized channel with a finite timeout
-    // while the provider gate remains closed. This does not poll in a loop or
-    // sleep; no observer thread is spawned, so unwinding cannot strand one.
-    let completion_while_gated = completed_rx.recv_timeout(Duration::from_millis(200)).is_ok();
-    assert!(
-        !gate.is_released(),
-        "the provider gate stays closed for the full bounded observation"
+        first_reserved_bytes,
+        detector.runtime_snapshot().reserved_bytes,
+        "only the first request's reservation should remain"
     );
 
     let _ = first.request_stop(StopReason::UserCancelled);
@@ -1371,24 +1318,7 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
     let retained_snapshot = detector.runtime_snapshot();
     gate.wait_until_wait_dropped(Duration::from_secs(5));
 
-    // Releasing the read lets the second owned-byte request progress.
     gate.release();
-    let second_result = run_ready(second.wait_outcome());
-    let second_settlement = run_ready(second.wait_settlement());
-    assert!(matches!(
-        second_result,
-        Ok(qubit_operation::OperationOutcome::Succeeded(Some(ref mime))) if mime == "text/x-python"
-    ));
-    assert!(second_settlement.all_released());
-    assert!(
-        !completion_while_gated,
-        "the second job must remain incomplete during the bounded closed-gate observation"
-    );
-    let after_second_release = detector.runtime_snapshot();
-    assert_eq!(
-        first_running_snapshot.reserved_bytes, after_second_release.reserved_bytes,
-        "the second request's runtime byte reservation should be reclaimed while the cancelled first request remains retained: {after_second_release:?}"
-    );
     if first_settlement.is_none() {
         first_settlement = run_until(first_observer.wait_settlement(), Duration::from_secs(2)).ok();
     }
@@ -1426,10 +1356,6 @@ fn test_shared_runtime_provider_head_of_line_cancellation_for_route(session: boo
     assert!(
         gate.is_wait_dropped(),
         "stop must be observable independently of Provider resource settlement"
-    );
-    assert!(
-        gate.is_released(),
-        "controlled Provider I/O is released before the second request settles"
     );
 }
 
@@ -1680,7 +1606,7 @@ fn test_cancel_after_unsupported_open_prevents_later_stat_and_fallback_io() {
 }
 
 #[test]
-fn test_pending_provider_read_keeps_managed_release_pending_after_bridge_close() {
+fn test_cancelled_provider_read_preserves_unconfirmed_release() {
     let detector = Arc::new(qubit_magika::MagikaMimeDetector::new().expect("bundled ONNX Runtime should initialize"));
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(qubit_operation::GroupOptions { capacity: 4 }).unwrap();
@@ -4103,12 +4029,12 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
     }
     let gate_was_entered = gate.is_entered();
     let observer = operation.observer();
-    let mut before_bridge = Box::pin(observer.wait_settlement());
-    let before_bridge_state = run_ready(std::future::poll_fn(|context| {
-        Poll::Ready(before_bridge.as_mut().poll(context))
+    let mut before_cancel = Box::pin(observer.wait_settlement());
+    let before_cancel_state = run_ready(std::future::poll_fn(|context| {
+        Poll::Ready(before_cancel.as_mut().poll(context))
     }));
-    drop(before_bridge);
-    let observer_was_pending_before_bridge = matches!(before_bridge_state, Poll::Pending);
+    drop(before_cancel);
+    let settlement_was_pending_before_cancel = matches!(before_cancel_state, Poll::Pending);
 
     let shutdown_detector = Arc::clone(&detector);
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
@@ -4117,19 +4043,19 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         let _ = shutdown_tx.send(report);
     });
     let shutdown_before_gate_release = shutdown_rx.recv_timeout(Duration::from_secs(5)).ok();
-    let bridge_outcome_before_gate_release = run_until(operation.wait_outcome(), Duration::from_secs(5));
+    let outcome_before_gate_release = run_until(operation.wait_outcome(), Duration::from_secs(5));
     let shutdown_returned_before_gate_release = shutdown_before_gate_release.is_some();
-    let bridge_returned_before_gate_release = bridge_outcome_before_gate_release.is_ok();
-    let cancelled_bridge_exited_while_pending =
-        shutdown_returned_before_gate_release && bridge_returned_before_gate_release;
-    if !cancelled_bridge_exited_while_pending {
+    let operation_returned_before_gate_release = outcome_before_gate_release.is_ok();
+    let cancel_completed_while_io_pending =
+        shutdown_returned_before_gate_release && operation_returned_before_gate_release;
+    if !cancel_completed_while_io_pending {
         gate.release();
     }
     let shutdown_report = match shutdown_before_gate_release {
         Some(report) => Some(report),
         None => shutdown_rx.recv_timeout(Duration::from_secs(3)).ok(),
     };
-    let operation_outcome = match bridge_outcome_before_gate_release {
+    let operation_outcome = match outcome_before_gate_release {
         Ok(outcome) => Ok(outcome),
         Err(()) => run_until(operation.wait_outcome(), Duration::from_secs(3)),
     };
@@ -4139,7 +4065,7 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
         Duration::from_secs(5),
     );
     drop(detector);
-    let settlement_after_last_runtime_drop = if cancelled_bridge_exited_while_pending {
+    let settlement_after_last_runtime_drop = if cancel_completed_while_io_pending {
         run_until(observer.wait_settlement(), Duration::from_secs(2))
     } else {
         Err(())
@@ -4153,13 +4079,13 @@ fn test_pending_provider_io_is_not_released_after_last_runtime_drop() {
     if !gate_was_entered {
         failures.push("Provider read did not reach Pending before runtime Cancel".to_owned());
     }
-    if !observer_was_pending_before_bridge {
-        failures.push("pre-bridge observer was Ready while Provider I/O was Pending".to_owned());
+    if !settlement_was_pending_before_cancel {
+        failures.push("settlement observer before cancellation was Ready while Provider I/O was Pending".to_owned());
     }
-    if !cancelled_bridge_exited_while_pending {
+    if !cancel_completed_while_io_pending {
         failures.push(format!(
-            "runtime-only Cancel did not finish before gate release; shutdown_returned={}, bridge_returned={}",
-            shutdown_returned_before_gate_release, bridge_returned_before_gate_release
+            "runtime-only Cancel did not finish before gate release; shutdown_returned={}, operation_returned={}",
+            shutdown_returned_before_gate_release, operation_returned_before_gate_release
         ));
     }
     if !shutdown_report.as_ref().is_some_and(|report| report.worker_stopped) {

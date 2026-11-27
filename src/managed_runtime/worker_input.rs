@@ -7,12 +7,14 @@
 // =============================================================================
 //! Input variants submitted to the managed inference worker.
 
+#[cfg(test)]
 use std::sync::Arc;
 
 use magika::Error as MagikaError;
 use magika::Features;
 use qubit_mime::MimeError;
 
+#[cfg(test)]
 use crate::internal::async_sample_bridge::AsyncSampleBridge;
 
 /// Owned byte payload moved through the inference worker.
@@ -99,7 +101,8 @@ pub(crate) enum WorkerInput {
         /// Bounded payload retained while sampling and inference run.
         WorkerBytes,
     ),
-    /// Async provider input accessed through a capacity-one sampling bridge.
+    /// Test input that exercises the isolated sampling bridge.
+    #[cfg(test)]
     Bridge(
         /// Bridge used to transfer provider ranges to the worker.
         Arc<AsyncSampleBridge>,
@@ -107,6 +110,11 @@ pub(crate) enum WorkerInput {
         usize,
         /// Route-specific Magika error conversion.
         fn(MagikaError) -> MimeError,
+    ),
+    /// MIME result already determined by Magika's sampling rules.
+    Ruled(
+        /// MIME mapping, or `None` when the rules identify an unmapped type.
+        Option<String>,
     ),
     /// Extracted features retained until session inference finishes.
     Features(

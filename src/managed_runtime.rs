@@ -5,12 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Bounded asynchronous sampling and inference on one session-owning worker.
+//! Bounded asynchronous sampling with inference on one session-owning worker.
 
 pub(super) mod admission_gate;
+#[cfg(test)]
 pub(super) mod bridge_sync_input;
 pub(super) mod byte_budget;
 pub(super) mod byte_permit;
+#[cfg(test)]
 pub(super) mod drive_event;
 pub(super) mod inference_future;
 pub(super) mod job;
@@ -18,6 +20,7 @@ mod managed_inference_runtime;
 mod managed_inference_shutdown_report;
 mod managed_inference_snapshot;
 pub(super) mod provider_driver_guard;
+#[cfg(test)]
 pub(super) mod provider_read_event;
 pub(super) mod request_admission;
 pub(crate) mod request_admission_handoff;

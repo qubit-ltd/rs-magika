@@ -365,6 +365,7 @@ pub(crate) fn invalid_input(message: &'static str) -> io::Error {
 pub(crate) fn map_provider_magika_error(error: Error) -> MimeError {
     match error {
         Error::IOError(error) => {
+            #[cfg(test)]
             if crate::internal::async_sample_bridge::is_closed_error(&error) {
                 return MimeError::detector_backend("magika", "provider inference stopped");
             }

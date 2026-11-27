@@ -69,19 +69,11 @@ use crate::internal::AsyncSessionReadOptions;
 
 const ID: &str = "magika-session-adapter-test";
 
-struct ReleaseProviderWorkerGate(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+struct ReleaseProviderReadGate(Arc<TestAsyncReadGate>);
 
-impl ReleaseProviderWorkerGate {
-    fn release(&self) {
-        let (lock, changed) = &*self.0;
-        *lock.lock().unwrap_or_else(|error| error.into_inner()) = true;
-        changed.notify_all();
-    }
-}
-
-impl Drop for ReleaseProviderWorkerGate {
+impl Drop for ReleaseProviderReadGate {
     fn drop(&mut self) {
-        self.release();
+        self.0.release();
     }
 }
 
@@ -768,304 +760,91 @@ fn test_async_session_stops_between_ready_short_reads() {
 }
 
 #[test]
-fn test_managed_provider_session_bridge_transfers_ranges_and_keeps_executor_live() {
+fn test_managed_provider_session_samples_in_bounded_ranges() {
     let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
     let service = supervisor.group(GroupOptions { capacity: 2 }).unwrap();
     let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2));
-    let expected = b"sample".to_vec();
-    let engine = Box::new(move |bytes: Vec<u8>| {
-        assert_eq!(expected, bytes);
-        Ok(Some("application/x-fixture".to_owned()))
-    });
-    let max_in_flight = MimeConfig::default().max_buffer_size();
-    let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
-        supervisor.clone(),
-        max_in_flight,
-        engine,
-        Box::new(|| {}),
-    ));
-    let detector = Arc::new(
-        crate::MagikaMimeDetector::builder()
-            .managed_runtime(Arc::clone(&runtime))
-            .build()
-            .unwrap(),
-    );
-    let heartbeats = Arc::new(AtomicUsize::new(0));
-    let body_detector = Arc::clone(&detector);
-    let body_heartbeats = Arc::clone(&heartbeats);
-    let mut handle = service
-        .as_async()
-        .try_submit(OperationOptions::default(), move |scope| async move {
-            let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
-            let path = Path::parse("/bridge/sample").unwrap();
-            let mut detection =
-                Box::pin(body_detector.detect_async_provider_path_managed(&scope, &file_system, &path, 6));
-            let result = std::future::poll_fn(|cx| {
-                body_heartbeats.fetch_add(1, Ordering::SeqCst);
-                cx.waker().wake_by_ref();
-                detection.as_mut().poll(cx)
-            })
-            .await
-            .unwrap();
-            assert_eq!(Some("application/x-fixture".to_owned()), result);
-            Ok::<(), ()>(())
-        })
-        .unwrap();
-    assert!(matches!(
-        block_on(handle.wait_outcome()).unwrap(),
-        qubit_operation::OperationOutcome::Succeeded(())
-    ));
-    assert!(heartbeats.load(Ordering::SeqCst) > 1);
-    let report = detector.shutdown_blocking(qubit_operation::ShutdownMode::Drain, Duration::from_secs(30));
-    assert!(report.worker_stopped);
-}
-
-#[test]
-fn test_legacy_async_provider_bridge_samples_on_worker_without_a_parent_scope() {
-    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
-    let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2));
-    let expected = b"sample".to_vec();
-    let (engine_entered_tx, engine_entered_rx) = std::sync::mpsc::channel();
-    let engine_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    let worker_gate = Arc::clone(&engine_gate);
-    let engine = Box::new(move |bytes: Vec<u8>| {
-        assert_eq!(expected, bytes);
-        let _ = engine_entered_tx.send(());
-        let (released, changed) = &*worker_gate;
-        let mut released = released.lock().unwrap();
-        while !*released {
-            released = changed.wait(released).unwrap();
-        }
-        Ok(Some("application/x-fixture".to_owned()))
-    });
+    let observations = Arc::clone(&fixture.reads);
     let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
         supervisor,
         MimeConfig::default().max_buffer_size(),
-        engine,
+        Box::new(|_| panic!("a short text sample needs no model inference")),
         Box::new(|| {}),
     ));
     let detector = crate::MagikaMimeDetector::builder()
         .managed_runtime(runtime)
         .build()
         .unwrap();
+    let mut handle = service
+        .as_async()
+        .try_submit(OperationOptions::default(), move |scope| async move {
+            let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
+            detector
+                .detect_async_provider_path_managed(&scope, &file_system, &Path::parse("/sample").unwrap(), 12)
+                .await
+        })
+        .unwrap();
+    let outcome = crate::tests::internal::bridge_wait::poll_before(
+        handle.wait_outcome(),
+        "managed Provider sampling outcome",
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        qubit_operation::OperationOutcome::Succeeded(Some(ref mime)) if mime == "text/plain"
+    ));
+    let reads = observations.lock().unwrap();
+    assert!(
+        reads
+            .iter()
+            .all(|&(offset, length)| { (1..=2).contains(&length) && offset + length as u64 <= 6 })
+    );
+    assert!((0..6).all(|offset| reads.iter().any(|&(start, _)| start == offset)));
+}
+
+#[test]
+fn test_legacy_async_provider_sampling_yields_until_read_is_ready() {
+    let supervisor = OperationManager::new(ManagerOptions::default()).unwrap();
+    let gate = Arc::new(TestAsyncReadGate::new());
+    let cleanup = ReleaseProviderReadGate(Arc::clone(&gate));
+    let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2)).with_async_read_gate(Arc::clone(&gate));
+    let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
+        supervisor,
+        MimeConfig::default().max_buffer_size(),
+        Box::new(|_| panic!("a short text sample needs no model inference")),
+        Box::new(|| {}),
+    ));
+    let detector = crate::MagikaMimeDetector::builder()
+        .managed_runtime(Arc::clone(&runtime))
+        .build()
+        .unwrap();
     let file_system = AsyncFileSystem::from_spi(fixture).unwrap();
-    let path = Path::parse("/bridge/legacy").unwrap();
-
-    #[derive(Debug, PartialEq)]
-    enum WorkerEvent {
-        DetectionPending,
-        Heartbeat(usize),
-        ReadyBeforePending,
-        CompletionPending,
-        CompletionNotified,
-        ReadyBeforeCompletionNotification,
-    }
-    let (events_tx, events_rx) = std::sync::mpsc::channel();
-    let (active_permit_tx, active_permit_rx) = std::sync::mpsc::channel();
-    let active_permit_tx = std::sync::Mutex::new(Some(active_permit_tx));
-    let active_wakes = Arc::new(AtomicUsize::new(0));
-    let worker_active_wakes = Arc::clone(&active_wakes);
-    let completion_wakes = Arc::new(AtomicUsize::new(0));
-    let worker_completion_wakes = Arc::clone(&completion_wakes);
-
-    let worker = std::thread::spawn(move || {
-        struct ActiveWake {
-            count: Arc<AtomicUsize>,
-            driver: std::task::Waker,
-        }
-        impl Wake for ActiveWake {
-            fn wake(self: Arc<Self>) {
-                self.wake_by_ref();
-            }
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.count.fetch_add(1, Ordering::SeqCst);
-                self.driver.wake_by_ref();
-            }
-        }
-        struct CompletionWake {
-            count: Arc<AtomicUsize>,
-            events: std::sync::mpsc::Sender<WorkerEvent>,
-            driver: std::task::Waker,
-        }
-        impl Wake for CompletionWake {
-            fn wake(self: Arc<Self>) {
-                self.wake_by_ref();
-            }
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.count.fetch_add(1, Ordering::SeqCst);
-                let _ = self.events.send(WorkerEvent::CompletionNotified);
-                self.driver.wake_by_ref();
-            }
-        }
-        #[derive(Clone, Copy)]
-        enum DriverPhase {
-            FirstPoll,
-            AwaitHeartbeatPoll,
-            AwaitCompletion,
-        }
-
-        let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
-            &detector,
-            &file_system,
-            &path,
-            6,
-        ));
-        let mut phase = DriverPhase::FirstPoll;
-        let mut completion_waker = None;
-        let mut heartbeats = 0usize;
-        block_on(std::future::poll_fn(|driver_cx| match phase {
-            DriverPhase::FirstPoll => {
-                let mut initial_cx = Context::from_waker(std::task::Waker::noop());
-                match detection.as_mut().poll(&mut initial_cx) {
-                    Poll::Ready(result) => {
-                        let _ = events_tx.send(WorkerEvent::ReadyBeforePending);
-                        Poll::Ready((result, heartbeats))
-                    }
-                    Poll::Pending => {
-                        let _ = events_tx.send(WorkerEvent::DetectionPending);
-                        match active_permit_rx.recv_timeout(Duration::from_secs(5)) {
-                            Ok(()) => {
-                                phase = DriverPhase::AwaitHeartbeatPoll;
-                                let active_waker = std::task::Waker::from(Arc::new(ActiveWake {
-                                    count: Arc::clone(&worker_active_wakes),
-                                    driver: driver_cx.waker().clone(),
-                                }));
-                                active_waker.wake_by_ref();
-                                Poll::Pending
-                            }
-                            Err(error) => panic!("active-wake phase permit unavailable: {error}"),
-                        }
-                    }
-                }
-            }
-            DriverPhase::AwaitHeartbeatPoll => {
-                heartbeats += 1;
-                let _ = events_tx.send(WorkerEvent::Heartbeat(worker_active_wakes.load(Ordering::SeqCst)));
-                let waker = completion_waker.get_or_insert_with(|| {
-                    std::task::Waker::from(Arc::new(CompletionWake {
-                        count: Arc::clone(&worker_completion_wakes),
-                        events: events_tx.clone(),
-                        driver: driver_cx.waker().clone(),
-                    }))
-                });
-                let mut completion_cx = Context::from_waker(waker);
-                match detection.as_mut().poll(&mut completion_cx) {
-                    Poll::Pending => {
-                        phase = DriverPhase::AwaitCompletion;
-                        let _ = events_tx.send(WorkerEvent::CompletionPending);
-                        Poll::Pending
-                    }
-                    Poll::Ready(result) => {
-                        let _ = events_tx.send(WorkerEvent::ReadyBeforeCompletionNotification);
-                        Poll::Ready((result, heartbeats))
-                    }
-                }
-            }
-            DriverPhase::AwaitCompletion => {
-                let waker = completion_waker.as_ref().expect("completion waker was registered");
-                let mut completion_cx = Context::from_waker(waker);
-                match detection.as_mut().poll(&mut completion_cx) {
-                    Poll::Ready(result) => Poll::Ready((result, heartbeats)),
-                    Poll::Pending => Poll::Pending,
-                }
-            }
-        }))
-    });
-
-    let release_gate = || {
-        let (released, changed) = &*engine_gate;
-        *released.lock().unwrap() = true;
-        changed.notify_all();
-    };
-    let cleanup = || {
-        drop(active_permit_tx.lock().unwrap().take());
-        release_gate();
-    };
-
-    let first_poll = crate::tests::internal::bridge_wait::wait_for_stage(
-        &events_rx,
-        &WorkerEvent::DetectionPending,
-        "legacy detection first Pending",
+    let path = Path::parse("/legacy-sample").unwrap();
+    let mut detection = Box::pin(MimeDetectorBackend::guess_from_async_provider_path(
+        &detector,
+        &file_system,
+        &path,
+        12,
+    ));
+    assert!(
+        detection
+            .as_mut()
+            .poll(&mut Context::from_waker(std::task::Waker::noop()))
+            .is_pending()
+    );
+    gate.wait_until_started(Duration::from_secs(5));
+    assert_eq!(0, runtime.snapshot().worker_running);
+    assert_eq!(12, runtime.snapshot().reserved_bytes);
+    drop(cleanup);
+    let candidates = crate::tests::internal::bridge_wait::poll_before(
+        detection,
+        "legacy Provider sampling completion",
         Duration::from_secs(5),
-        cleanup,
-    );
-    if let Err(stage) = first_poll {
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-    if engine_entered_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-        cleanup();
-        let stage = "timed out waiting for synthetic inference to enter its gate";
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-    if active_permit_tx.lock().unwrap().as_ref().unwrap().send(()).is_err() {
-        cleanup();
-        let stage = "worker disconnected before active-wake phase permit";
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-    let heartbeat = crate::tests::internal::bridge_wait::wait_for_stage(
-        &events_rx,
-        &WorkerEvent::Heartbeat(1),
-        "driver poll after one active wake",
-        Duration::from_secs(5),
-        cleanup,
-    );
-    if let Err(stage) = heartbeat {
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-    let completion_pending = crate::tests::internal::bridge_wait::wait_for_stage(
-        &events_rx,
-        &WorkerEvent::CompletionPending,
-        "completion-stage poll pending behind closed inference gate",
-        Duration::from_secs(5),
-        cleanup,
-    );
-    if let Err(stage) = completion_pending {
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-
-    let completion_wakes_before_release = completion_wakes.load(Ordering::SeqCst);
-    release_gate();
-    let completion_notification = crate::tests::internal::bridge_wait::wait_for_stage(
-        &events_rx,
-        &WorkerEvent::CompletionNotified,
-        "completion-stage waker notification",
-        Duration::from_secs(5),
-        cleanup,
-    );
-    if let Err(stage) = completion_notification {
-        let _ = crate::tests::internal::bridge_wait::join_before(worker, &stage, Duration::from_secs(5));
-        panic!("{stage}");
-    }
-    let (detection_result, heartbeats) = crate::tests::internal::bridge_wait::join_before(
-        worker,
-        "legacy provider bridge completion",
-        Duration::from_secs(5),
-    );
-    let candidates = detection_result.unwrap().0;
-    assert_eq!(
-        completion_wakes_before_release, 0,
-        "startup notification alone cannot satisfy completion observation"
-    );
-    assert_eq!(
-        completion_wakes.load(Ordering::SeqCst),
-        1,
-        "completion stage requires its registered waker notification"
-    );
-    assert_eq!(vec!["application/x-fixture"], candidates);
-    assert_eq!(
-        heartbeats, 1,
-        "the active wake must drive exactly one subsequent heartbeat poll"
-    );
-    assert_eq!(
-        active_wakes.load(Ordering::SeqCst),
-        1,
-        "only the first Pending branch may actively wake the driver"
-    );
+    )
+    .unwrap()
+    .0;
+    assert_eq!(vec!["text/plain"], candidates);
 }
 
 #[test]
@@ -1162,23 +941,15 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
     let service = supervisor.group(GroupOptions { capacity: 2 }).unwrap();
     let provider_gate = Arc::new(TestAsyncReadGate::new());
     let fixture = Fixture::new(b"sample", FileSystemLimit::Maximum(2)).with_async_read_gate(Arc::clone(&provider_gate));
-    let (worker_held_tx, worker_held_rx) = std::sync::mpsc::channel();
-    let release_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    let after_business_gate = Arc::clone(&release_gate);
-    let engine = Box::new(|_bytes: Vec<u8>| Ok(Some("application/x-fixture".to_owned())));
+    let _release_read_gate = ReleaseProviderReadGate(Arc::clone(&provider_gate));
+    let worker_ran = Arc::new(AtomicBool::new(false));
+    let mark_worker_ran = Arc::clone(&worker_ran);
     let max_in_flight = MimeConfig::default().max_buffer_size();
     let runtime = Arc::new(crate::managed_runtime::ManagedInferenceRuntime::with_engine(
         supervisor.clone(),
         max_in_flight,
-        engine,
-        Box::new(move || {
-            worker_held_tx.send(()).unwrap();
-            let (lock, ready) = &*after_business_gate;
-            let mut released = lock.lock().unwrap();
-            while !*released {
-                released = ready.wait(released).unwrap();
-            }
-        }),
+        Box::new(|_| panic!("cancelled sampling must not dispatch inference")),
+        Box::new(move || mark_worker_ran.store(true, Ordering::SeqCst)),
     ));
     let detector = Arc::new(
         crate::MagikaMimeDetector::builder()
@@ -1186,7 +957,6 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
             .build()
             .unwrap(),
     );
-    let release_gate_cleanup = ReleaseProviderWorkerGate(Arc::clone(&release_gate));
     let body_detector = Arc::clone(&detector);
     let body_gate = Arc::clone(&provider_gate);
     let mut handle = service
@@ -1218,12 +988,19 @@ fn test_dropping_managed_provider_driver_keeps_release_pending_without_io_comple
         })
         .unwrap();
 
-    worker_held_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-    let _terminal = block_on(handle.wait_outcome()).unwrap();
-    release_gate_cleanup.release();
+    provider_gate.wait_until_started(Duration::from_secs(5));
+    let terminal = crate::tests::internal::bridge_wait::poll_before(
+        handle.wait_outcome(),
+        "dropped Provider request body outcome",
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(matches!(terminal, qubit_operation::OperationOutcome::Succeeded(())));
     let report = detector.shutdown_blocking(qubit_operation::ShutdownMode::Cancel, Duration::from_millis(50));
     assert!(report.worker_stopped);
     assert!(report.admission.snapshot.service_resources != 0);
+    assert!(!worker_ran.load(Ordering::SeqCst));
+    assert_eq!(6, detector.runtime_snapshot().reserved_bytes);
 }
 
 #[test]

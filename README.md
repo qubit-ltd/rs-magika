@@ -128,19 +128,16 @@ sampling can call `MagikaMimeDetector::detect_async_provider_path_managed` or
 work to that scope so its report can track release separately from the
 business result. Create the runtime and detector at startup, pass the scope to
 each managed request, and drain the runtime during application shutdown.
-For provider paths, session and legacy-range routes have the worker issue sample
-requests and wait for the caller's future to perform each read. A slow range
-read can therefore occupy the shared worker and delay other requests. The
-`read_all` fallback reads the content before submitting the owned buffer to the
-worker. Managed calls run Provider `open`, `stat`, and sample reads in the
-operation body on the scope manager's executor; legacy hooks use the runtime's
-service-group executor. The caller waits for the operation outcome. Provider
-polls must be nonblocking and compatible with that executor's reactor. A
-session or legacy-range Provider read must not wait synchronously for nested
-detection already accepted by the same runtime when it needs that runtime's
-worker; release that dependency or use an independent runtime. `read_all` I/O
-finishes before worker dispatch. Dropping a request stops local polling; when native or remote I/O
-completion is unobservable, its capacity reservation remains in place. See the
+For provider paths, session and legacy-range reads finish sampling before the
+request enters the model queue. A pending range read can retain its admission
+and byte capacity without occupying the model worker. The `read_all` fallback
+reads the content before submitting the owned buffer.
+Managed calls run Provider `open`, `stat`, and sample reads in the operation
+body on the scope manager's executor; legacy hooks use the runtime's
+service-group executor. Provider polls must be nonblocking and compatible with
+that executor's reactor. Dropping a request stops local polling. When native or
+remote I/O completion is unobservable, its capacity reservation remains in
+place. See the
 [provider sampling and runtime guide](doc/user_guide.md#advanced-usage).
 The returned detection result is the business outcome. The scope observer
 reports settlement separately: a bounded wait may return `Pending(snapshot)`;
@@ -326,11 +323,9 @@ resource that uses range sampling is not rejected on length alone. Overflow
 discovered during `read_all` remains `MimeError::FileSystem`. Unknown and
 undefined Magika types return `Ok(None)`, allowing the selected
 `MimeDetectionPolicy` to apply filename fallback consistently.
-Provider-native asynchronous I/O is awaited by the calling future and can remain
-pending if the provider never completes it. For session and legacy-range
-routes, the worker requests samples and waits for the caller's future to perform
-each read during sampling; `read_all` reads the complete content before
-submitting its owned buffer. Legacy hooks have no parent-scope lifecycle
+Provider-native asynchronous I/O is awaited by the operation body. Session
+and legacy-range routes submit model work only after sampling completes;
+`read_all` reads the complete content before submitting its owned buffer. Legacy hooks have no parent-scope lifecycle
 observation; use managed APIs when scope tracking is required.
 
 ## Learn More

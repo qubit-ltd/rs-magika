@@ -506,30 +506,21 @@ handle does not cover media refinement. A high-level `detect_file` call using
 `PreferFilename` can return a unique filename match without inspecting the path
 or its type.
 
-One worker owns the Magika session and serializes worker sampling and inference.
-For asynchronous provider paths, the worker can wait for provider reads while
-sampling; that wait can delay other requests sharing the same runtime. This is
-a shared wait and failure domain. Applications that need delay isolation can
-use independent runtimes, at the cost of an additional Magika session per
-runtime.
-Managed Provider `open`, `stat`, and session/range sample reads are polled in
-the operation body by the scope manager's executor. Legacy hooks use the
-runtime service group's executor. The caller waits for the operation outcome;
-Provider polls must be nonblocking and compatible with that executor's reactor.
-Do not make a session or legacy-range read synchronously wait for nested
-detection already accepted by the same runtime when it needs the same worker:
-release that dependency or use an independent runtime. The `read_all` fallback
-performs I/O before dispatching its owned payload to the worker. These routes
-retain their cancellation and settlement differences: managed calls expose
-scope settlement separately, whereas legacy Provider hooks return their
-business result and may return early on runtime cancellation.
+One worker owns the Magika session and serializes model inference. For
+asynchronous Provider session and legacy-range routes, the operation body
+finishes sampling before submitting model work. Already prepared requests can
+use the worker while another request waits for Provider I/O. The waiting
+request still holds its admission and byte capacity.
+Managed Provider `open`, `stat`, and sample reads run on the scope manager's
+executor. Legacy hooks use the runtime service group's executor. Provider polls
+must be nonblocking and compatible with that executor's reactor. The
+`read_all` fallback performs I/O before dispatching its owned payload.
+Managed calls expose scope settlement separately. Legacy Provider hooks
+return their business result and may return early on runtime cancellation.
 Synchronous borrowed content, reader, and local-file entry points sample on the
 caller thread, then wait synchronously when model work is needed; repository
 rules can return without model work. Borrowed content is not rejected solely
-because its logical length exceeds `MimeConfig::max_buffer_size()`. Async
-provider routes cooperate with the worker through a capacity-one range bridge;
-the operation body asynchronously services Provider reads on its executor.
-The legacy
+because its logical length exceeds `MimeConfig::max_buffer_size()`. The legacy
 `guess_from_content_async` hook checks the detector's per-request owned-payload
 limit when first polled, reserves runtime request capacity and aggregate
 owned-payload byte capacity before copying the input, and runs sampling and
@@ -759,14 +750,14 @@ those provider calls. The `read_all` fallback transfers its buffer into the
 async dispatch path without an explicit second full-size clone. That path
 converts the owned `Vec` with `into_boxed_slice` before dispatching input to the
 worker; conversion may reallocate to trim unused capacity, so this is not a
-zero-allocation guarantee. Sampling and
-inference run on the session-owning worker; async provider reads are serviced
-by the operation future without blocking its executor.
+zero-allocation guarantee. The operation future awaits session or range
+sampling before submitting model work. Owned content and the `read_all` payload
+can be sampled by the worker.
 
-When no provider read is pending, dropping the request closes its sampling
-bridge and releases driver ownership. If a read has returned `Ready`, its I/O
-completion is known; capacity is released once the worker also finishes. This
-applies to both scope-managed and scope-less provider entry points.
+Dropping a request ends local sampling. If no provider read remains pending,
+capacity is released after all local users, including any dispatched model
+work, finish. If native I/O completion is unobservable, the reservation is
+retained. This applies to managed and legacy Provider entry points.
 
 The child business outcome is independent of resource release. Successful
 inference reports `Succeeded`; a worker error reports `Failed` while the

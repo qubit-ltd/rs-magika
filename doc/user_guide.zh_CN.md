@@ -408,17 +408,14 @@ Unix 打开阶段的保证。若打开后的句柄不是普通文件，检测会
 媒体细化是独立步骤，只适用于普通本地文件。目录和符号链接会跳过细化；使用 `Freedesktop` 时，若存在文件名候选则可以选中，使用
 `VerifyContent` 时则在没有内容的情况下返回 `None`。配置的 `MediaStreamClassifier::classify_file` 接收路径，并可能自行打开文件，因此内容检测所用的已校验句柄不覆盖媒体细化。
 高层 `detect_file` 使用 `PreferFilename` 且文件名只有一个候选时，可能直接返回文件名结果，不检查路径或类型。
-一个 worker 独占 Magika Session，并串行执行 worker 上的采样和推理。异步 Provider path 采样时，worker
-可能等待 Provider 读取；这会延迟共享同一 runtime 的其他请求，形成共同的等待和故障域。若应用需要隔离
-延迟，可以为调用方使用独立 runtime，但每个 runtime 都会额外占用一个 Magika Session。同步借用内容、reader 和本地
-文件入口在调用线程采样；需要模型处理时提交 worker 并同步等待，仓库规则命中时可以直接返回。
-Managed Provider 的 `open`、`stat` 和 session/范围样本读取由 scope manager 执行器在 operation body 中轮询；
-旧 hook 使用 runtime 服务组执行器。调用方等待 operation outcome。Provider poll 必须非阻塞且兼容该执行器的
-reactor。session 或旧范围读取不得同步等待同一 runtime 中已受理且仍需同一 worker 的嵌套检测；应解除依赖，
-或使用独立 runtime。`read_all` 回退会在 payload 派发给 worker 前完成 I/O。两种路由保留取消与结算差异：
-managed API 单独暴露 scope 结算，旧 Provider hook 返回业务结果，并可能在 runtime 取消时提前返回。
-借用内容不会仅因逻辑长度超过 `MimeConfig::max_buffer_size()` 而拒绝。异步 Provider route
-通过容量为 1 的范围读取 bridge 与 worker 协作：调用方 future 异步读取 Provider。旧
+一个 worker 独占 Magika Session，并串行执行模型推理。异步 Provider 的 session 和旧范围读取路由会
+在 operation body 中先完成采样，再提交模型工作。等待 Provider I/O 的请求仍占用准入和字节容量，
+其他已准备好的请求可以继续使用 worker。
+Managed Provider 的 `open`、`stat` 和样本读取由 scope manager 执行器轮询，旧 hook 使用 runtime 服务组
+执行器。Provider poll 必须非阻塞且兼容该执行器的 reactor。`read_all` 回退在派发 payload 前完成 I/O。
+Managed API 单独暴露 scope 结算，旧 Provider hook 返回业务结果，并可能在 runtime 取消时提前返回。
+同步借用内容、reader 和本地文件入口在调用线程采样。命中规则时可以直接返回，需要模型时提交 worker 并
+同步等待。借用内容不会仅因逻辑长度超过 `MimeConfig::max_buffer_size()` 而拒绝。旧
 `guess_from_content_async` hook 在首次轮询时检查 detector 的单请求 owned payload 上限，先预留
 runtime 请求容量和聚合 owned payload 字节容量，再复制输入，由 worker 采样和推理；future
 异步等待结果，且没有 parent scope。`detect_bytes_managed` 在追踪显式 scope 时执行相同的单请求
@@ -600,9 +597,9 @@ Provider I/O 或 worker 访问未确认结束时，容量继续保留。该行�
 [`test_legacy_async_hook_returns_cancel_result_while_provider_resources_remain_held`](../tests/provider_path_tests.rs)
 覆盖。迁移时，需要按 scope 观察接纳和资源状态的 async provider 调用应改为显式调用 managed API。
 
-如果丢弃请求时没有尚未完成的 Provider 范围读取，关闭采样 bridge 后即可结束 driver 所有权。
-若最后一次读取已经返回 `Ready`，I/O 完成状态可确认；worker 也完成后就会释放容量。显式
-managed 和 scope-less provider 入口都遵循此生命周期。
+丢弃请求会结束本地采样。若没有尚未完成的 Provider 读取，所有本地访问结束后即释放容量，包括
+已派发的模型工作。若无法观察原生 I/O 是否完成，则继续保留预留容量。Managed 和旧 Provider 入口
+都遵循此生命周期。
 
 子操作的业务结果与资源释放是两件事。推理成功记录为 `Succeeded`；worker 返回错误时记录
 `Failed`，调用方仍会收到原始错误。runtime 捕获推理 worker panic 后，也会将公开的 managed

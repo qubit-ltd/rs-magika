@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use crate::internal::AsyncProviderInput;
+#[cfg(test)]
 use crate::internal::async_sample_bridge::AsyncSampleDriver;
 use crate::managed_runtime::task_state::TaskState;
 
@@ -30,6 +32,7 @@ pub(super) struct ProviderDriverGuard<I> {
     /// Provider input borrowed by active read futures.
     pub(super) input: Option<I>,
     /// Bridge driver used to receive worker read requests.
+    #[cfg(test)]
     pub(super) driver: Option<AsyncSampleDriver>,
     /// Request lifecycle state notified when the driver completes.
     pub(super) state: Arc<TaskState>,
@@ -39,6 +42,31 @@ pub(super) struct ProviderDriverGuard<I> {
     pub(super) io_in_flight: Option<Arc<AtomicBool>>,
 }
 
+impl ProviderDriverGuard<AsyncProviderInput> {
+    /// Owns input during asynchronous feature extraction.
+    ///
+    /// # Parameters
+    ///
+    /// * `input` - Provider input with its budget and actual-I/O marker.
+    /// * `state` - Request whose sampling completion is reported upon drop.
+    ///
+    /// # Returns
+    ///
+    /// A guard that drops provider input before reporting sampling completion.
+    pub(super) fn new_sampling(input: AsyncProviderInput, state: Arc<TaskState>) -> Self {
+        let io_in_flight = input.io_in_flight();
+        Self {
+            input: Some(input),
+            #[cfg(test)]
+            driver: None,
+            state,
+            unconfirmed_io: AtomicBool::new(false),
+            io_in_flight: Some(io_in_flight),
+        }
+    }
+}
+
+#[cfg(test)]
 impl<I> ProviderDriverGuard<I> {
     /// Creates a guard for a provider input and its bridge driver.
     ///
@@ -119,6 +147,7 @@ impl<I> Drop for ProviderDriverGuard<I> {
         if input_drop.is_err() {
             self.unconfirmed_io.store(true, Ordering::Relaxed);
         }
+        #[cfg(test)]
         drop(self.driver.take());
         if self.unconfirmed_io.load(Ordering::Relaxed) {
             self.state.mark_unconfirmed_provider_io();
